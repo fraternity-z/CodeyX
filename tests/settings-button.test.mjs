@@ -1047,6 +1047,41 @@ test("saved update policy controls renderer polling and rejects badges when off"
   assert.equal(fixture.document.getElementById("codey-settings-button").getAttribute("data-codey-update-available"), null);
 });
 
+test("Releases without an uploaded installer keep the renderer polling", async () => {
+  const update = { currentVersion: "1.0.0", latestVersion: "2.0.0", updateAvailable: true };
+  const fixture = createStartupUpdateFixture(async path => {
+    if (path === "/backend/status") return { codeyUpdatePolicy: "stable", availableUpdate: update };
+    if (path === "/backend/health") return { status: "ok" };
+    if (path === "/api/check_for_updates") return { ...update, selectedAsset: { fileName: "setup.exe" } };
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise(setImmediate);
+  const timer = fixture.activeTimers().find(entry => entry.delay === 30 * 60 * 1000);
+  assert.ok(timer);
+  timer.cleared = true;
+  timer.callback();
+  await new Promise(setImmediate);
+  assert.equal(fixture.window.__codeyUpdateAvailability.selectedAsset.fileName, "setup.exe");
+  assert.equal(fixture.activeTimers().some(entry => entry.delay === 30 * 60 * 1000), false);
+});
+
+for (const [latestVersion, prerelease, expected] of [
+  ["2.0.0", true, false], ["2.0.0-beta.1", false, false], ["2.0.0+build-dev", false, true],
+]) {
+  test(`stable renderer respects Release prerelease status: ${latestVersion}/${prerelease}`, async () => {
+    const fixture = createStartupUpdateFixture(async path => {
+      if (path === "/backend/status") return {
+        codeyUpdatePolicy: "stable",
+        availableUpdate: { latestVersion, prerelease, updateAvailable: true, selectedAsset: { fileName: "setup.exe" } },
+      };
+      if (path === "/backend/health") return { status: "ok" };
+      throw new Error(`unexpected bridge path: ${path}`);
+    });
+    await new Promise(setImmediate);
+    assert.equal(fixture.window.__codeyUpdateAvailability !== null, expected);
+  });
+}
+
 test("disabling renderer automatic checks ignores an in-flight update response", async () => {
   let resolveUpdate;
   const fixture = createStartupUpdateFixture(async (path) => {

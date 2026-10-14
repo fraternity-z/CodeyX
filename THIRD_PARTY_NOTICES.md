@@ -1,28 +1,18 @@
-# Third-Party Notices
+# 第三方声明
 
-Codey is licensed under the GNU Affero General Public License version 3 only.
-The complete project license is in `LICENSE`.
+CodeyX 基于 [SuperGness/Codey](https://github.com/SuperGness/codey) 独立维护，沿用 [AGPL-3.0-only](LICENSE) 许可；第三方组件保留各自的版权与许可。
 
-Codey contains or depends on third-party software and data. Those components
-remain under their respective licenses and copyright notices.
+| 组件 | 许可与归属 |
+| --- | --- |
+| CodeyRuntime | AGPL-3.0-only，完整许可保留在 `vendor/CodeyRuntime/LICENSE`。 |
+| [FastCtx](https://github.com/yc-duan/fastctx) | Apache-2.0，Copyright (c) 2026 yc-duan；许可与 NOTICE 保留在 `licenses/FastCtx/`。 |
+| ComputerUse | MIT，Copyright (c) 2026 Leo；完整许可保留在 `vendor/ComputerUse/LICENSE` 并随安装包分发。 |
+| [codex-mobile-bridge](https://github.com/try2love/codex-mobile-bridge) | 远程会话协议适配来源，MIT，Copyright (c) 2026 try2love。 |
+| [cloudflared](https://github.com/cloudflare/cloudflared) | 可选下载的隧道组件，Apache-2.0。 |
 
-## Vendored source
+## FastCtx NOTICE
 
-`vendor/CodeyRuntime` is distributed as source under `AGPL-3.0-only`. Its
-license text is also preserved at `vendor/CodeyRuntime/LICENSE`.
-
-## Bundled context tool
-
-Codey's optional built-in context tool sidecar includes FastCtx.
-
-| Component | Locked version | License | Source or copyright |
-| --- | --- | --- | --- |
-| `fastctx` | 0.2.6 | Apache-2.0 | [yc-duan/fastctx](https://github.com/yc-duan/fastctx); Copyright (c) 2026 yc-duan <dy2958830371@gmail.com> |
-
-FastCtx's Apache License 2.0 text and NOTICE file are preserved in
-`licenses/FastCtx/`.
-
-The following attribution is reproduced verbatim from FastCtx's NOTICE:
+以下声明按原文保留：
 
     This product includes FastCtx
     (https://github.com/yc-duan/fastctx), Copyright (c) 2026 yc-duan,
@@ -35,9 +25,30 @@ The following attribution is reproduced verbatim from FastCtx's NOTICE:
     accepts no liability of any kind arising from this distribution or
     from anything built on top of it.
 
-## License references
+## codex-mobile-bridge MIT License
 
-- [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)
+原始许可同时保留在 `third_party/codex-mobile-bridge.LICENSE`，以下原文随本声明分发：
 
-Names and trademarks belong to their respective owners. Their inclusion does
-not imply affiliation with or endorsement of Codey.
+    MIT License
+
+    Copyright (c) 2026 try2love
+
+    Permission is hereby granted, free of charge, to any person obtaining a copy
+    of this software and associated documentation files (the "Software"), to deal
+    in the Software without restriction, including without limitation the rights
+    to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+    copies of the Software, and to permit persons to whom the Software is
+    furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included in all
+    copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+    IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+    AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+    OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+    SOFTWARE.
+
+名称与商标属于各自所有者；引用不代表对 CodeyX 的隶属、支持或背书。

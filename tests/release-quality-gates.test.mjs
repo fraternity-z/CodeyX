@@ -97,6 +97,17 @@ test("desktop release jobs reuse the prebuilt frontend overlay", () => {
   assert.match(macBuildScript, /CODEY_SKIP_OVERLAY_BUILD/);
 });
 
+test("normal Releases builds do not require the upstream broadcast service", () => {
+  for (const job of [workflowJob("macos", "macos-check"), workflowJob("windows", "windows-check")]) {
+    assert.doesNotMatch(job, /CODEY_RELEASE_ADMIN_URL|CODEY_UPDATE_BASE_URL/);
+    assert.match(job, /CODEYX_GITHUB_REPOSITORY: \$\{\{ github\.repository \}\}/);
+  }
+  const publish = workflowJob("publish", "managed-publish");
+  assert.doesNotMatch(publish, /CLOUDFLARE|release-admin|R2/);
+  assert.match(publish, /softprops\/action-gh-release@v2/);
+  assert.match(publish, /fail_on_unmatched_files: true/);
+});
+
 test("local releases run the same locked Rust checks", () => {
   const releaseScript = fs.readFileSync(new URL("../scripts/release.mjs", import.meta.url), "utf8");
   assert.match(releaseScript, /\["fmt", "--all", "--", "--check"\]/);
@@ -144,6 +155,21 @@ test("desktop packages include FastCtx license and notice files", () => {
   assert.match(workflow, /Contents\/Resources\/licenses\/FastCtx\/NOTICE/);
   assert.match(windowsInstallerScript, /licenses\\FastCtx\\LICENSE-APACHE/);
   assert.match(windowsInstallerScript, /licenses\\FastCtx\\NOTICE/);
+});
+
+test("README keeps required attribution without advertising unbundled plugin notices", () => {
+  const readme = fs.readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const notices = fs.readFileSync(new URL("../THIRD_PARTY_NOTICES.md", import.meta.url), "utf8");
+  const fastctx = fs.readFileSync(new URL("../licenses/FastCtx/NOTICE", import.meta.url), "utf8").replaceAll("\r\n", "\n");
+  const attribution = fastctx.slice(fastctx.indexOf("    This product includes FastCtx"), fastctx.indexOf("\nSection 4(b)")).trimEnd();
+  assert.ok(attribution.startsWith("    This product includes FastCtx"));
+  for (const document of [readme, notices]) assert.ok(document.replaceAll("\r\n", "\n").includes(attribution));
+  const mobileLicense = fs.readFileSync(new URL("../third_party/codex-mobile-bridge.LICENSE", import.meta.url), "utf8")
+    .trim().split(/\r?\n/).map(line => line ? `    ${line}` : "").join("\n");
+  assert.ok(notices.replaceAll("\r\n", "\n").includes(mobileLicense));
+  assert.match(readme, /github\.com\/fraternity-z\/CodeyX\/releases/);
+  assert.match(readme, /AGPL-3\.0-only/);
+  assert.doesNotMatch(readme, /PPT Bridge|Excel Shield|SUCK_MY_ASTRA|发布管理|定向推送/);
 });
 
 test("Windows release publishes the installer without a portable zip", () => {

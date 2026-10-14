@@ -931,22 +931,14 @@ pub struct CodeyConfig {
     /// preserves whether the preflight was authoritative or inconclusive.
     #[serde(skip)]
     pub official_account_status_this_launch: LaunchOfficialAccountStatus,
-    /// Public HTTPS endpoint for the version manifest published to Cloudflare R2.
+    /// Public HTTPS endpoint for this distribution's GitHub Releases.
     /// This is build-time configuration, not a user setting.
     #[serde(
-        default = "default_update_manifest_url",
+        default = "default_github_releases_url",
         skip_serializing,
         skip_deserializing
     )]
-    pub update_manifest_url: String,
-    /// Optional release-admin Worker endpoint for device-aware publishing.
-    /// This is build-time configuration, never a user setting.
-    #[serde(
-        default = "default_release_admin_url",
-        skip_serializing,
-        skip_deserializing
-    )]
-    pub release_admin_url: String,
+    pub github_releases_url: String,
 }
 
 /// User-declared operating budget, never proof of upstream model capacity.
@@ -1055,8 +1047,7 @@ impl Default for CodeyConfig {
             show_account_usage_in_header: true,
             official_account_available_this_launch: false,
             official_account_status_this_launch: LaunchOfficialAccountStatus::Unauthenticated,
-            update_manifest_url: default_update_manifest_url(),
-            release_admin_url: default_release_admin_url(),
+            github_releases_url: default_github_releases_url(),
         }
     }
 }
@@ -1067,8 +1058,7 @@ fn default_stream_max_retries() -> u32 {
 
 impl CodeyConfig {
     pub fn normalize(mut self) -> Self {
-        self.update_manifest_url = default_update_manifest_url();
-        self.release_admin_url = default_release_admin_url();
+        self.github_releases_url = default_github_releases_url();
         self.stream_max_retries = self.stream_max_retries.min(100);
         self.route_request_log.normalize();
         self.profiles
@@ -2788,29 +2778,18 @@ fn default_subagent_reasoning_effort() -> String {
     DEFAULT_SUBAGENT_REASONING_EFFORT.to_string()
 }
 
-const DEFAULT_UPDATE_BASE_URL: &str = "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev";
-const DEFAULT_RELEASE_ADMIN_URL: &str = "https://codey-release-admin.kimzane9991.workers.dev";
+const DEFAULT_UPDATE_REPOSITORY: &str = "fraternity-z/CodeyX";
 
-fn update_manifest_url_from_base(configured_base_url: Option<&str>) -> String {
-    let base_url = configured_base_url
+fn github_releases_url_from_repository(repository: Option<&str>) -> String {
+    let repository = repository
         .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .unwrap_or(DEFAULT_UPDATE_BASE_URL)
-        .trim_end_matches('/');
-    format!("{base_url}/latest.json")
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_UPDATE_REPOSITORY);
+    format!("https://api.github.com/repos/{repository}/releases")
 }
 
-pub fn default_update_manifest_url() -> String {
-    update_manifest_url_from_base(option_env!("CODEY_UPDATE_BASE_URL"))
-}
-
-pub fn default_release_admin_url() -> String {
-    option_env!("CODEY_RELEASE_ADMIN_URL")
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .unwrap_or(DEFAULT_RELEASE_ADMIN_URL)
-        .trim_end_matches('/')
-        .to_string()
+pub fn default_github_releases_url() -> String {
+    github_releases_url_from_repository(option_env!("CODEYX_GITHUB_REPOSITORY"))
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -4766,27 +4745,29 @@ mod tests {
     }
 
     #[test]
-    fn user_update_manifest_url_is_ignored_and_not_persisted() {
+    fn user_update_sources_are_ignored_and_not_persisted() {
         let config = serde_json::from_str::<CodeyConfig>(
-            r#"{"activeProfileId":"","profiles":[],"updateManifestUrl":"https://example.com/latest.json"}"#,
+            r#"{"activeProfileId":"","profiles":[],"updateManifestUrl":"https://example.com/latest.json","releaseAdminUrl":"https://admin.example.com","githubReleasesUrl":"https://api.github.com/repos/other/project/releases"}"#,
         )
         .unwrap()
         .normalize();
         let serialized = serde_json::to_value(&config).unwrap();
 
-        assert_eq!(config.update_manifest_url, default_update_manifest_url());
-        assert!(serialized.get("updateManifestUrl").is_none());
+        assert_eq!(config.github_releases_url, default_github_releases_url());
+        for key in ["updateManifestUrl", "releaseAdminUrl", "githubReleasesUrl"] {
+            assert!(serialized.get(key).is_none());
+        }
     }
 
     #[test]
-    fn update_manifest_url_defaults_to_the_public_source_for_local_builds() {
-        let expected = format!("{DEFAULT_UPDATE_BASE_URL}/latest.json");
+    fn github_releases_default_to_codeyx_and_allow_a_build_time_repository() {
+        let expected = "https://api.github.com/repos/fraternity-z/CodeyX/releases";
 
-        assert_eq!(update_manifest_url_from_base(None), expected);
-        assert_eq!(update_manifest_url_from_base(Some("  ")), expected);
+        assert_eq!(github_releases_url_from_repository(None), expected);
+        assert_eq!(github_releases_url_from_repository(Some("  ")), expected);
         assert_eq!(
-            update_manifest_url_from_base(Some("https://updates.example.com/codey/")),
-            "https://updates.example.com/codey/latest.json"
+            github_releases_url_from_repository(Some("  maintainer/fork  ")),
+            "https://api.github.com/repos/maintainer/fork/releases"
         );
     }
 

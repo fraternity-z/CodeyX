@@ -1414,9 +1414,9 @@ export function App({
             </div>
           </div>
           <Button
-            aria-label="打开 Codey GitHub 仓库"
+            aria-label="打开 CodeyX GitHub 仓库"
             className="h-8! w-8! min-w-8! px-0!"
-            onClick={() => window.open("https://github.com/SuperGness/codey", "_blank", "noopener,noreferrer")}
+            onClick={() => window.open("https://github.com/fraternity-z/CodeyX", "_blank", "noopener,noreferrer")}
             size="icon-sm"
             title="GitHub 仓库"
             variant="brand-outline"

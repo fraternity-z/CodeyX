@@ -171,6 +171,9 @@
   const hasDetectedUpdate = () =>
     window.__codeyUpdateAvailability?.updateAvailable === true;
 
+  const hasInstallableUpdate = () =>
+    hasDetectedUpdate() && Boolean(window.__codeyUpdateAvailability?.selectedAsset);
+
   const dispatchUpdateAvailability = () => {
     if (
       typeof window.dispatchEvent !== "function"
@@ -239,11 +242,13 @@
   };
 
   const setUpdateAvailability = (result, { dispatch = true } = {}) => {
-    window.__codeyUpdateAvailability = codeyUpdatePolicy !== "off" && (codeyUpdatePolicy !== "stable" || !result?.latestVersion?.includes("-")) && result?.updateAvailable === true
+    window.__codeyUpdateAvailability = codeyUpdatePolicy !== "off"
+      && (codeyUpdatePolicy === "experimental" || (!result?.prerelease && !result?.latestVersion?.split("+")[0].includes("-")))
+      && result?.updateAvailable === true
       ? result
       : null;
     applyUpdateBadge();
-    if (hasDetectedUpdate()) {
+    if (hasInstallableUpdate()) {
       window.clearTimeout(updateCheckTimer);
       updateCheckTimer = 0;
     }
@@ -354,7 +359,7 @@
   const scheduleUpdateCheck = (delayMs = updateCheckIntervalMs) => {
     window.clearTimeout(updateCheckTimer);
     updateCheckTimer = 0;
-    if (codeyUpdatePolicy === "off" || hasDetectedUpdate()) return;
+    if (codeyUpdatePolicy === "off" || hasInstallableUpdate()) return;
     updateCheckTimer = window.setTimeout(() => {
       updateCheckTimer = 0;
       // 尚未读取到设置时先重试状态查询，避免关闭后仍发起更新请求。
@@ -364,7 +369,7 @@
   };
 
   const checkForUpdatesSilently = async () => {
-    if (!["stable", "experimental"].includes(codeyUpdatePolicy) || updateCheckInFlight || hasDetectedUpdate()) return;
+    if (!["stable", "experimental"].includes(codeyUpdatePolicy) || updateCheckInFlight || hasInstallableUpdate()) return;
     updateCheckInFlight = true;
     const generation = updateCheckGeneration;
     try {
@@ -381,7 +386,7 @@
       // 更新地址不可达或检查超时时直接跳过，不阻塞 Codex 页面。
     } finally {
       updateCheckInFlight = false;
-      if (!hasDetectedUpdate()) scheduleUpdateCheck();
+      if (!hasInstallableUpdate()) scheduleUpdateCheck();
     }
   };
 
@@ -399,7 +404,7 @@
     } catch {
       if (generation === updateCheckGeneration) setUpdateAvailability(null);
     } finally {
-      if (!hasDetectedUpdate()) scheduleUpdateCheck();
+      if (!hasInstallableUpdate()) scheduleUpdateCheck();
     }
   };
 
@@ -1300,7 +1305,7 @@
       ? event.detail
       : window.__codeyUpdateAvailability;
     setUpdateAvailability(result, { dispatch: false });
-    if (!hasDetectedUpdate()) scheduleUpdateCheck();
+    if (!hasInstallableUpdate()) scheduleUpdateCheck();
   });
   window.addEventListener?.(configChangedEvent, (event) => {
     const policy = event.detail?.config?.codeyUpdatePolicy;

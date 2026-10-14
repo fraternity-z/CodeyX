@@ -1,7 +1,7 @@
 #[cfg(target_os = "macos")]
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -17,25 +17,14 @@ use crate::config::ConfigStore;
 
 const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_DOWNLOAD_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
-const MAX_UPDATE_MANIFEST_BYTES: usize = 1024 * 1024;
-static DEVICE_IDENTITY_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const MAX_RELEASE_RESPONSE_BYTES: usize = 5 * 1024 * 1024;
+const RELEASES_PER_PAGE: usize = 100;
+const MAX_RELEASE_PAGES: usize = 10;
 
 #[derive(Clone, Copy)]
 enum UpdateRequestMode {
     Automatic,
     Manual,
-}
-
-#[cfg(test)]
-struct TestDeviceVersions {
-    codex: Option<String>,
-    os: Option<String>,
-}
-
-#[cfg(test)]
-tokio::task_local! {
-    // 仅替换当前测试任务的环境探测，不改动其他并行测试使用的版本缓存。
-    static TEST_DEVICE_VERSIONS: TestDeviceVersions;
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -69,11 +58,9 @@ pub(crate) struct UpdateCheck {
     #[serde(default)]
     pub(crate) release_notes: Option<String>,
     #[serde(default)]
-    pub(crate) publish_id: Option<String>,
+    pub(crate) release_id: Option<String>,
     #[serde(default)]
-    pub(crate) policy_id: Option<String>,
-    #[serde(default)]
-    pub(crate) rollback: Option<RollbackDirective>,
+    pub(crate) prerelease: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -98,56 +85,30 @@ pub(crate) struct UpdateDownload {
     pub(crate) sha256: String,
     pub(crate) asset: UpdateAssetInfo,
     #[serde(default)]
-    pub(crate) publish_id: Option<String>,
+    pub(crate) release_id: Option<String>,
     #[serde(default)]
-    pub(crate) policy_id: Option<String>,
-    #[serde(default)]
-    pub(crate) rollback: Option<RollbackDirective>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeviceIdentity {
-    install_key: String,
-    machine_no: String,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RollbackDirective {
-    pub(crate) id: String,
-    pub(crate) source_version: String,
-    pub(crate) target_version: String,
-    pub(crate) reason: String,
+    pub(crate) prerelease: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct DeviceUpdateResponse {
+struct GitHubRelease {
+    id: u64,
+    tag_name: String,
+    draft: bool,
+    prerelease: bool,
     #[serde(default)]
-    rollback: Option<RollbackDirective>,
-    #[serde(rename = "trackDelivery", default)]
-    track_delivery: Option<bool>,
-    #[serde(rename = "updateAvailable", default)]
-    update_available: bool,
-    #[serde(rename = "currentVersion", default)]
-    current_version: Option<String>,
-    #[serde(alias = "publishId", default)]
-    publish_id: Option<String>,
-    #[serde(alias = "releaseNotes", default)]
-    release_notes: Option<String>,
-    #[serde(alias = "manifestUrl", default)]
-    manifest_url: Option<String>,
+    body: Option<String>,
+    assets: Vec<GitHubReleaseAsset>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PendingDeviceUpdate {
-    publish_id: String,
-    version: String,
+#[derive(Clone, Debug, Deserialize)]
+struct GitHubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
+    state: String,
     #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    message: Option<String>,
+    digest: Option<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -162,7 +123,7 @@ struct VerifiedDownloadedUpdate {
 }
 
 pub(super) struct CachedUpdateCandidate {
-    manifest_url: String,
+    releases_url: String,
     candidate: UpdateCandidate,
     checked_at: Instant,
 }
@@ -181,7 +142,6 @@ pub(super) async fn invoke(
             let manual = args.get("manual").and_then(Value::as_bool).unwrap_or(false);
             check_for_updates(state, force_refresh, manual).await
         }
-        "get_device_machine_no" => get_device_machine_no(state).await,
         "download_update" => download_update(state, args).await,
         "update_install_report" => update_install_report(state).await,
         "install_downloaded_update" => {
@@ -210,29 +170,20 @@ pub async fn check_for_updates(
     serde_json::to_value(candidate.check).map_err(|error| error.to_string())
 }
 
-async fn get_device_machine_no(state: &AppState) -> Result<Value, String> {
-    {
-        let _guard = DEVICE_IDENTITY_LOCK.lock().await;
-        if let Some(identity) = read_device_identity(&state.store).await? {
-            return Ok(json!(identity.machine_no));
-        }
-    }
-    let Some(base_url) = configured_release_admin_url(state).await? else {
-        return Ok(Value::Null);
-    };
-    let identity = load_or_register_device(state, &base_url).await?;
-    // 页面只需要机器号，注册密钥始终留在后端。
-    Ok(json!(identity.machine_no))
-}
-
 pub async fn download_update(state: &Arc<AppState>, args: &Value) -> Result<Value, String> {
     let candidate =
         update_candidate_with_ttl(state, UPDATE_DOWNLOAD_CACHE_TTL, UpdateRequestMode::Manual)
             .await?;
     if args.get("expectedVersion").and_then(Value::as_str)
         != Some(candidate.check.latest_version.as_str())
-        || args.get("expectedPolicyId").and_then(Value::as_str)
-            != candidate.check.policy_id.as_deref()
+        || args.get("expectedReleaseId").and_then(Value::as_str)
+            != candidate.check.release_id.as_deref()
+        || args.get("expectedSha256").and_then(Value::as_str)
+            != candidate
+                .check
+                .selected_asset
+                .as_ref()
+                .map(|asset| asset.sha256.as_str())
     {
         return Err("更新目标已变化，请重新检查并确认更新".to_string());
     }
@@ -251,29 +202,6 @@ pub async fn update_install_report(state: &Arc<AppState>) -> Result<Value, Strin
         crate::update_helper::clear_update_install_report(&config_path);
         return Ok(Value::Null);
     }
-    if let Some(pending) = read_pending_device_update(state).await {
-        let final_status = match report.status.as_str() {
-            "installed" => Some("installed"),
-            "failed" | "unverified" => Some("failed"),
-            "started" => None,
-            _ => None,
-        };
-        if let Some(status) = final_status {
-            let message = (!report.message.is_empty()).then_some(report.message.as_str());
-            let mut pending = pending;
-            pending.status = Some(status.to_string());
-            pending.message = message.map(str::to_string);
-            let reported = report_publish_event(state, &pending.publish_id, status, message)
-                .await
-                .is_ok();
-            if reported {
-                let _ =
-                    tokio::fs::remove_file(pending_device_update_path(&state.store).await?).await;
-            } else {
-                let _ = write_pending_device_update(state, &pending).await;
-            }
-        }
-    }
     crate::update_helper::clear_update_install_report(&config_path);
     serde_json::to_value(report).map_err(|error| error.to_string())
 }
@@ -290,13 +218,8 @@ async fn update_candidate_with_ttl(
     mode: UpdateRequestMode,
 ) -> Result<UpdateCandidate, String> {
     let policy = update_policy(state, mode).await?;
-    let release_admin_url = configured_release_admin_url(state).await?;
-    let manifest_url = if let Some(base) = &release_admin_url {
-        format!("release-admin:{base}")
-    } else {
-        configured_update_manifest_url(state).await?
-    };
-    let cache_key = format!("{}:{manifest_url}", policy.as_str());
+    let releases_url = configured_github_releases_url(state).await?;
+    let cache_key = format!("{}:{releases_url}", policy.as_str());
     let mut cache = state.update_candidate_cache.lock().await;
     if update_policy(state, mode).await? != policy {
         return Err("更新策略已变化，请重新检查更新".to_string());
@@ -306,12 +229,7 @@ async fn update_candidate_with_ttl(
         return Ok(candidate);
     }
 
-    let check = if release_admin_url.is_some() {
-        fetch_release_admin_update(state, release_admin_url.as_deref().unwrap(), mode).await?
-    } else {
-        let manifest = fetch_configured_update_manifest(state, &manifest_url).await?;
-        assess_update_manifest(env!("CARGO_PKG_VERSION"), &manifest)?
-    };
+    let check = fetch_github_update(state, &releases_url, policy).await?;
     let check = filter_update_policy(check, policy)?;
     if update_policy(state, mode).await? != policy {
         return Err("更新策略已变化，请重新检查更新".to_string());
@@ -319,7 +237,7 @@ async fn update_candidate_with_ttl(
     *state.available_update.write().await = check.update_available.then(|| check.clone());
     let candidate = UpdateCandidate { check };
     *cache = Some(CachedUpdateCandidate {
-        manifest_url: cache_key,
+        releases_url: cache_key,
         candidate: candidate.clone(),
         checked_at: Instant::now(),
     });
@@ -345,314 +263,248 @@ fn filter_update_policy(
     policy: crate::config::CodeyUpdatePolicy,
 ) -> Result<UpdateCheck, String> {
     if policy == crate::config::CodeyUpdatePolicy::Stable
-        && !Version::parse(&check.latest_version)
-            .map_err(|error| error.to_string())?
-            .pre
-            .is_empty()
+        && (check.prerelease
+            || !Version::parse(&check.latest_version)
+                .map_err(|error| error.to_string())?
+                .pre
+                .is_empty())
     {
         check.update_available = false;
         check.latest_version = check.current_version.clone();
         check.selected_asset = None;
         check.release_notes = None;
-        check.publish_id = None;
-        check.policy_id = None;
-        check.rollback = None;
+        check.release_id = None;
+        check.prerelease = false;
     }
     Ok(check)
 }
 
-async fn configured_release_admin_url(state: &AppState) -> Result<Option<String>, String> {
-    let value = state
-        .config
-        .read()
-        .await
-        .release_admin_url
-        .trim()
-        .to_string();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    let url = reqwest::Url::parse(&value)
-        .map_err(|_| "发布管理服务地址必须是有效的 HTTPS URL".to_string())?;
+fn github_releases_repository(releases_url: &str) -> Result<String, String> {
+    let url = reqwest::Url::parse(releases_url)
+        .map_err(|_| "更新地址必须是有效的 HTTPS URL".to_string())?;
     if url.scheme() != "https" {
-        return Err("发布管理服务地址必须使用 HTTPS".to_string());
+        return Err("更新地址必须使用 HTTPS".to_string());
     }
-    Ok(Some(value.trim_end_matches('/').to_string()))
-}
-
-async fn device_identity_path(store: &ConfigStore) -> Result<PathBuf, String> {
-    let parent = store
-        .path()
-        .parent()
-        .ok_or_else(|| "Codey 配置路径无父目录，无法保存设备身份".to_string())?;
-    Ok(parent.join("release-device.json"))
-}
-
-async fn pending_device_update_path(store: &ConfigStore) -> Result<PathBuf, String> {
-    let parent = store
-        .path()
-        .parent()
-        .ok_or_else(|| "Codey 配置路径无父目录，无法保存更新状态".to_string())?;
-    Ok(parent.join("release-pending-update.json"))
-}
-
-async fn read_pending_device_update(state: &AppState) -> Option<PendingDeviceUpdate> {
-    let path = pending_device_update_path(&state.store).await.ok()?;
-    let bytes = tokio::fs::read(path).await.ok()?;
-    serde_json::from_slice(&bytes).ok()
-}
-
-async fn write_pending_device_update(
-    state: &AppState,
-    pending: &PendingDeviceUpdate,
-) -> Result<(), String> {
-    let path = pending_device_update_path(&state.store).await?;
-    let bytes = serde_json::to_vec(pending).map_err(|error| error.to_string())?;
-    tokio::fs::write(path, bytes)
-        .await
-        .map_err(|error| format!("保存更新回报失败：{error}"))
-}
-
-async fn retry_pending_device_event(state: &AppState) {
-    let Some(pending) = read_pending_device_update(state).await else {
-        return;
-    };
-    let Some(status) = pending.status.as_deref() else {
-        return;
-    };
-    if report_publish_event(
-        state,
-        &pending.publish_id,
-        status,
-        pending.message.as_deref(),
-    )
-    .await
-    .is_ok()
-        && let Ok(path) = pending_device_update_path(&state.store).await
+    let segments: Vec<_> = url.path_segments().into_iter().flatten().collect();
+    if url.host_str() != Some("api.github.com")
+        || url.port().is_some()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || segments.len() != 4
+        || segments[0] != "repos"
+        || segments[3] != "releases"
+        || segments[1..3].iter().any(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        })
     {
-        let _ = tokio::fs::remove_file(path).await;
+        return Err("更新地址必须指向本项目的 GitHub Releases API".to_string());
     }
+    Ok(format!("{}/{}", segments[1], segments[2]))
 }
 
-async fn read_device_identity(store: &ConfigStore) -> Result<Option<DeviceIdentity>, String> {
-    let path = device_identity_path(store).await?;
-    if let Ok(bytes) = tokio::fs::read(&path).await
-        && let Ok(identity) = serde_json::from_slice::<DeviceIdentity>(&bytes)
-        && !identity.install_key.trim().is_empty()
-        && !identity.machine_no.trim().is_empty()
-    {
-        return Ok(Some(identity));
-    }
-    Ok(None)
-}
-
-async fn load_or_register_device(
+async fn fetch_github_update(
     state: &AppState,
-    base_url: &str,
-) -> Result<DeviceIdentity, String> {
-    // 设置弹窗和自动更新可能同时首次登记，必须共用同一份设备身份。
-    let _guard = DEVICE_IDENTITY_LOCK.lock().await;
-    if let Some(identity) = read_device_identity(&state.store).await? {
-        return Ok(identity);
-    }
-    let path = device_identity_path(&state.store).await?;
-
-    let install_key = format!("{}:{}", uuid::Uuid::new_v4(), uuid::Uuid::new_v4());
-    let body = json!({
-        "installKey": install_key,
-        "rollbackProtocol": 1,
-        "platform": current_update_platform(),
-        "arch": current_update_arch(),
-        "currentVersion": env!("CARGO_PKG_VERSION"),
-        // 设备管理需要一眼看到客户端环境，登记时一并带上。
-        "codexVersion": current_codex_version().await,
-        "osName": current_os_name(),
-        "osVersion": current_os_version(),
-    });
-    let response = state
-        .http_client
-        .post(format!("{base_url}/api/devices/register"))
-        .json(&body)
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|error| format!("注册设备失败：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("注册设备失败：{error}"))?;
-    let registered = response
-        .json::<DeviceIdentityResponse>()
-        .await
-        .map_err(|error| format!("设备注册响应无效：{error}"))?;
-    if registered.machine_no.trim().is_empty() {
-        return Err("设备注册响应缺少机器号".to_string());
-    }
-    let identity = DeviceIdentity {
-        install_key,
-        machine_no: registered.machine_no,
-    };
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|error| format!("创建设备身份目录失败：{error}"))?;
-    }
-    let bytes = serde_json::to_vec(&identity).map_err(|error| error.to_string())?;
-    tokio::fs::write(path, bytes)
-        .await
-        .map_err(|error| format!("保存设备身份失败：{error}"))?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let path = device_identity_path(&state.store).await?;
-        let mut permissions = tokio::fs::metadata(&path)
-            .await
-            .map_err(|error| format!("读取设备身份权限失败：{error}"))?
-            .permissions();
-        permissions.set_mode(0o600);
-        tokio::fs::set_permissions(path, permissions)
-            .await
-            .map_err(|error| format!("设置设备身份权限失败：{error}"))?;
-    }
-    Ok(identity)
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct DeviceIdentityResponse {
-    machine_no: String,
-}
-
-async fn fetch_release_admin_update(
-    state: &AppState,
-    base_url: &str,
-    mode: UpdateRequestMode,
+    releases_url: &str,
+    policy: crate::config::CodeyUpdatePolicy,
 ) -> Result<UpdateCheck, String> {
-    let policy = update_policy(state, mode).await?;
-    retry_pending_device_event(state).await;
-    // 注册失败仍可检查公开版本，定向推送必须验证设备身份。
-    let identity = load_or_register_device(state, base_url).await.ok();
-    let endpoint = reqwest::Url::parse(&format!("{base_url}/api/updates/check"))
-        .map_err(|_| "发布管理服务地址无效".to_string())?;
-    // Codex 与系统版本随每次检查更新上报，服务端据此判断版本是否适配本机。
-    let mut query = vec![
-        ("currentVersion", env!("CARGO_PKG_VERSION").to_string()),
-        ("rollbackProtocol", "1".to_string()),
-        ("updatePolicy", policy.as_str().to_string()),
-        ("osName", current_os_name().to_string()),
-    ];
-    if let Some(codex_version) = current_codex_version().await {
-        query.push(("codexVersion", codex_version));
-    }
-    if let Some(os_version) = current_os_version() {
-        query.push(("osVersion", os_version));
-    }
-    let mut request = state.http_client.get(endpoint).query(&query);
-    if let Some(identity) = &identity {
-        request = request
-            .header("x-machine-no", &identity.machine_no)
-            .header("x-device-key", &identity.install_key);
-    }
-    if update_policy(state, mode).await? != policy {
-        return Err("更新策略已变化，请重新检查更新".to_string());
-    }
-    let response = request
-        .header(
-            USER_AGENT,
-            format!("Codey/{} release-admin-check", env!("CARGO_PKG_VERSION")),
-        )
-        .timeout(Duration::from_secs(10))
-        .send()
+    let repository = github_releases_repository(releases_url)?;
+    let fetch = async {
+        let mut releases = Vec::new();
+        for page in 1..=MAX_RELEASE_PAGES {
+            let response = state
+                .http_client
+                .get(releases_url)
+                .query(&[("per_page", RELEASES_PER_PAGE), ("page", page)])
+                .header(
+                    USER_AGENT,
+                    format!("CodeyX/{} update-check", env!("CARGO_PKG_VERSION")),
+                )
+                .header(reqwest::header::ACCEPT, "application/vnd.github+json")
+                .header("X-GitHub-Api-Version", "2026-03-10")
+                .timeout(Duration::from_secs(10))
+                .send()
+                .await
+                .map_err(|error| format!("检查 GitHub Releases 失败：{error}"))?;
+            match response.status() {
+                reqwest::StatusCode::NOT_FOUND => {
+                    return Err(
+                        "无法读取本项目的 Releases，请确认 GitHub 仓库已公开且地址正确".to_string(),
+                    );
+                }
+                reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::TOO_MANY_REQUESTS => {
+                    return Err("GitHub 更新检查受限，请稍后重试".to_string());
+                }
+                _ => {}
+            }
+            let response = response
+                .error_for_status()
+                .map_err(|error| format!("GitHub Releases 返回异常：{error}"))?;
+            if response.url().scheme() != "https"
+                || response.url().host_str() != Some("api.github.com")
+                || response.url().path() != format!("/repos/{repository}/releases")
+            {
+                return Err("更新地址重定向到了非预期的 GitHub 仓库".to_string());
+            }
+            let body = crate::http_response::read_bounded_body(
+                response,
+                MAX_RELEASE_RESPONSE_BYTES,
+                "GitHub Releases 响应",
+            )
+            .await
+            .map_err(|error| format!("读取 Releases 失败：{error:#}"))?;
+            let mut batch: Vec<GitHubRelease> = serde_json::from_slice(&body)
+                .map_err(|error| format!("GitHub Releases 格式无效：{error}"))?;
+            let has_more = batch.len() == RELEASES_PER_PAGE;
+            releases.append(&mut batch);
+            if !has_more {
+                return assess_github_releases(
+                    env!("CARGO_PKG_VERSION"),
+                    &releases,
+                    &repository,
+                    policy,
+                );
+            }
+        }
+        Err("GitHub Releases 数量超过检查上限，请从发布页确认最新版本".to_string())
+    };
+    tokio::time::timeout(Duration::from_secs(10), fetch)
         .await
-        .map_err(|error| format!("检查发布更新失败：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("发布管理服务返回异常：{error}"))?;
-    let candidate = response
-        .json::<DeviceUpdateResponse>()
-        .await
-        .map_err(|error| format!("发布更新响应无效：{error}"))?;
-    if !candidate.update_available {
-        let current = candidate
-            .current_version
-            .unwrap_or_else(|| env!("CARGO_PKG_VERSION").to_string());
+        .map_err(|_| "检查 GitHub Releases 超时，请稍后重试".to_string())?
+}
+
+fn assess_github_releases(
+    current_version: &str,
+    releases: &[GitHubRelease],
+    repository: &str,
+    policy: crate::config::CodeyUpdatePolicy,
+) -> Result<UpdateCheck, String> {
+    let latest = releases
+        .iter()
+        .filter_map(|release| {
+            let tag = release
+                .tag_name
+                .strip_prefix('v')
+                .or_else(|| release.tag_name.strip_prefix('V'))
+                .unwrap_or(&release.tag_name);
+            let version = Version::parse(tag).ok()?;
+            if release.draft
+                || (policy != crate::config::CodeyUpdatePolicy::Experimental
+                    && (release.prerelease || !version.pre.is_empty()))
+            {
+                return None;
+            }
+            Some((version, release))
+        })
+        .max_by(|(left, _), (right, _)| left.cmp_precedence(right));
+    let Some((version, release)) = latest else {
+        let current = Version::parse(current_version)
+            .map_err(|error| error.to_string())?
+            .to_string();
         return Ok(UpdateCheck {
             current_version: current.clone(),
             latest_version: current,
             update_available: false,
             selected_asset: None,
             release_notes: None,
-            publish_id: None,
-            policy_id: None,
-            rollback: None,
+            release_id: None,
+            prerelease: false,
         });
-    }
-    let manifest_url = candidate
-        .manifest_url
-        .ok_or_else(|| "发布版本缺少更新清单地址".to_string())?;
-    let manifest = fetch_configured_update_manifest(state, &manifest_url).await?;
-    let mut check = assess_update_manifest(env!("CARGO_PKG_VERSION"), &manifest)?;
-    check.release_notes = candidate.release_notes.or(manifest.release_notes);
-    check.policy_id = candidate.publish_id.clone();
-    if let Some(directive) = candidate.rollback {
-        authorize_rollback(
-            &mut check,
-            directive,
-            candidate.publish_id.as_deref(),
-            identity.is_some(),
-        )?;
-    }
-    check.publish_id = if candidate.track_delivery == Some(false) {
-        None
-    } else {
-        candidate.publish_id
     };
-    if update_policy(state, mode).await? != policy {
-        return Err("更新策略已变化，请重新检查更新".to_string());
-    }
-    filter_update_policy(check, policy)
+    let asset = github_release_asset(
+        release,
+        &version,
+        repository,
+        current_update_platform(),
+        current_update_arch(),
+    )?;
+    let manifest = UpdateManifest {
+        schema_version: 1,
+        version: version.to_string(),
+        tag: format!("v{version}"),
+        release_notes: release.body.clone(),
+        assets: asset.into_iter().collect(),
+    };
+    let mut check = assess_update_manifest(current_version, &manifest)?;
+    check.release_id = Some(release.id.to_string());
+    check.prerelease = release.prerelease || !version.pre.is_empty();
+    Ok(check)
 }
 
-// 只有管理服务明确授权的源版本客户端才允许降级。
-fn authorize_rollback(
-    check: &mut UpdateCheck,
-    directive: RollbackDirective,
-    publish_id: Option<&str>,
-    authenticated: bool,
-) -> Result<(), String> {
-    let source = Version::parse(&check.current_version).map_err(|e| e.to_string())?;
-    let target = Version::parse(&check.latest_version).map_err(|e| e.to_string())?;
-    if !authenticated
-        || directive.id.is_empty()
-        || Some(directive.id.as_str()) != publish_id
-        || directive.source_version != check.current_version
-        || directive.target_version != check.latest_version
-        || target >= source
+fn github_release_asset(
+    release: &GitHubRelease,
+    version: &Version,
+    repository: &str,
+    platform: &str,
+    arch: &str,
+) -> Result<Option<UpdateManifestAsset>, String> {
+    let (package_type, suffix) = match platform {
+        "windows" => ("nsis", format!("windows-{arch}-setup.exe")),
+        "macos" => ("app-zip", format!("macos-{arch}-unsigned.zip")),
+        _ => return Ok(None),
+    };
+    let asset = ["CodeyX", "Codey"].into_iter().find_map(|prefix| {
+        let name = format!("{prefix}-{version}-{suffix}");
+        release
+            .assets
+            .iter()
+            .find(|asset| asset.name == name && asset.state == "uploaded")
+    });
+    let Some(asset) = asset else { return Ok(None) };
+    let expected_url = format!(
+        "https://github.com/{repository}/releases/download/{}/{}",
+        release.tag_name, asset.name,
+    );
+    if asset
+        .browser_download_url
+        .replace("%2B", "+")
+        .replace("%2b", "+")
+        != expected_url
     {
-        return Err("回退授权与当前客户端或目标版本不一致，请重新检查更新".to_string());
+        return Err("安装包必须来自本项目对应的 GitHub Release".to_string());
     }
-    check.update_available = true;
-    check.rollback = Some(directive);
-    Ok(())
+    let sha256 = asset
+        .digest
+        .as_deref()
+        .and_then(|digest| digest.strip_prefix("sha256:"))
+        .ok_or_else(|| "Release 安装包缺少 GitHub SHA-256 摘要，请重新上传安装包".to_string())?;
+    let asset = UpdateManifestAsset {
+        platform: platform.to_string(),
+        arch: arch.to_string(),
+        package_type: package_type.to_string(),
+        file_name: asset.name.clone(),
+        url: asset.browser_download_url.clone(),
+        sha256: sha256.to_ascii_lowercase(),
+        size: asset.size,
+    };
+    validate_update_asset(&asset)?;
+    Ok(Some(asset))
 }
 
 fn validate_same_update(approved: &UpdateCheck, current: &UpdateCheck) -> Result<(), String> {
     if !current.update_available
         || approved.latest_version != current.latest_version
-        || approved.policy_id != current.policy_id
-        || approved.rollback != current.rollback
+        || approved.release_id != current.release_id
+        || approved.prerelease != current.prerelease
         || approved.selected_asset != current.selected_asset
     {
-        return Err("发布策略已变化或回退授权已失效，请重新检查并确认更新".to_string());
+        return Err("Release 或安装包已变化，请重新检查并确认更新".to_string());
     }
     Ok(())
 }
 
 fn reusable_update_candidate(
     cached: Option<&CachedUpdateCandidate>,
-    manifest_url: &str,
+    releases_url: &str,
     now: Instant,
     cache_ttl: Duration,
 ) -> Option<UpdateCandidate> {
     let cached = cached?;
-    (cached.manifest_url == manifest_url
+    (cached.releases_url == releases_url
         && now.saturating_duration_since(cached.checked_at) < cache_ttl)
         .then(|| cached.candidate.clone())
 }
@@ -673,10 +525,8 @@ async fn download_update_candidate_with_mode(
     if !filter_update_policy(candidate.check.clone(), policy)?.update_available {
         return Err("更新目标不符合当前更新策略".to_string());
     }
-    if let Some(base_url) = configured_release_admin_url(state).await? {
-        let fresh = fetch_release_admin_update(state, &base_url, mode).await?;
-        validate_same_update(&candidate.check, &fresh)?;
-    }
+    let fresh = resolve_expected_update(state, mode).await?;
+    validate_same_update(&candidate.check, &fresh)?;
     if !candidate.check.update_available {
         return Err(format!(
             "当前已是最新版本 v{}",
@@ -688,37 +538,18 @@ async fn download_update_candidate_with_mode(
         .selected_asset
         .as_ref()
         .ok_or_else(|| "没有适用于当前系统的可安装更新包".to_string())?;
-    let file_path = match download_update_asset(
+    let file_path = download_update_asset(
         &state.http_client,
         &state.store,
         &candidate.check.latest_version,
         asset,
     )
-    .await
-    {
-        Ok(path) => path,
-        Err(error) => {
-            if let Some(publish_id) = candidate.check.publish_id.as_deref() {
-                let _ = report_publish_event(state, publish_id, "failed", Some(&error)).await;
-            }
-            return Err(error);
-        }
-    };
-    // 保存用户确认的批次，进程重启后也要检查同一份授权。
+    .await?;
+    // 保存用户确认的版本与安装包，进程重启后也要检查同一份确认。
     let approval = serde_json::to_vec(&candidate.check).map_err(|e| e.to_string())?;
     tokio::fs::write(file_path.with_extension("approval.json"), approval)
         .await
         .map_err(|e| format!("保存更新确认信息失败：{e}"))?;
-    if let Some(publish_id) = candidate.check.publish_id.as_deref() {
-        let _ = report_publish_event(state, publish_id, "downloaded", None).await;
-        let pending = PendingDeviceUpdate {
-            publish_id: publish_id.to_string(),
-            version: candidate.check.latest_version.clone(),
-            status: None,
-            message: None,
-        };
-        let _ = write_pending_device_update(state, &pending).await;
-    }
     Ok(UpdateDownload {
         latest_version: candidate.check.latest_version.clone(),
         file_path: file_path.to_string_lossy().to_string(),
@@ -726,51 +557,9 @@ async fn download_update_candidate_with_mode(
         size: asset.size,
         sha256: asset.sha256.clone(),
         asset: asset.clone(),
-        publish_id: candidate.check.publish_id.clone(),
-        policy_id: candidate.check.policy_id.clone(),
-        rollback: candidate.check.rollback.clone(),
+        release_id: candidate.check.release_id.clone(),
+        prerelease: candidate.check.prerelease,
     })
-}
-
-async fn report_publish_event(
-    state: &AppState,
-    publish_id: &str,
-    status: &str,
-    error_message: Option<&str>,
-) -> Result<(), String> {
-    let Some(base_url) = configured_release_admin_url(state).await? else {
-        return Ok(());
-    };
-    let identity = load_or_register_device(state, &base_url).await?;
-    let body = json!({
-        "machineNo": identity.machine_no,
-        "status": status,
-        "currentVersion": env!("CARGO_PKG_VERSION"),
-        "errorMessage": error_message,
-    });
-    let mut last_error = String::from("上报更新状态失败");
-    for attempt in 0..3 {
-        match state
-            .http_client
-            .post(format!("{base_url}/api/publishes/{publish_id}/report"))
-            .header("x-machine-no", &identity.machine_no)
-            .header("x-device-key", &identity.install_key)
-            .json(&body)
-            .timeout(Duration::from_secs(10))
-            .send()
-            .await
-        {
-            Ok(response) => match response.error_for_status() {
-                Ok(_) => return Ok(()),
-                Err(error) => last_error = format!("上报更新状态失败：{error}"),
-            },
-            Err(error) => last_error = format!("上报更新状态失败：{error}"),
-        }
-        if attempt < 2 {
-            tokio::time::sleep(Duration::from_millis(150 * (attempt + 1) as u64)).await;
-        }
-    }
-    Err(last_error)
 }
 
 pub async fn install_downloaded_update(
@@ -779,23 +568,7 @@ pub async fn install_downloaded_update(
 ) -> Result<Value, String> {
     // 旧一轮的报告先清掉，否则下面的启动握手会把残留文件误认为助手已接手。
     crate::update_helper::clear_update_install_report(state.store.path());
-    if let Err(error) =
-        start_downloaded_update_with_mode(state, &file_path, UpdateRequestMode::Manual).await
-    {
-        if let Some(mut pending) = read_pending_device_update(state).await {
-            pending.status = Some("failed".to_string());
-            pending.message = Some(error.clone());
-            let _ = write_pending_device_update(state, &pending).await;
-            if report_publish_event(state, &pending.publish_id, "failed", Some(&error))
-                .await
-                .is_ok()
-                && let Ok(path) = pending_device_update_path(&state.store).await
-            {
-                let _ = tokio::fs::remove_file(path).await;
-            }
-        }
-        return Err(error);
-    }
+    start_downloaded_update_with_mode(state, &file_path, UpdateRequestMode::Manual).await?;
 
     #[cfg(target_os = "windows")]
     {
@@ -843,115 +616,51 @@ async fn start_downloaded_update_with_mode(
 ) -> Result<(), String> {
     let expected_update = resolve_expected_update(state, mode).await?;
     let verified = verify_downloaded_update(&state.store, file_path, &expected_update).await?;
-    if configured_release_admin_url(state).await?.is_some() {
-        let bytes = tokio::fs::read(verified.path.with_extension("approval.json"))
-            .await
-            .map_err(|_| "缺少更新确认信息，请重新下载并确认更新".to_string())?;
-        let approved: UpdateCheck = serde_json::from_slice(&bytes)
-            .map_err(|_| "更新确认信息无效，请重新下载".to_string())?;
-        validate_same_update(&approved, &expected_update)?;
-        // 哈希校验可能耗时，启动安装器前再确认当前策略。
-        let fresh = resolve_expected_update(state, mode).await?;
-        validate_same_update(&approved, &fresh)?;
-    }
+    let bytes = tokio::fs::read(verified.path.with_extension("approval.json"))
+        .await
+        .map_err(|_| "缺少更新确认信息，请重新下载并确认更新".to_string())?;
+    let approved: UpdateCheck =
+        serde_json::from_slice(&bytes).map_err(|_| "更新确认信息无效，请重新下载".to_string())?;
+    validate_same_update(&approved, &expected_update)?;
+    // 哈希校验可能耗时，启动安装器前再确认当前策略。
+    let fresh = resolve_expected_update(state, mode).await?;
+    validate_same_update(&approved, &fresh)?;
     if !filter_update_policy(expected_update, update_policy(state, mode).await?)?.update_available {
         return Err("更新目标不符合当前更新策略".to_string());
     }
     spawn_update_installer(&verified.path, &verified.asset)
 }
 
-/// 管理端更新每次安装前重新校验，连接失败时停止安装。
+/// Release 更新每次安装前重新校验，连接失败时停止安装。
 async fn resolve_expected_update(
     state: &AppState,
     mode: UpdateRequestMode,
 ) -> Result<UpdateCheck, String> {
     let policy = update_policy(state, mode).await?;
-    if let Some(base_url) = configured_release_admin_url(state).await? {
-        let check = fetch_release_admin_update(state, &base_url, mode).await?;
-        if !check.update_available {
-            return Err("当前发布或回退授权已失效，请重新检查更新".to_string());
-        }
-        let check = filter_update_policy(check, policy)?;
-        if !check.update_available {
-            return Err("更新目标不符合当前更新策略".to_string());
-        }
-        return Ok(check);
+    let releases_url = configured_github_releases_url(state).await?;
+    let check = fetch_github_update(state, &releases_url, policy).await?;
+    if update_policy(state, mode).await? != policy {
+        return Err("更新策略已变化，请重新检查更新".to_string());
     }
-    if let Some(check) = state.available_update.read().await.clone()
-        && check.update_available
-        && check.rollback.is_none()
-        && check.policy_id.is_none()
-        && check.selected_asset.is_some()
-    {
-        let check = filter_update_policy(check, policy)?;
-        if !check.update_available {
-            return Err("更新目标不符合当前更新策略".to_string());
-        }
-        return Ok(check);
-    }
-    let manifest_url = configured_update_manifest_url(state).await?;
-    let manifest = fetch_configured_update_manifest(state, &manifest_url).await?;
-    let check = filter_update_policy(
-        assess_update_manifest(env!("CARGO_PKG_VERSION"), &manifest)?,
-        policy,
-    )?;
+    let check = filter_update_policy(check, policy)?;
     if !check.update_available {
-        return Err("当前已是最新版本，无需安装更新".to_string());
+        return Err("当前没有符合更新策略的新版 Release，请重新检查更新".to_string());
     }
     Ok(check)
 }
 
-async fn configured_update_manifest_url(state: &AppState) -> Result<String, String> {
-    let manifest_url = state
+async fn configured_github_releases_url(state: &AppState) -> Result<String, String> {
+    let releases_url = state
         .config
         .read()
         .await
-        .update_manifest_url
+        .github_releases_url
         .trim()
         .to_string();
-    if manifest_url.is_empty() {
+    if releases_url.is_empty() {
         return Err("内置更新地址未配置，请检查构建配置".to_string());
     }
-    Ok(manifest_url)
-}
-
-async fn fetch_configured_update_manifest(
-    state: &AppState,
-    manifest_url: &str,
-) -> Result<UpdateManifest, String> {
-    let url = reqwest::Url::parse(manifest_url)
-        .map_err(|_| "更新地址必须是有效的 HTTPS URL".to_string())?;
-    if url.scheme() != "https" {
-        return Err("更新地址必须使用 HTTPS".to_string());
-    }
-
-    let response = state
-        .http_client
-        .get(url)
-        .header(
-            USER_AGENT,
-            format!("Codey/{} update-check", env!("CARGO_PKG_VERSION")),
-        )
-        .timeout(Duration::from_secs(10))
-        .send()
-        .await
-        .map_err(|error| format!("检查更新失败：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("更新地址返回异常：{error}"))?;
-    if response.url().scheme() != "https" {
-        return Err("更新地址重定向到了非 HTTPS 地址".to_string());
-    }
-
-    let body = crate::http_response::read_bounded_body(
-        response,
-        MAX_UPDATE_MANIFEST_BYTES,
-        "更新清单响应",
-    )
-    .await
-    .map_err(|error| format!("读取更新清单失败：{error:#}"))?;
-    let manifest = serde_json::from_slice::<UpdateManifest>(&body)
-        .map_err(|error| format!("更新清单格式无效：{error}"))?;
-    Ok(manifest)
+    Ok(releases_url)
 }
 
 pub(super) fn assess_update_manifest(
@@ -964,9 +673,6 @@ pub(super) fn assess_update_manifest(
     if manifest.tag != format!("v{}", manifest.version) {
         return Err("更新清单的版本和标签不一致".to_string());
     }
-    if manifest.assets.is_empty() {
-        return Err("更新清单没有可下载的安装包".to_string());
-    }
     for asset in &manifest.assets {
         validate_update_asset(asset)?;
     }
@@ -978,12 +684,11 @@ pub(super) fn assess_update_manifest(
     Ok(UpdateCheck {
         current_version: current.to_string(),
         latest_version: latest.to_string(),
-        update_available: latest > current,
+        update_available: latest.cmp_precedence(&current).is_gt(),
         selected_asset: selected_update_asset(&manifest.assets).map(|asset| asset_info(&asset)),
         release_notes: manifest.release_notes.clone(),
-        publish_id: None,
-        policy_id: None,
-        rollback: None,
+        release_id: None,
+        prerelease: !latest.pre.is_empty(),
     })
 }
 
@@ -1017,95 +722,6 @@ pub(super) fn current_update_arch() -> &'static str {
     } else {
         std::env::consts::ARCH
     }
-}
-
-fn current_os_name() -> &'static str {
-    if cfg!(target_os = "windows") {
-        "Windows"
-    } else if cfg!(target_os = "macos") {
-        "macOS"
-    } else if cfg!(target_os = "linux") {
-        "Linux"
-    } else {
-        std::env::consts::OS
-    }
-}
-
-/// 系统版本只用于发布管理展示，探测一次后缓存，失败时返回 None 而不是阻断检查更新。
-fn current_os_version() -> Option<String> {
-    #[cfg(test)]
-    if let Ok(version) = TEST_DEVICE_VERSIONS.try_with(|versions| versions.os.clone()) {
-        return version;
-    }
-    static CACHE: OnceLock<Option<String>> = OnceLock::new();
-    CACHE.get_or_init(platform_os_version).clone()
-}
-
-#[cfg(target_os = "macos")]
-fn platform_os_version() -> Option<String> {
-    let text = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").ok()?;
-    let marker = "<key>ProductVersion</key>";
-    let rest = &text[text.find(marker)? + marker.len()..];
-    let start = rest.find("<string>")? + "<string>".len();
-    let end = rest[start..].find("</string>")? + start;
-    Some(rest[start..end].trim().to_string())
-}
-
-#[cfg(target_os = "windows")]
-fn platform_os_version() -> Option<String> {
-    // `ver` 输出中的版本号与系统语言无关，只解析其中的数字部分。
-    let output = std::process::Command::new("cmd")
-        .args(["/c", "ver"])
-        .output()
-        .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    let raw = text.split_whitespace().find(|part| {
-        part.chars().filter(|character| *character == '.').count() >= 2
-            && part
-                .chars()
-                .all(|character| character.is_ascii_digit() || character == '.' || character == ']')
-    })?;
-    let version = raw.trim_matches(|character: char| !character.is_ascii_digit());
-    let build = version.split('.').nth(2)?.parse::<u64>().ok()?;
-    // 系统名称已由 osName 上报，这里只补世代与 build，渲染成「Windows 11 26100」。
-    let generation = if build >= 22000 { "11" } else { "10" };
-    Some(format!("{generation} {build}"))
-}
-
-#[cfg(target_os = "linux")]
-fn platform_os_version() -> Option<String> {
-    let text = std::fs::read_to_string("/etc/os-release").ok()?;
-    for key in ["PRETTY_NAME=", "NAME="] {
-        if let Some(value) = text
-            .lines()
-            .find_map(|line| line.strip_prefix(key))
-            .map(|value| value.trim().trim_matches('"').trim().to_string())
-            .filter(|value| !value.is_empty())
-        {
-            return Some(value);
-        }
-    }
-    Some("Linux".to_string())
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
-fn platform_os_version() -> Option<String> {
-    None
-}
-
-/// Codex 版本在启动阶段已被探测并缓存；缓存缺失时补一次探测。
-async fn current_codex_version() -> Option<String> {
-    #[cfg(test)]
-    if let Ok(version) = TEST_DEVICE_VERSIONS.try_with(|versions| versions.codex.clone()) {
-        return version;
-    }
-    if let Some(version) = crate::error_log::cached_codex_version() {
-        return Some(version);
-    }
-    tokio::task::spawn_blocking(|| crate::error_log::refresh_codex_app_version(None, None))
-        .await
-        .ok()
-        .flatten()
 }
 
 fn installable_package_priority(asset: &UpdateManifestAsset) -> Option<u8> {
@@ -1515,171 +1131,206 @@ fn spawn_update_installer(_update_path: &Path, _asset: &UpdateAssetInfo) -> Resu
 mod tests {
     use super::*;
 
+    const REPOSITORY: &str = "fraternity-z/CodeyX";
+
+    fn github_release(version: &str) -> GitHubRelease {
+        let assets: Vec<_> = ["windows-x64-setup.exe", "macos-arm64-unsigned.zip"]
+            .into_iter().map(|suffix| {
+                let name = format!("CodeyX-{version}-{suffix}");
+                json!({
+                    "name": name,
+                    "browser_download_url": format!("https://github.com/{REPOSITORY}/releases/download/v{version}/{name}"),
+                    "size": 42,
+                    "state": "uploaded",
+                    "digest": format!("sha256:{}", "a".repeat(64)),
+                })
+            }).collect();
+        serde_json::from_value(json!({
+            "id": 123,
+            "tag_name": format!("v{version}"),
+            "draft": false,
+            "prerelease": version.contains('-'),
+            "body": "- Release 发布说明",
+            "assets": assets,
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn github_update_source_requires_a_public_repository_endpoint() {
+        assert_eq!(
+            github_releases_repository("https://api.github.com/repos/fraternity-z/CodeyX/releases")
+                .unwrap(),
+            REPOSITORY,
+        );
+        for url in [
+            "http://api.github.com/repos/fraternity-z/CodeyX/releases",
+            "https://other.example/repos/fraternity-z/CodeyX/releases",
+            "https://user@api.github.com/repos/fraternity-z/CodeyX/releases",
+            "https://api.github.com/repos/fraternity-z/CodeyX/releases?token=value",
+            "https://api.github.com/repos/fraternity-z/CodeyX/releases#fragment",
+            "https://api.github.com/repos/fraternity-z/CodeyX/releases/latest",
+        ] {
+            assert!(github_releases_repository(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn github_releases_use_semver_and_filter_drafts_and_prereleases() {
+        use crate::config::CodeyUpdatePolicy::{Experimental, Stable};
+        let mut draft = github_release("9.0.0");
+        draft.draft = true;
+        let mut marked_prerelease = github_release("3.0.0");
+        marked_prerelease.prerelease = true;
+        let mut unmarked_prerelease = github_release("4.0.0-beta.1");
+        unmarked_prerelease.prerelease = false;
+        let releases = vec![
+            draft,
+            marked_prerelease,
+            github_release("nightly"),
+            github_release("1.10.0"),
+            unmarked_prerelease,
+            github_release("1.9.0"),
+        ];
+        let stable = assess_github_releases("1.0.0", &releases, REPOSITORY, Stable).unwrap();
+        assert_eq!(stable.latest_version, "1.10.0");
+        assert_eq!(stable.release_notes.as_deref(), Some("- Release 发布说明"));
+        assert_eq!(stable.release_id.as_deref(), Some("123"));
+        assert!(stable.update_available);
+        assert!(!stable.prerelease);
+        let experimental =
+            assess_github_releases("1.0.0", &releases, REPOSITORY, Experimental).unwrap();
+        assert_eq!(experimental.latest_version, "4.0.0-beta.1");
+        assert!(experimental.prerelease);
+        let flagged =
+            assess_github_releases("1.0.0", &releases[1..2], REPOSITORY, Experimental).unwrap();
+        assert!(flagged.prerelease);
+        assert!(
+            !filter_update_policy(flagged, Stable)
+                .unwrap()
+                .update_available
+        );
+    }
+
+    #[test]
+    fn github_releases_never_downgrade_or_update_only_for_build_metadata() {
+        use crate::config::CodeyUpdatePolicy::Stable;
+        for (current, published) in [
+            ("2.0.0", "1.9.0"),
+            ("2.0.0", "2.0.0"),
+            ("2.0.0-beta.2", "1.9.0"),
+            ("2.0.0+one", "2.0.0+two"),
+        ] {
+            let check =
+                assess_github_releases(current, &[github_release(published)], REPOSITORY, Stable)
+                    .unwrap();
+            assert!(!check.update_available, "{current} -> {published}");
+        }
+        let check = assess_github_releases(
+            "2.0.0-beta.2",
+            &[github_release("2.0.0")],
+            REPOSITORY,
+            Stable,
+        )
+        .unwrap();
+        assert!(check.update_available);
+        let empty = assess_github_releases("1.0.0", &[], REPOSITORY, Stable).unwrap();
+        assert!(!empty.update_available);
+        assert_eq!(empty.latest_version, "1.0.0");
+        assert!(empty.selected_asset.is_none());
+    }
+
+    #[test]
+    fn github_assets_match_platform_architecture_and_support_existing_package_names() {
+        let mut release = github_release("2.0.0");
+        let version = Version::parse("2.0.0").unwrap();
+        let windows = github_release_asset(&release, &version, REPOSITORY, "windows", "x64")
+            .unwrap()
+            .unwrap();
+        assert_eq!(windows.package_type, "nsis");
+        assert_eq!(windows.sha256, "a".repeat(64));
+        assert_eq!(windows.size, 42);
+        assert!(
+            github_release_asset(&release, &version, REPOSITORY, "windows", "arm64")
+                .unwrap()
+                .is_none()
+        );
+        let macos = github_release_asset(&release, &version, REPOSITORY, "macos", "arm64")
+            .unwrap()
+            .unwrap();
+        assert_eq!(macos.package_type, "app-zip");
+        release.assets[0].name = release.assets[0].name.replace("CodeyX-", "Codey-");
+        release.assets[0].browser_download_url = release.assets[0]
+            .browser_download_url
+            .replace("/CodeyX-", "/Codey-");
+        let legacy = github_release_asset(&release, &version, REPOSITORY, "windows", "x64")
+            .unwrap()
+            .unwrap();
+        assert!(legacy.file_name.starts_with("Codey-"));
+        release.assets[0].state = "open".into();
+        assert!(
+            github_release_asset(&release, &version, REPOSITORY, "windows", "x64")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn github_assets_require_the_same_release_and_valid_digest() {
+        let version = Version::parse("2.0.0").unwrap();
+        for digest in [None, Some("md5:abc".into()), Some("sha256:invalid".into())] {
+            let mut release = github_release("2.0.0");
+            release.assets[0].digest = digest;
+            assert!(
+                github_release_asset(&release, &version, REPOSITORY, "windows", "x64")
+                    .unwrap_err()
+                    .contains("SHA-256")
+            );
+        }
+        for url in [
+            "https://other.example/setup.exe",
+            "https://github.com/other/repo/releases/download/v2.0.0/CodeyX-2.0.0-windows-x64-setup.exe",
+            "https://github.com/fraternity-z/CodeyX/releases/download/v1.0.0/CodeyX-2.0.0-windows-x64-setup.exe",
+        ] {
+            let mut release = github_release("2.0.0");
+            release.assets[0].browser_download_url = url.into();
+            assert!(
+                github_release_asset(&release, &version, REPOSITORY, "windows", "x64").is_err()
+            );
+        }
+        let mut release = github_release("2.0.0");
+        release.assets[0].size = 0;
+        assert!(github_release_asset(&release, &version, REPOSITORY, "windows", "x64").is_err());
+        release.assets.clear();
+        let check = assess_github_releases(
+            "1.0.0",
+            &[release],
+            REPOSITORY,
+            crate::config::CodeyUpdatePolicy::Stable,
+        )
+        .unwrap();
+        assert!(check.update_available);
+        assert!(check.selected_asset.is_none());
+    }
+
     #[tokio::test]
-    async fn device_machine_no_reads_registered_identity_without_exposing_key() {
+    async fn retired_device_api_does_not_read_or_rewrite_existing_identity() {
         let directory = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState {
             store: ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
             ..AppState::default()
         });
-        state.config.write().await.release_admin_url = "invalid-offline-url".into();
-        let identity =
-            json!({ "installKey": "private-install-key", "machineNo": "m_Existing-AbC_123" });
-        tokio::fs::write(
-            device_identity_path(&state.store).await.unwrap(),
-            identity.to_string(),
-        )
-        .await
-        .unwrap();
-        let result = invoke(&state, "get_device_machine_no", &Value::Null)
+        let path = directory.path().join("release-device.json");
+        tokio::fs::write(&path, b"existing-user-data")
             .await
             .unwrap();
-        assert_eq!(result, json!("m_Existing-AbC_123"));
-        assert!(!result.to_string().contains("private-install-key"));
-    }
-
-    #[tokio::test]
-    async fn device_machine_no_is_absent_without_registration_or_service() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = AppState {
-            store: ConfigStore::new(directory.path().join("config.json")),
-            ..AppState::default()
-        };
-        state.config.write().await.release_admin_url.clear();
-        assert_eq!(get_device_machine_no(&state).await.unwrap(), Value::Null);
-        assert!(!device_identity_path(&state.store).await.unwrap().exists());
-    }
-
-    #[tokio::test]
-    async fn concurrent_device_registration_matches_display_and_update_report() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = AppState {
-            store: ConfigStore::new(directory.path().join("config.json")),
-            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
-            http_client: reqwest::Client::builder().no_proxy().build().unwrap(),
-            ..AppState::default()
-        };
-        // AppState::default() 会读取真实用户配置，更新策略必须显式固定。
-        state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Stable;
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base_url = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let captured = requests.clone();
-        let server = tokio::spawn(async move {
-            loop {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut request = Vec::new();
-                let mut buffer = [0; 4096];
-                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
-                    let read = stream.read(&mut buffer).await.unwrap();
-                    assert!(read > 0);
-                    request.extend_from_slice(&buffer[..read]);
-                }
-                let header_end = request
-                    .windows(4)
-                    .position(|bytes| bytes == b"\r\n\r\n")
-                    .unwrap()
-                    + 4;
-                let content_length = std::str::from_utf8(&request[..header_end])
-                    .unwrap()
-                    .lines()
-                    .filter_map(|line| line.split_once(':'))
-                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                    .map(|(_, value)| value.trim().parse::<usize>().unwrap())
-                    .unwrap_or(0);
-                while request.len() < header_end + content_length {
-                    let read = stream.read(&mut buffer).await.unwrap();
-                    assert!(read > 0, "request body ended before Content-Length");
-                    request.extend_from_slice(&buffer[..read]);
-                }
-                let request = String::from_utf8(request).unwrap();
-                let body = if request.starts_with("POST /api/devices/register ") {
-                    r#"{"machineNo":"m_registered-AbC_123"}"#
-                } else {
-                    r#"{"updateAvailable":false}"#
-                };
-                captured.lock().await.push(request);
-                let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                    body.len()
-                );
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let registration = async {
-            let (first, second) = tokio::join!(
-                load_or_register_device(&state, &base_url),
-                load_or_register_device(&state, &base_url),
-            );
-            let first = first.unwrap();
-            let second = second.unwrap();
-            assert_eq!(first.machine_no, second.machine_no);
-            assert_eq!(first.install_key, second.install_key);
-            let displayed = get_device_machine_no(&state).await.unwrap();
-            assert_eq!(displayed, json!(first.machine_no));
-            fetch_release_admin_update(&state, &base_url, UpdateRequestMode::Automatic)
-                .await
-                .unwrap();
-            state.config.write().await.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
-            assert!(
-                fetch_release_admin_update(&state, &base_url, UpdateRequestMode::Automatic)
-                    .await
-                    .unwrap_err()
-                    .contains("自动检查")
-            );
-            fetch_release_admin_update(&state, &base_url, UpdateRequestMode::Manual)
-                .await
-                .unwrap();
-            first
-        };
-        let result = tokio::time::timeout(
-            Duration::from_secs(15),
-            TEST_DEVICE_VERSIONS.scope(
-                TestDeviceVersions {
-                    codex: Some("1.2.3-test".into()),
-                    os: Some("test-os-version".into()),
-                },
-                registration,
-            ),
-        )
-        .await;
-        server.abort();
-        let identity = result.unwrap();
-        let requests = requests.lock().await;
-        assert_eq!(
-            requests
-                .iter()
-                .filter(|request| request.starts_with("POST /api/devices/register "))
-                .count(),
-            1
-        );
-        let registration = requests
-            .iter()
-            .find(|request| request.starts_with("POST /api/devices/register "))
-            .unwrap();
-        let (_, body) = registration.split_once("\r\n\r\n").unwrap();
-        let body: Value = serde_json::from_str(body).unwrap();
-        assert_eq!(body["installKey"], identity.install_key);
-        assert_eq!(body["codexVersion"], "1.2.3-test");
-        assert_eq!(body["osVersion"], "test-os-version");
-        let report = requests
-            .iter()
-            .find(|request| request.starts_with("GET /api/updates/check?"))
-            .unwrap();
-        assert!(report.contains(&format!("x-machine-no: {}\r\n", identity.machine_no)));
-        assert!(report.contains(&format!("x-device-key: {}\r\n", identity.install_key)));
-        assert!(report.contains("codexVersion=1.2.3-test"));
-        assert!(report.contains("osVersion=test-os-version"));
-        let checks: Vec<_> = requests
-            .iter()
-            .filter(|request| request.starts_with("GET /api/updates/check?"))
-            .collect();
-        assert_eq!(checks.len(), 2);
         assert!(
-            checks
-                .iter()
-                .all(|request| request.contains("updatePolicy=stable"))
+            invoke(&state, "get_device_machine_no", &Value::Null)
+                .await
+                .is_err()
         );
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"existing-user-data");
     }
 
     fn valid_asset() -> UpdateManifestAsset {
@@ -1722,81 +1373,30 @@ mod tests {
             update_available: true,
             selected_asset: Some(asset),
             release_notes: None,
-            publish_id: None,
-            policy_id: None,
-            rollback: None,
+            release_id: None,
+            prerelease: Version::parse(version).is_ok_and(|version| !version.pre.is_empty()),
         }
     }
 
     #[test]
-    fn rollback_requires_exact_source_target_batch_and_identity() {
-        let manifest = valid_manifest("1.0.0");
-        let base = assess_update_manifest("2.0.0", &manifest).unwrap();
-        assert!(!base.update_available);
-        let directive = RollbackDirective {
-            id: "rollback-1".into(),
-            source_version: "2.0.0".into(),
-            target_version: "1.0.0".into(),
-            reason: "启动故障".into(),
-        };
-        let mut authorized = base.clone();
-        authorize_rollback(&mut authorized, directive.clone(), Some("rollback-1"), true).unwrap();
-        assert!(authorized.update_available);
-        assert!(authorized.rollback.is_some());
-        assert!(
-            authorize_rollback(
-                &mut base.clone(),
-                directive.clone(),
-                Some("rollback-2"),
-                true
-            )
-            .is_err()
-        );
-        assert!(
-            authorize_rollback(
-                &mut base.clone(),
-                directive.clone(),
-                Some("rollback-1"),
-                false
-            )
-            .is_err()
-        );
-        let mut wrong = directive.clone();
-        wrong.source_version = "3.0.0".into();
-        assert!(authorize_rollback(&mut base.clone(), wrong, Some("rollback-1"), true).is_err());
-        let mut wrong = directive;
-        wrong.target_version = "0.9.0".into();
-        assert!(authorize_rollback(&mut base.clone(), wrong, Some("rollback-1"), true).is_err());
-    }
-
-    #[test]
-    fn install_approval_rejects_superseded_or_revoked_policy() {
-        let mut approved = install_check("1.0.0", "Codey.zip", b"package");
-        approved.current_version = "2.0.0".into();
-        approved.policy_id = Some("rollback-1".into());
-        approved.rollback = Some(RollbackDirective {
-            id: "rollback-1".into(),
-            source_version: "2.0.0".into(),
-            target_version: "1.0.0".into(),
-            reason: "故障".into(),
-        });
+    fn install_approval_rejects_changed_releases_or_assets() {
+        let mut approved = install_check("2.0.0", "Codey.zip", b"package");
+        approved.release_id = Some("123".into());
         assert!(validate_same_update(&approved, &approved).is_ok());
         let mut changed = approved.clone();
         changed.update_available = false;
         assert!(validate_same_update(&approved, &changed).is_err());
         let mut changed = approved.clone();
-        changed.policy_id = Some("publish-next".into());
+        changed.release_id = Some("456".into());
         assert!(validate_same_update(&approved, &changed).is_err());
         let mut changed = approved.clone();
-        changed.rollback = None;
+        changed.prerelease = true;
+        assert!(validate_same_update(&approved, &changed).is_err());
+        let mut changed = approved.clone();
+        changed.selected_asset.as_mut().unwrap().sha256 = "b".repeat(64);
         assert!(validate_same_update(&approved, &changed).is_err());
         let next = install_check("3.0.0", "Codey.zip", b"next");
         assert!(validate_same_update(&approved, &next).is_err());
-        assert!(
-            assess_update_manifest("2.0.0", &valid_manifest("3.0.0"))
-                .unwrap()
-                .update_available
-        );
     }
 
     #[test]
@@ -1848,7 +1448,7 @@ mod tests {
             check: assess_update_manifest("1.0.0", &valid_manifest("2.0.0")).unwrap(),
         };
         let cached = CachedUpdateCandidate {
-            manifest_url: "https://updates.example.test/manifest.json".to_string(),
+            releases_url: "https://updates.example.test/manifest.json".to_string(),
             candidate: candidate.clone(),
             checked_at,
         };
@@ -1902,16 +1502,15 @@ mod tests {
             ..AppState::default()
         });
         // 非 HTTPS 地址让重新获取在校验阶段失败，避免测试依赖外部网络。
-        let manifest_url = "http://updates.example.test/manifest.json";
+        let releases_url = "http://updates.example.test/manifest.json";
         {
             let mut config = state.config.write().await;
             config.codey_update_policy = crate::config::CodeyUpdatePolicy::Stable;
-            config.release_admin_url.clear();
-            config.update_manifest_url = manifest_url.to_string();
+            config.github_releases_url = releases_url.to_string();
         }
         let check = assess_update_manifest("1.0.0", &valid_manifest("2.0.0")).unwrap();
         *state.update_candidate_cache.lock().await = Some(CachedUpdateCandidate {
-            manifest_url: format!("stable:{manifest_url}"),
+            releases_url: format!("stable:{releases_url}"),
             candidate: UpdateCandidate {
                 check: check.clone(),
             },
@@ -1980,18 +1579,18 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState {
             store: ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
             ..AppState::default()
         });
-        let manifest_url = "http://updates.example.test/manifest.json";
+        let releases_url = "http://updates.example.test/manifest.json";
         {
             let mut config = state.config.write().await;
             config.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
-            config.release_admin_url.clear();
-            config.update_manifest_url = manifest_url.to_string();
+            config.github_releases_url = releases_url.to_string();
         }
         let check = install_check("2.0.0", "codey-update.pkg", b"verified");
         *state.update_candidate_cache.lock().await = Some(CachedUpdateCandidate {
-            manifest_url: format!("stable:{manifest_url}"),
+            releases_url: format!("stable:{releases_url}"),
             candidate: UpdateCandidate {
                 check: check.clone(),
             },
@@ -2005,10 +1604,16 @@ mod tests {
             serde_json::to_value(&check).unwrap()
         );
         assert_eq!(
-            resolve_expected_update(&state, UpdateRequestMode::Manual)
+            update_policy(&state, UpdateRequestMode::Manual)
                 .await
                 .unwrap(),
-            check
+            crate::config::CodeyUpdatePolicy::Stable,
+        );
+        assert_eq!(
+            resolve_expected_update(&state, UpdateRequestMode::Manual)
+                .await
+                .unwrap_err(),
+            "更新地址必须使用 HTTPS"
         );
         assert_eq!(
             invoke(
@@ -2024,11 +1629,11 @@ mod tests {
             download_update(&state, &json!({})).await.unwrap_err(),
             "更新目标已变化，请重新检查并确认更新"
         );
-        assert!(
+        assert_eq!(
             start_downloaded_update_with_mode(&state, "relative.pkg", UpdateRequestMode::Manual)
                 .await
-                .unwrap_err()
-                .contains("绝对路径")
+                .unwrap_err(),
+            "更新地址必须使用 HTTPS"
         );
     }
 
@@ -2037,12 +1642,12 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let state = Arc::new(AppState {
             store: ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
             ..AppState::default()
         });
         {
             let mut config = state.config.write().await;
             config.codey_update_policy = crate::config::CodeyUpdatePolicy::Off;
-            config.release_admin_url.clear();
         }
         let candidate = UpdateCandidate {
             check: install_check("2.0.0-beta.1", "codey-update.pkg", b"verified"),
@@ -2054,11 +1659,15 @@ mod tests {
                 .unwrap_err(),
             "更新目标不符合当前更新策略"
         );
-        assert_eq!(
-            resolve_expected_update(&state, UpdateRequestMode::Manual)
-                .await
-                .unwrap_err(),
-            "更新目标不符合当前更新策略"
+        assert!(
+            !filter_update_policy(
+                candidate.check,
+                update_policy(&state, UpdateRequestMode::Manual)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+            .update_available
         );
     }
 

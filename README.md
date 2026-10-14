@@ -1,49 +1,70 @@
-# CodeyX
+<div align="center">
 
-CodeyX 是基于 [Codey](https://github.com/SuperGness/codey) 独立维护的 Codex 桌面增强启动器，集中管理模型线路、账号、会话和扩展，并提供用量分析与任务通知。
+<h1>CodeyX</h1>
 
-本项目主要面向 Windows 开发、测试和发布，其他平台不在当前维护范围内；与上游项目无官方隶属或背书关系。
+<p><strong>让 Codex 桌面端更顺手</strong></p>
+<p>模型线路 · 多账号 · 会话管理 · 扩展与远程协作</p>
+
+<p>
+  <img src="https://img.shields.io/badge/Platform-Windows-0078D4?style=flat-square" alt="主要维护平台：Windows" />
+  <img src="https://img.shields.io/badge/Codex-Desktop-24292F?style=flat-square" alt="Codex 桌面增强" />
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-AGPL--3.0-2563EB?style=flat-square" alt="AGPL-3.0-only 许可" /></a>
+</p>
+
+<p>
+  <a href="https://github.com/fraternity-z/CodeyX/releases/latest">下载最新版</a>
+  · <a href="#主要功能">主要功能</a>
+  · <a href="https://github.com/fraternity-z/CodeyX/issues">问题反馈</a>
+</p>
+
+</div>
+
+CodeyX 是独立维护的 Codex 桌面增强启动器，将模型、账号、会话和扩展集中在一个控制台中管理。
+
+> 当前主要面向 **Windows** 开发、测试与发布，其他平台不在维护范围内。
 
 ## 主要功能
 
-- 线路与模型：管理官方和第三方线路，配置代理、同步账号可用模型，拖动调整线路和模型顺序，在任务中切换模型及思考强度；本地路由启用时，官方额度耗尽不会阻止切换到第三方线路。
-- 远程压缩：官方及原生支持的线路使用上游远程压缩，其他线路由网关生成等价摘要，可在对话中切换线路。
-- 官方账号：管理多个 ChatGPT 账号，可自定义网关地址，分别查看额度和重置时间，并在同一对话中切换使用；可在账号上启用 OpenAI 官方直连授权（Sign in with ChatGPT），对话改走官方 API 通道。
-- 请求与用量：查询请求耗时、输出速度、Token 和错误，分析用量趋势及模型占比。
-- 会话管理：查看任务状态，导入导出会话，删除指定轮次并恢复备份。
-- 手机远程：通过局域网或内置 HTTPS 隧道按项目继续电脑上的 Codex 会话，拍照或选择照片发送，调整模型与执行设置，并管理 Codey 控制台。
-- 扩展管理：管理 MCP、Skill 和可信 Codey 插件，支持配置、启停、导入导出、插件包拖拽导入及日志查看与清理。
-- 插件线路：支持手动填写或按配置轮换密钥、绑定已保存账号，以及在官方请求前通过另一个账号取得请求状态；停用时仅保留已填写密钥的普通线路。
-- 任务数量：通过授权接口查询正在运行和失败的任务数量。
-- 页面增强：改善插件市场与常用会话操作，支持精选插件离线恢复。
-- 桌面操作：通过可选的 Codey Computer Use 插件读取应用状态并执行点击、输入和滚动。
-- 提示词优化：一键优化输入内容，结果可继续编辑。
-- 对话 Git 提交：使用所选模型分析本对话改动并生成符合 Conventional Commits 的中文说明，由模型按需补充正文，支持自主选择仅提交或提交并推送，共享文件中的其他改动继续保留。
-- 模型分工：子代理可并行修改不同文件，角色启停、模型和思考深度可实时调整。
-- 文件工具：可选启用 FastCtx，读取、搜索文件并批量替换内容。
-- 任务通知：通过飞书、企业微信、Telegram、ntfy 或微信 ClawBot 接收完成、失败和等待介入通知。
-- 诊断与更新：检查和修复配置、恢复断线、清理诊断日志，提供宠物精简、渲染诊断、Codex 启动代理及不检查、稳定版、实验版三档更新策略。
-- 发布管理：系统设置可查看设备号，独立控制台支持指定版本打包、AI 更新日志、正式版与实验版发布、定向推送及历史正式版回滚。
+| 能力 | 说明 |
+| :--- | :--- |
+| **线路与模型** | 管理官方和第三方线路，在任务中切换模型与思考强度。 |
+| **远程压缩** | 根据线路能力压缩上下文，支持跨线路继续对话。 |
+| **多账号管理** | 管理多个 ChatGPT 账号、查看额度，并按需启用官方直连授权。 |
+| **请求与用量** | 查看请求耗时、输出速度、Token 用量与错误分布。 |
+| **会话管理** | 查看任务状态与数量，导入导出会话或删除指定轮次并恢复备份。 |
+| **手机远程** | 通过局域网或 HTTPS 隧道在手机上继续电脑会话，支持发送照片。 |
+| **扩展管理** | 统一管理 MCP、Skill 和可信原生插件。 |
+| **插件线路** | 通过可信插件扩展模型线路、密钥轮换与账号接入。 |
+| **页面增强** | 改善常用会话操作与插件市场体验，支持精选插件离线恢复。 |
+| **桌面操作** | 可选安装 Codey Computer Use 工具，读取应用状态并执行点击、输入和滚动。 |
+| **提示词优化** | 一键优化输入内容，优化结果可继续编辑。 |
+| **对话 Git 提交** | 根据本对话改动生成中文提交说明，可选择仅提交或提交并推送。 |
+| **模型分工** | 让子代理并行处理任务，并为不同角色选择模型与思考深度。 |
+| **文件工具** | 可选启用 FastCtx，读取、搜索文件并批量替换内容。 |
+| **任务通知** | 通过飞书、企业微信、Telegram、ntfy 或微信 ClawBot 接收任务状态通知。 |
+| **诊断维护** | 检查和修复配置、恢复断线，并管理诊断日志与启动选项。 |
+| **版本更新** | 按本项目 GitHub Releases 检测新版本，支持稳定版与实验版。 |
 
-## 使用与注意事项
+## 使用须知
 
-打开 Codey 会自动启动 Codex，点击左侧图标栏底部的 Codey 按钮进入控制台；设置是否需要重启，以界面提示为准。
+从 [Releases](https://github.com/fraternity-z/CodeyX/releases) 下载 Windows 安装包，安装后打开 CodeyX 即可启动 Codex，功能设置在 Codex 内的 Codey 控制台中完成。
 
-- 仅支持可明确识别的 Codex 桌面客户端；启动可能重启所选客户端，请先结束正在运行的任务，多版本共存时需明确选择。
-- 官方线路需添加官方账号；默认账号决定客户端登录身份，各线路使用各自账号。
-- 启用本地路由后可为官方和第三方模型设置上下文预算，但不能扩大服务商容量；第三方能力与跨线路会话兼容性取决于服务商和 Codex 版本。
-- 安装包及原生插件仅使用可信来源；原生插件拥有与 Codey 相同的系统权限，Codey 不修改客户端安全开关，集成失败时会在确认清理后尝试原生启动。
-- 桌面工具需在 Codey 插件市场设置中手动准备，再到 Codex 安装启用；保留的 macOS 功能要求 macOS 14 及以上，并需授予辅助功能和屏幕录制权限，升级后可能需要重新授权。
-- 远程控制需手动开启并扫码配对，电脑须保持运行；局域网仅用于可信网络，内置临时隧道经过 Cloudflare，地址随重启变化，设备授权可随时撤销。
-- 不检查仅关闭自动检查，仍可手动检查稳定版；实验版可能存在功能或数据兼容问题，启用前请备份重要数据。
+- **客户端兼容**：仅支持可明确识别的 Codex 桌面客户端；启动可能重启客户端，请先结束任务，多版本共存时需明确选择。
+- **账号与线路**：官方线路需添加官方账号，默认账号决定客户端登录身份，各线路使用各自账号。
+- **服务商限制**：上下文预算不能扩大服务商容量，第三方能力及跨线路兼容性取决于服务商和 Codex 版本。
+- **安装安全**：安装包和原生插件仅使用可信来源；原生插件拥有与 Codey 相同的系统权限，Codey 不修改客户端安全开关，集成失败后仅在确认清理完成时尝试原生启动。
+- **桌面工具**：需先在 Codey 中手动准备，再到 Codex 安装启用。
+- **远程访问**：需手动开启并配对，电脑须保持运行；局域网仅用于可信网络，临时隧道经过 Cloudflare 且地址会变化，设备授权可随时撤销。
+- **更新选择**：“不检查”仅关闭自动检查，仍可手动检查稳定版；实验版需主动启用，使用前请备份重要数据。
 
-## 第三方声明
+## 来源与许可
 
-PPT Bridge 和 Excel Shield 插件的协议适配迁移自 Kaixxrua/excel-codex-bridge，原项目采用 Unlicense。
+CodeyX 基于 [SuperGness/Codey](https://github.com/SuperGness/codey) 独立维护，由 fraternity-z 继续开发，与上游无官方隶属或背书关系；问题请反馈至本仓库。
 
-远程会话协议适配参考 [codex-mobile-bridge](https://github.com/try2love/codex-mobile-bridge)，采用 MIT 许可；可选隧道使用 [cloudflared](https://github.com/cloudflare/cloudflared)，采用 Apache-2.0 许可。
+本项目沿用 [AGPL-3.0-only](LICENSE) 许可，保留上游版权与必要的[第三方声明](THIRD_PARTY_NOTICES.md)。
 
-Astra Turn State 插件的预请求流程参考 [spumon1/SUCK_MY_ASTRA](https://github.com/spumon1/SUCK_MY_ASTRA)，原项目采用 MIT License，Copyright (c) 2026 boooot。
+<details>
+<summary>FastCtx 第三方声明（Apache-2.0）</summary>
 
     This product includes FastCtx
     (https://github.com/yc-duan/fastctx), Copyright (c) 2026 yc-duan,
@@ -56,12 +77,4 @@ Astra Turn State 插件的预请求流程参考 [spumon1/SUCK_MY_ASTRA](https://
     accepts no liability of any kind arising from this distribution or
     from anything built on top of it.
 
-## 项目归属与许可
-
-Codey 原项目由 [SuperGness](https://github.com/SuperGness) 创建和维护；CodeyX 由 fraternity-z 独立维护，问题反馈请使用本仓库的 Issues。
-
-本项目沿用 [AGPL-3.0-only](LICENSE) 许可，保留原项目及第三方组件的版权与许可声明。
-
-## 致谢
-
-感谢 [linuxdo](https://linux.do/) 社区的讨论、分享与反馈。
+</details>

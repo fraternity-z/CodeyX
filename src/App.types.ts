@@ -322,17 +322,14 @@ export type CrashpadCleanup = {
   errors: string[];
 };
 
-export type RollbackDirective = { id: string; sourceVersion: string; targetVersion: string; reason: string };
-
 export type UpdateCheck = {
   currentVersion: string;
   latestVersion: string;
   updateAvailable: boolean;
   selectedAsset?: UpdateAsset;
   releaseNotes?: string | null;
-  publishId?: string | null;
-  policyId?: string | null;
-  rollback?: RollbackDirective | null;
+  releaseId?: string | null;
+  prerelease?: boolean;
 };
 
 export type UpdateAsset = {
@@ -352,9 +349,8 @@ export type UpdateDownload = {
   size: number;
   sha256: string;
   asset: UpdateAsset;
-  publishId?: string | null;
-  policyId?: string | null;
-  rollback?: RollbackDirective | null;
+  releaseId?: string | null;
+  prerelease?: boolean;
 };
 
 /// 上一次更新安装留给本次启动的结果。助手在退出前写下，控制台读取后删除，

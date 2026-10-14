@@ -1193,7 +1193,6 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
             }
         }
         "check_for_updates"
-        | "get_device_machine_no"
         | "download_update"
         | "update_install_report"
         | "install_downloaded_update" => updates::invoke(state, command, &args).await,
