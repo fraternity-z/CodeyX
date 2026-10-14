@@ -5,6 +5,7 @@ pub(crate) enum UpstreamProtocol {
     OpenAiResponses,
     OpenAiChatCompletions,
     AnthropicMessages,
+    Gemini,
 }
 
 impl UpstreamProtocol {
@@ -15,6 +16,7 @@ impl UpstreamProtocol {
         match upstream_protocol {
             UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS => Self::OpenAiChatCompletions,
             UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES => Self::AnthropicMessages,
+            UPSTREAM_PROTOCOL_GEMINI => Self::Gemini,
             UPSTREAM_PROTOCOL_OPENAI_RESPONSES => Self::OpenAiResponses,
             _ => Self::OpenAiResponses,
         }
@@ -25,6 +27,7 @@ impl UpstreamProtocol {
             Self::OpenAiResponses => "OpenAI Responses",
             Self::OpenAiChatCompletions => "OpenAI Chat Completions",
             Self::AnthropicMessages => "Anthropic Messages",
+            Self::Gemini => "Gemini",
         }
     }
 
@@ -33,6 +36,7 @@ impl UpstreamProtocol {
             Self::OpenAiResponses => "API URL",
             Self::OpenAiChatCompletions => "Chat Completions API URL",
             Self::AnthropicMessages => "Anthropic Messages API URL",
+            Self::Gemini => "Gemini API URL",
         }
     }
 }
@@ -42,6 +46,7 @@ pub(crate) enum ProtocolBridge {
     NativeResponses,
     ResponsesToChatCompletions,
     ResponsesToAnthropicMessages,
+    ResponsesToGemini,
 }
 
 impl ProtocolBridge {
@@ -50,6 +55,7 @@ impl ProtocolBridge {
             UpstreamProtocol::OpenAiResponses => Self::NativeResponses,
             UpstreamProtocol::OpenAiChatCompletions => Self::ResponsesToChatCompletions,
             UpstreamProtocol::AnthropicMessages => Self::ResponsesToAnthropicMessages,
+            UpstreamProtocol::Gemini => Self::ResponsesToGemini,
         }
     }
 
@@ -58,6 +64,7 @@ impl ProtocolBridge {
             Self::NativeResponses => UpstreamProtocol::OpenAiResponses,
             Self::ResponsesToChatCompletions => UpstreamProtocol::OpenAiChatCompletions,
             Self::ResponsesToAnthropicMessages => UpstreamProtocol::AnthropicMessages,
+            Self::ResponsesToGemini => UpstreamProtocol::Gemini,
         }
     }
 
@@ -66,6 +73,7 @@ impl ProtocolBridge {
             Self::NativeResponses => "Responses passthrough",
             Self::ResponsesToChatCompletions => "Responses -> Chat Completions",
             Self::ResponsesToAnthropicMessages => "Responses -> Anthropic Messages",
+            Self::ResponsesToGemini => "Responses -> Gemini",
         }
     }
 
@@ -81,14 +89,12 @@ impl ProtocolBridge {
             Self::ResponsesToAnthropicMessages => {
                 responses_to_anthropic_messages_request(body).map(Some)
             }
+            Self::ResponsesToGemini => responses_to_gemini_request(body).map(Some),
         }
     }
 
     pub(crate) fn can_collect_streamed_response(self) -> bool {
-        matches!(
-            self,
-            Self::ResponsesToChatCompletions | Self::ResponsesToAnthropicMessages
-        )
+        self != Self::NativeResponses
     }
 }
 
@@ -281,6 +287,7 @@ pub(crate) fn prepare_upstream_url(
         UpstreamProtocol::OpenAiResponses => responses_endpoint(base_url),
         UpstreamProtocol::OpenAiChatCompletions => chat_completions_endpoint(base_url),
         UpstreamProtocol::AnthropicMessages => anthropic_messages_endpoint(base_url),
+        UpstreamProtocol::Gemini => gemini_models_endpoint(base_url),
     };
     result.map_err(|error| {
         let endpoint = protocol.endpoint_label();
@@ -389,21 +396,26 @@ pub(crate) fn prepare_upstream_headers(
             "线路「{route_name}」使用 Anthropic Messages 时不允许配置 Authorization；请使用该线路的 Key 字段或 x-api-key"
         ));
     }
+    if protocol == UpstreamProtocol::Gemini && has_custom_authorization {
+        return Err(format!(
+            "线路「{route_name}」使用 Gemini 时不允许配置 Authorization；请使用该线路的 Key 字段或 x-goog-api-key"
+        ));
+    }
     if !profile.official_account && !profile.api_key.trim().is_empty() {
-        let header_name = if protocol == UpstreamProtocol::AnthropicMessages {
-            HeaderName::from_static("x-api-key")
-        } else {
-            AUTHORIZATION
+        let header_name = match protocol {
+            UpstreamProtocol::AnthropicMessages => HeaderName::from_static("x-api-key"),
+            UpstreamProtocol::Gemini => HeaderName::from_static("x-goog-api-key"),
+            _ => AUTHORIZATION,
         };
         // 凭据以线路 Key 为准：空值移除标记不会抑制它，只有非空覆盖才能替换。
         let has_custom_credential = headers
             .get(&header_name)
             .is_some_and(|value| !value.is_empty());
         if !has_custom_credential {
-            let header_value = if protocol == UpstreamProtocol::AnthropicMessages {
-                profile.api_key.trim().to_string()
-            } else {
+            let header_value = if header_name == AUTHORIZATION {
                 format!("Bearer {}", profile.api_key.trim())
+            } else {
+                profile.api_key.trim().to_string()
             };
             let mut value = HeaderValue::from_str(&header_value)
                 .map_err(|_| format!("线路「{route_name}」的 API Key 格式无效"))?;

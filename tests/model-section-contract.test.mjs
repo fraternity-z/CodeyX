@@ -9,6 +9,13 @@ const [modelSectionSource, typeSource, dialogSource] = await Promise.all([
   readSource("src/AppDialogs.tsx"),
 ]);
 
+test("route editor offers the native Gemini protocol and its connection hints", () => {
+  assert.match(typeSource, /export type UpstreamProtocol =[\s\S]*?\| "gemini"/);
+  assert.match(modelSectionSource, /\{ label: "Gemini", value: "gemini" \}/);
+  assert.match(modelSectionSource, /generativelanguage\.googleapis\.com/);
+  assert.match(modelSectionSource, /AIza/);
+});
+
 test("third-party native Web Search is an explicit Responses-only capability", () => {
   assert.match(typeSource, /supportsNativeWebSearch\?: boolean/);
   assert.match(modelSectionSource, /supportsNativeWebSearch: false/);

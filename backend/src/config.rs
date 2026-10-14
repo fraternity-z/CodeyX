@@ -279,7 +279,8 @@ impl ProviderProfile {
             UPSTREAM_PROTOCOL_OFFICIAL
             | UPSTREAM_PROTOCOL_OPENAI_RESPONSES
             | UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS
-            | UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES => Ok("responses"),
+            | UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES
+            | UPSTREAM_PROTOCOL_GEMINI => Ok("responses"),
             protocol => Err(format!(
                 "线路「{}」使用了不支持的上游协议：{protocol}",
                 self.name
@@ -2639,6 +2640,7 @@ pub const UPSTREAM_PROTOCOL_OFFICIAL: &str = "official";
 pub const UPSTREAM_PROTOCOL_OPENAI_RESPONSES: &str = "openaiResponses";
 pub const UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS: &str = "openaiChatCompletions";
 pub const UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropicMessages";
+pub const UPSTREAM_PROTOCOL_GEMINI: &str = "gemini";
 pub const AUTH_MODE_OFFICIAL_ACCOUNT: &str = "officialAccount";
 pub const AUTH_MODE_API_KEY: &str = "apiKey";
 pub const SUBAGENT_REASONING_EFFORTS: [&str; 6] =
@@ -2720,6 +2722,9 @@ fn normalize_upstream_protocol(value: &str) -> String {
         }
         UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES | "anthropic" | "anthropicMessagesApi" => {
             UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES
+        }
+        UPSTREAM_PROTOCOL_GEMINI | "googleGemini" | "geminiGenerateContent" => {
+            UPSTREAM_PROTOCOL_GEMINI
         }
         _ => UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
     }
@@ -3461,6 +3466,23 @@ mod tests {
             UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES
         );
         assert_eq!(profile.runtime_wire_api().unwrap(), "responses");
+    }
+
+    #[test]
+    fn gemini_protocol_still_exposes_responses_to_codex() {
+        let mut profile = ProviderProfile::new("Gemini");
+        profile.base_url = "https://generativelanguage.googleapis.com/v1beta".into();
+        profile.api_key = "gemini-test-key".into();
+        profile.upstream_protocol = "gemini".into();
+        profile.supports_native_web_search = true;
+        profile.normalize();
+
+        assert_eq!(profile.upstream_protocol, "gemini");
+        assert_eq!(profile.runtime_wire_api().unwrap(), "responses");
+        assert!(!profile.supports_native_web_search);
+        assert!(profile.validate().is_ok());
+        profile.supports_websockets = true;
+        assert!(profile.validate().unwrap_err().contains("WebSocket"));
     }
 
     #[test]

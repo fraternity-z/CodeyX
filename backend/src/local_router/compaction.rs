@@ -240,6 +240,17 @@ pub(crate) fn normalize_native_responses_context(
 ) -> bool {
     let mut changed = restore_codey_compaction_summaries(body).unwrap_or(false);
     changed |= normalize_encrypted_agent_payloads(body);
+    changed |= rewrite_history_items(body, |item| {
+        if item
+            .get("encrypted_content")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.starts_with(GEMINI_HISTORY_PREFIX))
+        {
+            port_reasoning_item(item)
+        } else {
+            HistoryItemRewrite::Keep
+        }
+    });
     // 同一线路必须原样回传 reasoning，包括第三方 thinking 模式需要的明文内容。
     // 换线路时只去掉上一供应商的密文，可见摘要改成官方可接受的 summary。
     if discard_opaque_reasoning {
@@ -1880,6 +1891,7 @@ pub(crate) async fn write_gateway_compaction<D: ResponsesDownstream + ?Sized>(
         let value = match bridge {
             ProtocolBridge::ResponsesToChatCompletions => read_chat_completions_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await?,
             ProtocolBridge::ResponsesToAnthropicMessages => read_anthropic_messages_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await?,
+            ProtocolBridge::ResponsesToGemini => read_gemini_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await?,
             _ if prepared.is_sse => {
                 let mut accumulator = CompactionAccumulator { ordinary_response: true, ..Default::default() };
                 collect_sse_frames(&mut prepared, &mut accumulator, probe.as_ref()).await?;

@@ -32,6 +32,8 @@ pub(crate) fn is_context_length_error(value: &Value) -> bool {
     message.starts_with("prompt is too long:")
         || message.starts_with("input is too long for requested model")
         || message.contains("maximum context length")
+        || (message.starts_with("the input token count")
+            && message.contains("exceeds the maximum number of tokens allowed"))
 }
 
 #[derive(Debug)]
@@ -104,6 +106,7 @@ pub(crate) fn streaming_response_failure(
             .get("status")
             .or_else(|| upstream.0.pointer("/error/status"))
             .and_then(Value::as_u64)
+            .or_else(|| upstream.0.pointer("/error/code").and_then(Value::as_u64))
             .filter(|status| (400..600).contains(status))
         {
             failure.status = status as u16;
@@ -212,6 +215,7 @@ pub(crate) fn upstream_error_summary(value: &Value, route: &RouteTarget) -> Upst
             "/response/error/code",
             "/error/error/code",
             "/error/code",
+            "/error/status",
             "/code",
         ],
     )

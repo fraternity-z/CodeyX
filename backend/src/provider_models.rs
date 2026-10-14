@@ -87,12 +87,14 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
             .context("创建线路代理客户端失败")?;
         &proxied_client
     };
-    let endpoints = model_endpoints(&base)?;
-    let overrides = prepare_upstream_headers(
-        profile,
-        UpstreamProtocol::from_profile(profile.official_account, &profile.upstream_protocol),
-    )
-    .map_err(anyhow::Error::msg)?;
+    let protocol =
+        UpstreamProtocol::from_profile(profile.official_account, &profile.upstream_protocol);
+    let endpoints = if protocol == UpstreamProtocol::Gemini {
+        vec![crate::local_router::gemini_models_endpoint(&base)?]
+    } else {
+        model_endpoints(&base)?
+    };
+    let overrides = prepare_upstream_headers(profile, protocol).map_err(anyhow::Error::msg)?;
     let mut headers = HeaderMap::new();
     headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
     headers.insert(
@@ -100,6 +102,9 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
         HeaderValue::from_static(concat!("Codey/", env!("CARGO_PKG_VERSION"))),
     );
     apply_upstream_headers(&mut headers, &overrides);
+    if protocol == UpstreamProtocol::Gemini {
+        return fetch_gemini_models(client, &endpoints[0], &headers).await;
+    }
     for (index, endpoint) in endpoints.iter().enumerate() {
         let request = client.get(endpoint).headers(headers.clone());
         let response = request
@@ -140,6 +145,91 @@ pub async fn fetch(profile: &ProviderProfile, client: &Client) -> Result<Vec<Str
         }
     }
     anyhow::bail!("上游没有返回可用的模型列表")
+}
+
+async fn fetch_gemini_models(
+    client: &Client,
+    endpoint: &str,
+    headers: &HeaderMap,
+) -> Result<Vec<String>> {
+    tokio::time::timeout(PROVIDER_MODEL_REQUEST_TIMEOUT, async {
+        let mut models = Vec::new();
+        let mut seen = HashSet::new();
+        let mut tokens = HashSet::new();
+        let mut page_token = String::new();
+        let mut total_bytes = 0_usize;
+        for _ in 0..100 {
+            let mut url = reqwest::Url::parse(endpoint)?;
+            url.query_pairs_mut().append_pair("pageSize", "1000");
+            if !page_token.is_empty() {
+                url.query_pairs_mut().append_pair("pageToken", &page_token);
+            }
+            let response = client
+                .get(url)
+                .headers(headers.clone())
+                .send()
+                .await
+                .context("获取 Gemini 模型失败")?;
+            anyhow::ensure!(
+                response.status().is_success(),
+                "获取 Gemini 模型失败：HTTP {}",
+                response.status()
+            );
+            let body = crate::http_response::read_bounded_body(
+                response,
+                MAX_PROVIDER_MODEL_RESPONSE_BYTES.saturating_sub(total_bytes),
+                "Gemini 模型列表响应",
+            )
+            .await?;
+            total_bytes = total_bytes.saturating_add(body.len());
+            let value: Value =
+                serde_json::from_slice(&body).context("Gemini 模型列表不是有效 JSON")?;
+            let items = value
+                .get("models")
+                .and_then(Value::as_array)
+                .context("Gemini 模型列表缺少 models 数组")?;
+            for item in items {
+                if let Some(methods) = item.get("supportedGenerationMethods") {
+                    let methods = methods.as_array().context("Gemini 模型生成能力格式无效")?;
+                    if !methods.iter().any(|method| {
+                        matches!(
+                            method.as_str(),
+                            Some("generateContent" | "streamGenerateContent")
+                        )
+                    }) {
+                        continue;
+                    }
+                }
+                let name = item
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .context("Gemini 模型缺少 name")?;
+                push_model_id(
+                    name.strip_prefix("models/").unwrap_or(name),
+                    &mut models,
+                    &mut seen,
+                    MAX_PROVIDER_MODELS,
+                    MAX_PROVIDER_MODEL_ID_BYTES,
+                )?;
+            }
+            let next = match value.get("nextPageToken") {
+                None | Some(Value::Null) => "",
+                Some(value) => value.as_str().context("Gemini 分页令牌格式无效")?,
+            };
+            if next.is_empty() {
+                anyhow::ensure!(!models.is_empty(), "Gemini 没有返回支持内容生成的模型");
+                return Ok(models);
+            }
+            anyhow::ensure!(
+                next.len() <= 16 * 1024 && tokens.insert(next.to_string()),
+                "Gemini 模型列表分页令牌重复或过长"
+            );
+            page_token = next.into();
+        }
+        anyhow::bail!("Gemini 模型列表页数超过安全上限")
+    })
+    .await
+    .context("获取 Gemini 模型列表超时")?
 }
 
 fn model_endpoints(base: &str) -> Result<Vec<String>> {
@@ -399,6 +489,88 @@ mod tests {
 
         assert_eq!(models, vec!["bearer-model"]);
         server.join().unwrap();
+    }
+
+    #[tokio::test]
+    async fn gemini_model_sync_paginates_filters_and_uses_google_auth() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for page in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let request = crate::local_router::read_http_request_preserving_query(&mut stream)
+                    .await
+                    .unwrap();
+                let url =
+                    reqwest::Url::parse(&format!("http://localhost{}", request.path)).unwrap();
+                assert_eq!(url.path(), "/v1beta/models");
+                assert!(
+                    url.query_pairs()
+                        .any(|(key, value)| key == "pageSize" && value == "1000")
+                );
+                assert_eq!(
+                    url.query_pairs()
+                        .find(|(key, _)| key == "pageToken")
+                        .map(|(_, value)| value.into_owned()),
+                    (page == 1).then(|| "next/token?x".to_string())
+                );
+                assert_eq!(
+                    crate::local_router::incoming_header(&request, "x-goog-api-key"),
+                    Some("google-test-key")
+                );
+                assert!(crate::local_router::incoming_header(&request, "authorization").is_none());
+                let body = if page == 0 {
+                    serde_json::json!({"models":[
+                        {"name":"models/gemini-first","supportedGenerationMethods":["generateContent","countTokens"]},
+                        {"name":"models/embedding-only","supportedGenerationMethods":["embedContent"]}
+                    ],"nextPageToken":"next/token?x"})
+                } else {
+                    serde_json::json!({"models":[
+                        {"name":"models/gemini-first","supportedGenerationMethods":["generateContent"]},
+                        {"name":"models/gemini-second","supportedGenerationMethods":["streamGenerateContent"]}
+                    ]})
+                };
+                crate::local_router::write_json_response(&mut stream, 200, &body)
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut profile = ProviderProfile::new("Gemini");
+        profile.base_url = format!("http://{address}/v1beta/models/old:generateContent");
+        profile.upstream_protocol = crate::config::UPSTREAM_PROTOCOL_GEMINI.into();
+        profile.api_key = "google-test-key".into();
+        let client = Client::builder().no_proxy().build().unwrap();
+        assert_eq!(
+            fetch(&profile, &client).await.unwrap(),
+            ["gemini-first", "gemini-second"]
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn gemini_model_sync_rejects_repeating_page_tokens_without_partial_success() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                crate::local_router::read_http_request(&mut stream)
+                    .await
+                    .unwrap();
+                crate::local_router::write_json_response(&mut stream, 200, &serde_json::json!({
+                    "models":[{"name":"models/gemini-test","supportedGenerationMethods":["generateContent"]}],
+                    "nextPageToken":"repeated"
+                })).await.unwrap();
+            }
+        });
+        let mut profile = ProviderProfile::new("Gemini");
+        profile.base_url = format!("http://{address}");
+        profile.upstream_protocol = crate::config::UPSTREAM_PROTOCOL_GEMINI.into();
+        let error = fetch(&profile, &Client::builder().no_proxy().build().unwrap())
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("分页令牌"), "{error}");
+        server.await.unwrap();
     }
 
     #[tokio::test]

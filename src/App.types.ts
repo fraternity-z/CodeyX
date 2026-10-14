@@ -4,7 +4,8 @@ export type UpstreamProtocol =
   | "official"
   | "openaiResponses"
   | "openaiChatCompletions"
-  | "anthropicMessages";
+  | "anthropicMessages"
+  | "gemini";
 
 export type Profile = {
   enabled?: boolean;

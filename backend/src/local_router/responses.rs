@@ -617,15 +617,19 @@ impl RouterServer {
                 false,
             );
         }
-        if route.protocol == UpstreamProtocol::AnthropicMessages {
+        if matches!(
+            route.protocol,
+            UpstreamProtocol::AnthropicMessages | UpstreamProtocol::Gemini
+        ) {
             mark_error(400, "image_generation_not_supported");
             write_error_response(
                 &mut stream,
                 400,
                 "image_generation_not_supported",
                 format!(
-                    "线路「{}」使用 Anthropic Messages，不能转发 OpenAI Images 请求",
-                    route_display_name(&route)
+                    "线路「{}」使用 {}，不能转发 OpenAI Images 请求",
+                    route_display_name(&route),
+                    route.protocol.label()
                 ),
                 Some(&route),
             )
@@ -1939,6 +1943,31 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        let gemini_stream_requested = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
+        let gemini_url;
+        let upstream_url = if bridge == ProtocolBridge::ResponsesToGemini {
+            gemini_url = match gemini_content_endpoint(
+                upstream_url,
+                &resolved.upstream_model,
+                gemini_stream_requested,
+            ) {
+                Ok(url) => url,
+                Err(error) => {
+                    downstream
+                        .write_error(
+                            400,
+                            "invalid_gemini_endpoint",
+                            error.to_string(),
+                            Some(&resolved.route),
+                        )
+                        .await?;
+                    return Ok(());
+                }
+            };
+            gemini_url.as_str()
+        } else {
+            upstream_url
+        };
         let replay_reasoning_summary = should_replay_reasoning_text(
             resolved.route.official_account,
             bridge,
@@ -2307,10 +2336,11 @@ impl RouterServer {
             body_mutated = true;
             encoded_body = None;
         }
-        let upstream_stream_requested = upstream_body
-            .get("stream")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
+        let upstream_stream_requested = if bridge == ProtocolBridge::ResponsesToGemini {
+            gemini_stream_requested
+        } else {
+            upstream_body.get("stream").and_then(Value::as_bool).unwrap_or(false)
+        };
         // insert 保证只有一个 content-type（线路覆盖可能已写入）；在 .headers() 之后
         // 用 .header() 会追加重复值。只在 HTTP 请求上设置，上游 WebSocket 握手已在
         // 此前发起，不携带 content-type。
@@ -2635,7 +2665,8 @@ impl RouterServer {
                 }
             }
             ProtocolBridge::ResponsesToAnthropicMessages
-            | ProtocolBridge::ResponsesToChatCompletions => {
+            | ProtocolBridge::ResponsesToChatCompletions
+            | ProtocolBridge::ResponsesToGemini => {
                 write_adapted_upstream_as_responses(
                     downstream,
                     response,

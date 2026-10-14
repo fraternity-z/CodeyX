@@ -17,15 +17,18 @@ where
     D: ResponsesDownstream + ?Sized,
 {
     debug_assert!(response.status().is_success());
-    let anthropic = bridge == ProtocolBridge::ResponsesToAnthropicMessages;
-    let (protocol_label, read_operation) = if anthropic {
-        ("Anthropic Messages", "读取 Anthropic Messages 上游响应失败")
-    } else {
-        ("Chat Completions", "读取 Chat Completions 上游响应失败")
+    let (protocol_label, read_operation) = match bridge {
+        ProtocolBridge::ResponsesToAnthropicMessages => {
+            ("Anthropic Messages", "读取 Anthropic Messages 上游响应失败")
+        }
+        ProtocolBridge::ResponsesToGemini => ("Gemini", "读取 Gemini 上游响应失败"),
+        _ => ("Chat Completions", "读取 Chat Completions 上游响应失败"),
     };
     let conversion_error = |error: anyhow::Error| {
+        let detail = sanitize_upstream_error_text(&format!("{error:#}"), route, 1024)
+            .unwrap_or_else(|| "上游响应格式无效".into());
         format!(
-            "线路「{}」的 {protocol_label} 响应无法转换为 Responses：{error:#}",
+            "线路「{}」的 {protocol_label} 响应无法转换为 Responses：{detail}",
             route_display_name(route)
         )
     };
@@ -53,27 +56,58 @@ where
         }
     };
     if stream_requested && prepared.is_sse {
-        return if anthropic {
-            stream_anthropic_messages_as_responses(downstream, prepared, model, route, tool_bridge)
+        return match bridge {
+            ProtocolBridge::ResponsesToAnthropicMessages => {
+                stream_anthropic_messages_as_responses(
+                    downstream,
+                    prepared,
+                    model,
+                    route,
+                    tool_bridge,
+                )
                 .await
-        } else {
-            stream_chat_completions_as_responses(downstream, prepared, model, route, tool_bridge)
+            }
+            ProtocolBridge::ResponsesToGemini => {
+                stream_gemini_as_responses(downstream, prepared, model, route, tool_bridge).await
+            }
+            _ => {
+                stream_chat_completions_as_responses(
+                    downstream,
+                    prepared,
+                    model,
+                    route,
+                    tool_bridge,
+                )
                 .await
+            }
         };
     }
-    let collected = if anthropic {
-        await_upstream(
-            downstream,
-            read_anthropic_messages_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()),
-        )
-        .await?
-    } else {
-        await_upstream(
-            downstream,
-            read_chat_completions_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()),
-        )
-        .await?
-    };
+    let collected = await_upstream(downstream, async {
+        match bridge {
+            ProtocolBridge::ResponsesToAnthropicMessages => {
+                read_anthropic_messages_as_responses(
+                    &mut prepared,
+                    model,
+                    tool_bridge,
+                    probe.as_ref(),
+                )
+                .await
+            }
+            ProtocolBridge::ResponsesToGemini => {
+                read_gemini_as_responses(&mut prepared, model, tool_bridge, probe.as_ref()).await
+            }
+            _ => {
+                read_chat_completions_as_responses(
+                    &mut prepared,
+                    model,
+                    tool_bridge,
+                    probe.as_ref(),
+                )
+                .await
+            }
+        }
+    })
+    .await?;
     let responses = match collected {
         Ok(responses) => responses,
         Err(error) => {

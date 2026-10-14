@@ -40,7 +40,8 @@ use uuid::Uuid;
 
 use crate::config::{
     CodeyConfig, ProviderProfile, RouteRequestLogBackend, UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES,
-    UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS, UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
+    UPSTREAM_PROTOCOL_GEMINI, UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS,
+    UPSTREAM_PROTOCOL_OPENAI_RESPONSES,
 };
 use crate::model_id;
 use crate::route_request_log::{
@@ -182,6 +183,7 @@ mod collaboration_alias;
 mod compaction;
 mod downstream;
 mod errors;
+mod gemini_request;
 mod http;
 mod lifecycle;
 mod native_history;
@@ -196,6 +198,7 @@ mod server;
 mod sse;
 mod sse_anthropic;
 mod sse_chat;
+mod sse_gemini;
 mod sse_responses;
 mod steering;
 mod upstream;
@@ -214,6 +217,7 @@ pub(crate) use collaboration_alias::*;
 pub(crate) use compaction::*;
 pub(crate) use downstream::*;
 pub(crate) use errors::*;
+pub(crate) use gemini_request::*;
 pub(crate) use http::*;
 use lifecycle::*;
 pub(crate) use native_history::*;
@@ -226,6 +230,7 @@ pub(crate) use server::*;
 pub(crate) use sse::*;
 pub(crate) use sse_anthropic::*;
 pub(crate) use sse_chat::*;
+pub(crate) use sse_gemini::*;
 pub(crate) use sse_responses::*;
 pub(crate) use steering::*;
 pub(crate) use upstream::*;
@@ -257,6 +262,9 @@ mod safety_tests;
 
 #[cfg(test)]
 mod header_tests;
+
+#[cfg(test)]
+mod gemini_tests;
 
 #[cfg(test)]
 mod lifecycle_tests;

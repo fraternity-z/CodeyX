@@ -212,6 +212,7 @@ const routeProtocolOptions: Array<{
   { label: "OpenAI Responses", value: "openaiResponses" },
   { label: "OpenAI Chat Completions", value: "openaiChatCompletions" },
   { label: "Anthropic Messages", value: "anthropicMessages" },
+  { label: "Gemini", value: "gemini" },
 ];
 
 const REQUIRED_FIELD_MARKER = <span aria-hidden="true" className="text-[var(--codey-red,#d70015)]">*</span>;
@@ -1796,9 +1797,11 @@ function ModelSectionComponent({
                     value={routeDraft.baseUrl}
                     disabled={isBusy}
                     placeholder={
-                      routeDraft.upstreamProtocol === "anthropicMessages"
-                        ? "https://api.anthropic.com"
-                        : "https://api.example.com/v1"
+                      routeDraft.upstreamProtocol === "gemini"
+                        ? "https://generativelanguage.googleapis.com/v1beta"
+                        : routeDraft.upstreamProtocol === "anthropicMessages"
+                          ? "https://api.anthropic.com"
+                          : "https://api.example.com/v1"
                     }
                     onChange={(event) => updateRouteDraft({ baseUrl: event.target.value })}
                   />
@@ -1833,9 +1836,11 @@ function ModelSectionComponent({
                     placeholder={
                       routeDraft.apiKeyConfigured
                         ? "已保存（输入新 Key 替换）"
-                        : routeDraft.upstreamProtocol === "anthropicMessages"
-                          ? "sk-ant-..."
-                          : "sk-..."
+                        : routeDraft.upstreamProtocol === "gemini"
+                          ? "AIza..."
+                          : routeDraft.upstreamProtocol === "anthropicMessages"
+                            ? "sk-ant-..."
+                            : "sk-..."
                     }
                     onChange={(event) => {
                       updateRouteDraft({ apiKey: event.target.value });

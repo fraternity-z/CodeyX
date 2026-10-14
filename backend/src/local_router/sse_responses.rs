@@ -50,6 +50,7 @@ pub(crate) struct ResponsesSseState<'a> {
     pub(crate) next_output_index: usize,
     pub(crate) message: Option<ResponsesStreamMessage>,
     pub(crate) reasoning: Option<ResponsesStreamReasoning>,
+    pub(crate) reasoning_encrypted_content: Option<String>,
     pub(crate) tools: BTreeMap<usize, ResponsesStreamTool>,
     pub(crate) output_order: Vec<StreamOutputKind>,
     pub(crate) terminal_started: bool,
@@ -65,6 +66,7 @@ impl<'a> ResponsesSseState<'a> {
             next_output_index: 0,
             message: None,
             reasoning: None,
+            reasoning_encrypted_content: None,
             tools: BTreeMap::new(),
             output_order: Vec::new(),
             terminal_started: false,
@@ -91,6 +93,18 @@ impl<'a> ResponsesSseState<'a> {
                 }
             }))
             .await
+    }
+
+    fn reasoning_item(&self, reasoning: &ResponsesStreamReasoning, status: &str) -> Value {
+        match self.reasoning_encrypted_content.as_deref() {
+            Some(state) => responses_reasoning_item_with_state(
+                &reasoning.item_id,
+                &reasoning.text,
+                status,
+                state,
+            ),
+            None => chat_reasoning_item(&reasoning.item_id, &reasoning.text, status),
+        }
     }
 
     pub(crate) fn reasoning_delta(&mut self, delta: &str) -> Vec<Value> {
@@ -383,7 +397,7 @@ impl<'a> ResponsesSseState<'a> {
             events.push(json!({
                 "type":"response.output_item.done", "response_id":self.response_id,
                 "output_index":reasoning.output_index,
-                "item":chat_reasoning_item(&reasoning.item_id, &reasoning.text, "completed"),
+                "item":self.reasoning_item(reasoning, "completed"),
             }));
         }
         if let Some(message) = self.message.as_ref() {
@@ -530,13 +544,10 @@ impl<'a> ResponsesSseState<'a> {
             .output_order
             .iter()
             .filter_map(|kind| match kind {
-                StreamOutputKind::Reasoning => self.reasoning.as_ref().map(|reasoning| {
-                    Ok(chat_reasoning_item(
-                        &reasoning.item_id,
-                        &reasoning.text,
-                        "completed",
-                    ))
-                }),
+                StreamOutputKind::Reasoning => self
+                    .reasoning
+                    .as_ref()
+                    .map(|reasoning| Ok(self.reasoning_item(reasoning, "completed"))),
                 StreamOutputKind::Message => self
                     .message
                     .as_ref()
@@ -626,6 +637,20 @@ impl<'a> ResponsesSseState<'a> {
             .await?;
         downstream.finish_event_stream().await
     }
+}
+
+pub(crate) fn responses_reasoning_item_with_state(
+    id: &str,
+    text: &str,
+    status: &str,
+    state: &str,
+) -> Value {
+    let summary = if text.is_empty() {
+        Vec::new()
+    } else {
+        vec![json!({"type":"summary_text","text":text})]
+    };
+    json!({"id":id,"type":"reasoning","status":status,"summary":summary,"encrypted_content":state})
 }
 
 pub(crate) fn stream_message_item(message: &ResponsesStreamMessage) -> Value {

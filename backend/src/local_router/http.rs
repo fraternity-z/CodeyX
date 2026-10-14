@@ -23,6 +23,25 @@ where
     read_http_request_with_budget(stream, None).await
 }
 
+#[cfg(test)]
+pub(crate) async fn read_http_request_preserving_query<R>(stream: &mut R) -> Result<HttpRequest>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    let mut reader = tokio::io::BufReader::new(stream);
+    let mut line = String::new();
+    tokio::io::AsyncBufReadExt::read_line(&mut reader, &mut line).await?;
+    let target = line
+        .split_whitespace()
+        .nth(1)
+        .context("HTTP 请求缺少路径")?
+        .to_string();
+    let mut prefixed = tokio::io::AsyncReadExt::chain(Cursor::new(line.into_bytes()), reader);
+    let mut request = read_http_request(&mut prefixed).await?;
+    request.path = target;
+    Ok(request)
+}
+
 #[derive(Debug)]
 pub(crate) struct RequestBodyBudgetUnavailable;
 
