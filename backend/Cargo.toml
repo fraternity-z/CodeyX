@@ -1,0 +1,119 @@
+[package]
+name = "codey"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+default-run = "codey"
+
+[package.metadata.cargo-machete]
+ignored = ["winres"]
+
+[lib]
+name = "codey_lib"
+crate-type = ["rlib"]
+
+[[bin]]
+name = "codey"
+path = "src/main.rs"
+
+[[bin]]
+name = "codey-fastctx"
+path = "src/bin/codey-fastctx.rs"
+
+[dependencies]
+anyhow.workspace = true
+arc-swap.workspace = true
+async-trait = "0.1"
+base64.workspace = true
+bytes.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+codey-runtime-core = { path = "../vendor/CodeyRuntime/crates/codey-runtime-core" }
+codey-plugin-sdk = { path = "../crates/codey-plugin-sdk" }
+codey-codex-extensions = { path = "../crates/codey-codex-extensions" }
+libloading = "0.8"
+zip.workspace = true
+tempfile.workspace = true
+directories.workspace = true
+fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "22b40ea324a186a921dfe38c205e3ffacdf6546d", default-features = false }
+fs2.workspace = true
+futures-util.workspace = true
+http-body = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["client-proxy", "client-proxy-system", "tokio"], default-features = false }
+memchr = "2"
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+regex = "1"
+reqwest = { workspace = true, features = ["socks", "gzip"] }
+ring = "0.17"
+rusqlite = { workspace = true, features = ["hooks"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+semver = "1"
+serde.workspace = true
+serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
+sha2.workspace = true
+socket2 = { version = "0.6.5", features = ["all"] }
+tokio = { workspace = true, features = ["io-std", "io-util", "net", "signal", "sync"] }
+tokio-tungstenite.workspace = true
+toml_edit.workspace = true
+uuid.workspace = true
+webpki-roots = "0.26"
+zstd = "0.13"
+
+[dev-dependencies]
+flate2 = "1"
+tokio = { workspace = true, features = ["test-util"] }
+
+[[bench]]
+name = "fastctx_protocol"
+harness = false
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winres = "0.1"
+
+[target.'cfg(windows)'.dependencies]
+rfd = { version = "0.15", default-features = false, features = ["common-controls-v6"] }
+windows = { version = "0.58", default-features = false, features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Security",
+  "Win32_Graphics_Gdi",
+  "Win32_Storage_FileSystem",
+  "Win32_Storage_Packaging_Appx",
+  "Win32_System_LibraryLoader",
+  "Win32_System_Com",
+  "Win32_System_Console",
+  "Win32_System_SystemServices",
+  "Win32_System_Threading",
+  "Win32_System_JobObjects",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_UI_Shell",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+flate2 = "1"
+tar = "0.4"
+dispatch2 = { version = "0.3.1", default-features = false, features = ["objc2", "std"] }
+objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSApplication",
+  "NSControl",
+  "NSGraphics",
+  "NSPanel",
+  "NSResponder",
+  "NSTextField",
+  "NSView",
+  "NSWindow",
+] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+  "std",
+  "NSGeometry",
+  "NSObject",
+  "NSString",
+] }
+rfd = { version = "0.15", default-features = false }

@@ -1,0 +1,50 @@
+# Node.js dependencies
+/node_modules/
+/.pnpm-store/
+
+# Rust and frontend build output
+/target/
+/target-legacy/
+/backend/target/
+/vendor/CodeyRuntime/target/
+/dist/
+/dist-overlay/
+/output/
+/coverage/
+/.vite/
+
+# Local runtime state and environment files
+/.codey/
+**/.codex-session-delete/
+.env
+.env.*
+!.env.example
+
+# Logs and temporary files
+/.playwright-cli/
+*.log
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+__pycache__/
+*.py[cod]
+
+# IDE metadata
+/.idea/
+/.vscode/
+*.code-workspace
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Rust formatter and compiler backups
+**/*.rs.bk
+
+
+# Local plugin projects stay outside version control; SDK, templates and skills remain tracked.
+/plugins
+*.codey-plugin

@@ -1,0 +1,2902 @@
+#![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
+
+use anyhow::Result;
+
+#[cfg(any(windows, target_os = "macos", test))]
+use anyhow::Context;
+
+#[cfg(any(windows, target_os = "macos", test))]
+use std::ffi::{OsStr, OsString};
+#[cfg(any(windows, target_os = "macos", test))]
+use std::io::Write;
+
+const PATCH_RESULT: &str = "codey-startup-patch-installed-v40";
+const APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT: &str =
+    "codey-app-server-runtime-overrides-verified";
+/// 配置已验证且使用 Codey stdin relay 时，允许消息补丁失配后降级启动。
+const APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT: &str =
+    "codey-app-server-runtime-overrides-degraded";
+/// JS 在等待窗口内没有观察到 app-server 启动时放进异常文本，启动器据此重试。
+const APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER: &str =
+    "codey-app-server-runtime-overrides-timeout";
+const MAX_INSPECTOR_TARGET_RESPONSE_BYTES: usize = 1024 * 1024;
+/// Inspector 发现窗口。fuse 允许时 Node 在应用脚本运行前就绑定端口，20 秒足以覆盖冷启动。
+pub(crate) const STARTUP_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const STARTUP_PATCH_INSTALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// 覆盖确认的调试会话上限。须盖住断点恢复前的协议和补丁求值，以及 JS 侧
+/// `appServerRuntimeOverrideTimeoutMs`（150 秒）。Codex 先显示窗口再启动
+/// app-server，Windows 商店版冷启动经常要超过一分钟才走到这次 spawn。
+const STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(165);
+/// 单次启动尝试等待 CLI 包装器确认的上限。进程退出、明确失败或确认成功都会提前结束；
+/// Windows 最多两次尝试，清理后重新计时。须盖住上面的调试会话，否则会话还在等
+/// app-server 时外层截止时间会先把它掐断。
+pub(crate) const STARTUP_CLI_READY_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(180);
+/// 回环端口连通性探测时限（渲染进程调试端口、Inspector 端口）。
+const LOOPBACK_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(200);
+
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const CLI_WRAPPER_TARGET_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TARGET";
+/// 启动器实际发现的原始 CLI；Windows 商店版的执行目标可能是用户目录副本。
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const CLI_WRAPPER_SOURCE_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_SOURCE";
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const CLI_WRAPPER_OVERRIDES_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_OVERRIDES";
+/// 本次启动具备 stdin relay 的包装器路径，供主进程核对实际启动入口。
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const CLI_WRAPPER_STDIN_RELAY_ENV: &str = "CODEY_CODEX_CLI_STDIN_RELAY";
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const CLI_WRAPPER_SUBAGENT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_SUBAGENT";
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const CLI_WRAPPER_PORT_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_PORT";
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const CLI_WRAPPER_TOKEN_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_TOKEN";
+/// 包装器执行记录文件的绝对路径；回环握手丢失时启动器据此确认目标已执行。
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const CLI_WRAPPER_MARKER_ENV: &str = "CODEY_CODEX_CLI_WRAPPER_MARKER";
+/// When Inspector installation may win the startup race, the wrapper records
+/// progress through its marker only and does not connect a listener that the
+/// launcher can drop after Inspector success.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV: &str =
+    "CODEY_CODEX_CLI_WRAPPER_HANDSHAKE_OPTIONAL";
+/// Absolute JSON path the `--require` patch writes after it installs. Reuses
+/// [`CliWrapperMarker`] so the launcher can poll the same record format.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const STARTUP_PATCH_MARKER_ENV: &str = "CODEY_STARTUP_PATCH_MARKER";
+#[cfg(any(windows, target_os = "macos", test))]
+const STARTUP_REQUIRE_DIR: &str = "startup-require";
+#[cfg(any(windows, target_os = "macos", test))]
+const STARTUP_REQUIRE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(500);
+/// 单次回连最多 500ms；被安全软件或高负载拖慢时在 3 秒内重试，端口被拒绝则立即放弃。
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
+#[cfg(any(windows, target_os = "macos", test))]
+const CLI_WRAPPER_HANDSHAKE_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(100);
+#[cfg(any(windows, test))]
+pub(crate) const WINDOWS_PACKAGE_RESUME_ARGUMENT: &str = "--codey-resume-packaged-app";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatchOptions {
+    pub disable_pet: bool,
+    pub subagent_gate_active: bool,
+    /// 杂事模型在 Codex 模型目录里的 id。`None` 表示保持 Codex 原生行为。
+    pub misc_model: Option<String>,
+}
+
+pub fn inspector_argument(port: u16) -> String {
+    format!("--inspect-brk=127.0.0.1:{port}")
+}
+
+const STARTUP_PATCH_TEMPLATE: &str = concat!("\n", include_str!("codex_startup_patch.js"));
+
+#[cfg(test)]
+fn patch_expression(options: PatchOptions) -> String {
+    patch_expression_with_runtime_overrides(options, &[])
+}
+
+#[cfg(test)]
+fn patch_expression_with_runtime_overrides(
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+) -> String {
+    patch_expression_with_runtime_overrides_and_validation(options, runtime_config_overrides, false)
+}
+
+fn patch_expression_with_runtime_overrides_and_validation(
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+    require_app_server_runtime_overrides: bool,
+) -> String {
+    let error_logger_executable = match std::env::current_exe() {
+        Ok(path) => serde_json::to_string(&path.to_string_lossy().to_string())
+            .expect("error logger executable path should serialize"),
+        Err(error) => {
+            crate::error_log::record_failure(
+                "patch_failed",
+                "resolve_error_log_helper",
+                error.to_string(),
+                serde_json::json!({}),
+            );
+            "\"\"".to_string()
+        }
+    };
+    STARTUP_PATCH_TEMPLATE
+        .replace(
+            "\"__CODEY_RUNTIME_CONFIG_OVERRIDES__\"",
+            &serde_json::to_string(runtime_config_overrides)
+                .expect("runtime config overrides should serialize"),
+        )
+        .replace(
+            "\"__CODEY_ERROR_LOGGER_EXECUTABLE__\"",
+            &error_logger_executable,
+        )
+        .replace(
+            "__DISABLE_PET__",
+            if options.disable_pet { "true" } else { "false" },
+        )
+        .replace(
+            "__SUBAGENT_GATE_ACTIVE__",
+            if options.subagent_gate_active {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__",
+            if require_app_server_runtime_overrides {
+                "true"
+            } else {
+                "false"
+            },
+        )
+        .replace(
+            "\"__CODEY_MISC_MODEL_ID__\"",
+            &serde_json::to_string(&options.misc_model).expect("misc model should serialize"),
+        )
+}
+
+/// Main-process `--require` payload written next to Codey state and pointed at
+/// by `NODE_OPTIONS`. Never combined with `--inspect-brk`: both wrap
+/// `Module._load`.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) struct StartupRequire {
+    pub environment: Vec<(String, String)>,
+    pub marker_path: std::path::PathBuf,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn prepare_startup_require(
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+) -> Result<StartupRequire> {
+    prepare_startup_require_in(
+        &codey_runtime_core::paths::default_app_state_dir(),
+        options,
+        runtime_config_overrides,
+    )
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn prepare_startup_require_in(
+    state_dir: &std::path::Path,
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+) -> Result<StartupRequire> {
+    prepare_startup_require_with_path(
+        state_dir,
+        options,
+        runtime_config_overrides,
+        space_free_path,
+    )
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn prepare_startup_require_with_path(
+    state_dir: &std::path::Path,
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+    resolve_path: impl FnOnce(&std::path::Path) -> Result<std::path::PathBuf>,
+) -> Result<StartupRequire> {
+    let directory = state_dir.join(STARTUP_REQUIRE_DIR);
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("创建 Codex 启动补丁目录失败：{}", directory.display()))?;
+    prune_startup_require_files(
+        &directory,
+        std::time::SystemTime::now(),
+        STARTUP_REQUIRE_MAX_AGE,
+    );
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    let script_path = directory.join(format!("{token}.js"));
+    let marker_path = directory.join(format!("{token}.json"));
+    // `--require` has no Inspector evaluate step; the executed marker is the
+    // confirmation. Keep inspector.close() enabled in the payload.
+    let expression = patch_expression_with_runtime_overrides_and_validation(
+        options,
+        runtime_config_overrides,
+        false,
+    );
+    crate::fs_util::atomic_write_private_with_parent(&script_path, expression.as_bytes())
+        .with_context(|| format!("写入 Codex 启动补丁失败：{}", script_path.display()))?;
+    let require_argument =
+        match resolve_path(&script_path).and_then(|path| node_require_argument(&path)) {
+            Ok(argument) => argument,
+            Err(error) => {
+                if let Err(cleanup) = std::fs::remove_file(&script_path) {
+                    return Err(anyhow::anyhow!(
+                        "{error:#}；清理未使用的启动补丁失败：{cleanup}"
+                    ));
+                }
+                return Err(error);
+            }
+        };
+    Ok(StartupRequire {
+        environment: vec![
+            ("CODEX_SPARKLE_ENABLED".to_string(), "false".to_string()),
+            (
+                "CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER".to_string(),
+                "true".to_string(),
+            ),
+            ("NODE_OPTIONS".to_string(), require_argument),
+            (
+                STARTUP_PATCH_MARKER_ENV.to_string(),
+                marker_path.to_string_lossy().into_owned(),
+            ),
+        ],
+        marker_path,
+    })
+}
+
+/// `NODE_OPTIONS` splits on whitespace and does not honour quotes, so the
+/// `--require` path must be a single token.
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn node_require_argument(path: &std::path::Path) -> Result<String> {
+    let path = space_free_path(path)?;
+    let rendered = path.to_string_lossy();
+    anyhow::ensure!(
+        !path_has_whitespace(&path),
+        "Codex 启动补丁路径包含空白，无法通过 NODE_OPTIONS 注入：{rendered}"
+    );
+    Ok(format!("--require={rendered}"))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn path_has_whitespace(path: &std::path::Path) -> bool {
+    path.to_string_lossy().chars().any(char::is_whitespace)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn space_free_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    if !path_has_whitespace(path) {
+        return Ok(path.to_path_buf());
+    }
+    #[cfg(windows)]
+    if let Ok(short) = windows_short_path(path)
+        && !path_has_whitespace(&short)
+    {
+        return Ok(short);
+    }
+    copy_startup_require_to_temp(path, &std::env::temp_dir())
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn copy_startup_require_to_temp(
+    path: &std::path::Path,
+    temp_dir: &std::path::Path,
+) -> Result<std::path::PathBuf> {
+    // Keep the UUID filename so the launcher's existing cleanup removes this copy.
+    let file_name = path.file_name().context("Codex 启动补丁路径缺少文件名")?;
+    let destination = temp_dir.join(file_name);
+    anyhow::ensure!(
+        !path_has_whitespace(&destination),
+        "临时补丁路径包含空白，无法通过 NODE_OPTIONS 注入：{}",
+        destination.display()
+    );
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("读取 Codex 启动补丁失败：{}", path.display()))?;
+    crate::fs_util::atomic_write_private(&destination, &bytes).with_context(|| {
+        format!(
+            "复制 Codex 启动补丁到无空格路径失败：{} -> {}",
+            path.display(),
+            destination.display()
+        )
+    })?;
+    Ok(destination)
+}
+
+#[cfg(windows)]
+fn windows_short_path(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    use windows::core::PCWSTR;
+
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let mut buffer = vec![0u16; 1024];
+    let mut length =
+        unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(buffer.as_mut_slice())) };
+    if length as usize >= buffer.len() {
+        buffer.resize(length as usize + 1, 0);
+        length = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(buffer.as_mut_slice())) };
+    }
+    anyhow::ensure!(
+        length > 0,
+        "无法为 Codex 启动补丁生成无空格短路径：{}",
+        path.display()
+    );
+    Ok(std::path::PathBuf::from(std::ffi::OsString::from_wide(
+        &buffer[..length as usize],
+    )))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn prune_startup_require_files(
+    directory: &std::path::Path,
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+) -> usize {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten().take(1024) {
+        let path = entry.path();
+        let keep = path
+            .extension()
+            .is_none_or(|extension| extension != "js" && extension != "json" && extension != "tmp");
+        if keep {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|modified| now.duration_since(modified).ok())
+            .is_some_and(|age| age >= max_age);
+        if stale && std::fs::remove_file(&path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+pub fn reserve_loopback_port() -> Result<u16> {
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))?;
+    Ok(listener.local_addr()?.port())
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn is_retryable_startup_io_error(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        std::io::ErrorKind::TimedOut
+            | std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+    ) || cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CliWrapperFailure {
+    pub message: String,
+    pub retryable: bool,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl std::fmt::Display for CliWrapperFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "Codex CLI 兼容执行器启动失败：{}", self.message)
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl std::error::Error for CliWrapperFailure {}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub(crate) const MAX_CLI_WRAPPER_FAILURE_BYTES: usize = 8 * 1024;
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) const MAX_CLI_WRAPPER_MARKER_BYTES: u64 = 16 * 1024;
+
+/// 包装器在握手端口之外留下的文件记录。回环连接被拖慢或丢失时，启动器仍能确认目标已执行，
+/// 不会因为一次握手丢失就杀掉健康的 Codex。
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CliWrapperMarkerStatus {
+    Launching,
+    Executed,
+    Failed,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CliWrapperMarker {
+    pub status: CliWrapperMarkerStatus,
+    pub pid: u32,
+    pub timestamp_ms: u128,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl CliWrapperMarker {
+    pub(crate) fn new(status: CliWrapperMarkerStatus) -> Self {
+        Self {
+            status,
+            pid: std::process::id(),
+            timestamp_ms: crate::fs_util::timestamp_millis(),
+            message: None,
+            retryable: None,
+        }
+    }
+
+    pub(crate) fn write(&self, path: &std::path::Path) -> Result<()> {
+        crate::fs_util::atomic_write_private_with_parent(path, &serde_json::to_vec(self)?)
+    }
+
+    /// `Ok(None)` 表示文件尚不存在；内容无法解析时返回错误，由调用方决定是否继续等待。
+    pub(crate) fn read(path: &std::path::Path) -> Result<Option<Self>> {
+        match crate::fs_util::read_bounded(path, MAX_CLI_WRAPPER_MARKER_BYTES) {
+            Ok(bytes) => Ok(Some(serde_json::from_slice(&bytes)?)),
+            Err(error)
+                if error
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+            {
+                Ok(None)
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// 只接受启动器传入的绝对 JSON 路径，避免包装器把记录写到不可预期的位置。
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn cli_wrapper_marker_path_from_env(
+    value: Option<OsString>,
+) -> Option<std::path::PathBuf> {
+    let path = std::path::PathBuf::from(value?);
+    (path.is_absolute()
+        && path
+            .extension()
+            .is_some_and(|extension| extension == "json"))
+    .then_some(path)
+}
+
+/// 渲染进程调试端口已应答而 Inspector 端口拒绝连接：Node 环境早已创建却没有 Inspector，
+/// 说明 `--inspect-brk` 被 Electron 丢弃，主进程补丁不会再有机会；进程本身在正常运行。
+#[derive(Debug)]
+pub(crate) struct InspectorUnavailable {
+    pub refused: u32,
+    pub elapsed_ms: u128,
+}
+
+impl std::fmt::Display for InspectorUnavailable {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "Codex 主进程 Inspector 不可用：渲染进程调试端口已就绪，但 Inspector 端口拒绝连接 {} 次（{} ms）",
+            self.refused, self.elapsed_ms
+        )
+    }
+}
+
+impl std::error::Error for InspectorUnavailable {}
+
+/// 启动兼容等待期间 Codex 进程已退出；无需再等待任何握手。
+#[derive(Debug)]
+pub(crate) struct StartupProcessExited {
+    pub process_id: Option<u32>,
+    pub exit_code: Option<u32>,
+}
+
+impl std::fmt::Display for StartupProcessExited {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.process_id {
+            Some(process_id) => write!(
+                formatter,
+                "Codex 进程在启动兼容等待期间已退出（PID {process_id}）"
+            ),
+            None => write!(formatter, "Codex 进程在启动兼容等待期间已退出"),
+        }?;
+        if let Some(exit_code) = self.exit_code {
+            write!(formatter, "，退出码 {exit_code}（0x{exit_code:08X}）")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for StartupProcessExited {}
+
+pub(crate) async fn loopback_port_accepts(port: u16) -> bool {
+    tokio::time::timeout(
+        LOOPBACK_PROBE_TIMEOUT,
+        tokio::net::TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await
+    .is_ok_and(|result| result.is_ok())
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn cli_wrapper_target(
+    arguments: &[OsString],
+    target: Option<OsString>,
+    config_store: &crate::config::ConfigStore,
+) -> Result<Option<std::path::PathBuf>> {
+    if let Some(target) = target {
+        return Ok(Some(target.into()));
+    }
+    // Browser helpers keep CODEX_CLI_PATH but can discard Codey's environment.
+    // CLI arguments must never fall through to the desktop startup/cleanup path.
+    let Some(first) = arguments.first() else {
+        return Ok(None);
+    };
+    if first == "--debug-port"
+        || cfg!(target_os = "macos")
+            && first
+                .to_str()
+                .is_some_and(|value| value.starts_with("-psn_"))
+    {
+        return Ok(None);
+    }
+    let config = config_store.load().context("读取 Codex CLI 应用位置失败")?;
+    let saved = config.codex_app_path.trim();
+    let app_dir = codey_runtime_core::app_paths::resolve_codex_app_dir_with_saved(
+        (!saved.is_empty()).then_some(std::path::Path::new(saved)),
+        None,
+    )
+    .context("找不到有效的 Codex 桌面应用，无法转发 CLI 调用")?;
+    #[cfg(windows)]
+    let target = crate::launcher::windows_cli_wrapper_target(&app_dir)?;
+    #[cfg(target_os = "macos")]
+    let target =
+        codey_runtime_core::app_paths::codex_runtime_executable(&app_dir).with_context(|| {
+            codey_runtime_core::app_paths::codex_runtime_executable_missing(&app_dir)
+        })?;
+    Ok(Some(target))
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+pub fn run_cli_wrapper_if_requested() -> Result<bool> {
+    if std::env::args_os().nth(1).as_deref() == Some(OsStr::new("--codey-route-app-server-input")) {
+        let overrides =
+            std::env::var(CLI_WRAPPER_OVERRIDES_ENV).context("Codex 请求转发缺少运行时配置")?;
+        let overrides: Vec<String> =
+            serde_json::from_str(&overrides).context("解析 Codex 请求转发配置失败")?;
+        let result = route_local_app_server_input(
+            std::io::stdin().lock(),
+            std::io::stdout().lock(),
+            &overrides,
+        );
+        if let Err(error) = result
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            return Err(error).context("转发 Codex 本地路由请求失败");
+        }
+        return Ok(true);
+    }
+    #[cfg(windows)]
+    if run_windows_package_resume_helper_if_requested()? {
+        return Ok(true);
+    }
+
+    let original_args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let managed_launch = std::env::var_os(CLI_WRAPPER_TARGET_ENV).is_some();
+    let Some(target) = cli_wrapper_target(
+        &original_args,
+        std::env::var_os(CLI_WRAPPER_TARGET_ENV),
+        &crate::config::ConfigStore::default(),
+    )?
+    else {
+        return Ok(false);
+    };
+    let app_server = original_args
+        .iter()
+        .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
+        .count()
+        == 1;
+    // 启动器只接收首次握手；之后 app-server 重启时仍必须能执行 CLI。
+    let readiness = (app_server && managed_launch).then(CliWrapperReadiness::begin);
+    let mut input_router: Option<std::process::Child> = None;
+    let launch = (|| -> Result<std::process::Child> {
+        anyhow::ensure!(
+            target.is_absolute(),
+            "Codex CLI 兼容目标无效：{}",
+            target.display()
+        );
+        let metadata = std::fs::metadata(&target)
+            .with_context(|| format!("Codex CLI 兼容目标无效：{}", target.display()))?;
+        anyhow::ensure!(
+            metadata.is_file(),
+            "Codex CLI 兼容目标不是文件：{}",
+            target.display()
+        );
+        if std::fs::canonicalize(&target).ok()
+            == std::env::current_exe().and_then(std::fs::canonicalize).ok()
+        {
+            anyhow::bail!("Codex CLI 兼容目标不能指向 Codey 自身");
+        }
+        let runtime_overrides = std::env::var(CLI_WRAPPER_OVERRIDES_ENV)
+            .ok()
+            .map(|value| serde_json::from_str::<Vec<String>>(&value))
+            .transpose()
+            .context("解析 Codex CLI 兼容运行时配置失败")?;
+        anyhow::ensure!(
+            !app_server || !managed_launch || runtime_overrides.is_some(),
+            "Codex app-server 缺少本次启动配置，已停止启动；请通过 Codey 重新启动 Codex"
+        );
+        // 独立浏览器调用没有启动配置，原样转发给 Codex 内置 CLI。
+        let rewritten_args = match runtime_overrides.as_ref() {
+            Some(overrides) => rewrite_app_server_args(&original_args, overrides)?,
+            None => original_args,
+        };
+        let runtime_overrides = runtime_overrides.unwrap_or_default();
+        let mut command = std::process::Command::new(&target);
+        command.args(rewritten_args);
+        for name in [
+            "CODEX_CLI_PATH",
+            CLI_WRAPPER_TARGET_ENV,
+            CLI_WRAPPER_SOURCE_ENV,
+            CLI_WRAPPER_OVERRIDES_ENV,
+            CLI_WRAPPER_STDIN_RELAY_ENV,
+            CLI_WRAPPER_SUBAGENT_ENV,
+            CLI_WRAPPER_PORT_ENV,
+            CLI_WRAPPER_TOKEN_ENV,
+            CLI_WRAPPER_MARKER_ENV,
+            CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV,
+            STARTUP_PATCH_MARKER_ENV,
+            "NODE_OPTIONS",
+        ] {
+            command.env_remove(name);
+        }
+        if app_server
+            && std::env::var_os(CLI_WRAPPER_SUBAGENT_ENV).as_deref() == Some(OsStr::new("1"))
+        {
+            command.env(crate::subagent_gate::RUNTIME_ACTIVE_ENV, "1");
+            command.env(
+                crate::subagent_gate::RUNTIME_ID_ENV,
+                uuid::Uuid::new_v4().to_string(),
+            );
+        }
+        if let Some(parent) = target.parent() {
+            let mut paths = vec![parent.to_path_buf()];
+            if let Some(path) = std::env::var_os("PATH") {
+                paths.extend(std::env::split_paths(&path));
+            }
+            if let Ok(path) = std::env::join_paths(paths) {
+                command.env("PATH", path);
+            }
+        }
+        if app_server && local_router_runtime_enabled(&runtime_overrides) {
+            // Keep macOS exec/PID semantics. The helper owns only the input pipe;
+            // Desktop closing stdin ends it, including when app-server restarts.
+            let mut relay = std::process::Command::new(std::env::current_exe()?);
+            relay
+                .arg("--codey-route-app-server-input")
+                .stdout(std::process::Stdio::piped());
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                relay.creation_flags(codey_runtime_core::windows_create_no_window());
+            }
+            let mut relay = relay.spawn().context("启动 Codex 本地路由请求转发失败")?;
+            command.stdin(
+                relay
+                    .stdout
+                    .take()
+                    .context("Codex 本地路由请求管道不可用")?,
+            );
+            input_router = Some(relay);
+        }
+        #[cfg(target_os = "macos")]
+        {
+            use std::os::unix::process::CommandExt;
+            // exec 成功后不再有机会写文件：先记录已执行，exec 失败时随后改写为失败。
+            if let Some(readiness) = readiness.as_ref() {
+                readiness.mark_executed();
+            }
+            let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
+            Err(command.exec())
+                .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(codey_runtime_core::windows_create_no_window());
+            command
+                .spawn()
+                .with_context(|| format!("启动 Codex CLI 失败：{}", target.display()))
+        }
+    })();
+    let mut child = match launch {
+        Ok(child) => child,
+        Err(error) => {
+            if let Some(mut relay) = input_router {
+                let _ = relay.kill();
+                let _ = relay.wait();
+            }
+            if let Some(readiness) = readiness {
+                // 校验或创建进程失败必须显式回传，避免被误报成握手超时。
+                readiness.fail(&CliWrapperFailure {
+                    message: format!("{error:#}").chars().take(1024).collect(),
+                    retryable: error
+                        .downcast_ref::<std::io::Error>()
+                        .is_some_and(is_retryable_startup_io_error),
+                });
+            }
+            return Err(error);
+        }
+    };
+    // macOS exec 成功由 CLOEXEC 关闭连接；Windows 只在 spawn 成功后关闭。
+    if let Some(readiness) = readiness {
+        readiness.executed();
+    }
+    let status = child.wait();
+    if let Some(mut relay) = input_router {
+        let _ = relay.kill();
+        let _ = relay.wait();
+    }
+    let status =
+        status.with_context(|| format!("等待 Codex CLI 退出失败：{}", target.display()))?;
+    let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn route_local_app_server_input(
+    mut input: impl std::io::BufRead,
+    mut output: impl std::io::Write,
+    runtime_overrides: &[String],
+) -> std::io::Result<()> {
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        if input.read_until(b'\n', &mut line)? == 0 {
+            return Ok(());
+        }
+        if let Ok(mut message) = serde_json::from_slice::<serde_json::Value>(&line)
+            && matches!(
+                message.get("method").and_then(serde_json::Value::as_str),
+                Some("thread/start" | "thread/resume" | "thread/fork")
+            )
+        {
+            let method = message["method"].as_str().unwrap().to_string();
+            if message.get("params").is_none_or(serde_json::Value::is_null) {
+                message["params"] = serde_json::json!({});
+            }
+            if let Some(params) = message
+                .get_mut("params")
+                .and_then(serde_json::Value::as_object_mut)
+            {
+                let provider = router_provider_for_params(&method, params, runtime_overrides);
+                params.insert("modelProvider".into(), provider.into());
+                params.remove("model_provider");
+                if let Some(config) = params
+                    .get_mut("config")
+                    .and_then(serde_json::Value::as_object_mut)
+                {
+                    config.retain(|key, _| {
+                        key != "model_provider"
+                            && !key.starts_with("model_provider.")
+                            && key != "model_providers"
+                            && !key.starts_with("model_providers.")
+                    });
+                }
+                line = serde_json::to_vec(&message).map_err(std::io::Error::other)?;
+                line.push(b'\n');
+            }
+        }
+        output.write_all(&line)?;
+        output.flush()?;
+    }
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
+pub fn run_cli_wrapper_if_requested() -> Result<bool> {
+    Ok(false)
+}
+
+#[cfg(windows)]
+fn run_windows_package_resume_helper_if_requested() -> Result<bool> {
+    let arguments = std::env::args_os().skip(1).collect::<Vec<_>>();
+    let Some(WindowsPackageResumeTarget {
+        process_id,
+        thread_id,
+        launch_id,
+        feedback_path,
+    }) = windows_package_resume_target(&arguments)?
+    else {
+        return Ok(false);
+    };
+    let result = crate::launcher::resume_windows_packaged_thread(
+        process_id,
+        thread_id,
+        launch_id,
+        &feedback_path,
+    );
+    if let Err(error) = &result {
+        crate::error_log::record_failure(
+            "package_thread_resume_failed",
+            "resume_windows_packaged_thread",
+            format!("{error:#}"),
+            serde_json::json!({"processId": process_id, "threadId": thread_id}),
+        );
+    }
+    let _ = codey_runtime_core::diagnostic_log::flush_diagnostic_log();
+    result.map(|_| true)
+}
+
+#[cfg(any(windows, test))]
+#[derive(Debug, PartialEq, Eq)]
+struct WindowsPackageResumeTarget {
+    process_id: u32,
+    thread_id: u32,
+    launch_id: uuid::Uuid,
+    feedback_path: std::path::PathBuf,
+}
+
+#[cfg(any(windows, test))]
+fn windows_package_resume_target(
+    arguments: &[OsString],
+) -> Result<Option<WindowsPackageResumeTarget>> {
+    if arguments.first().and_then(|value| value.to_str()) != Some(WINDOWS_PACKAGE_RESUME_ARGUMENT) {
+        return Ok(None);
+    }
+    let mut process_id = None;
+    let mut thread_id = None;
+    let mut launch_id = None;
+    let mut feedback_path = None;
+    let (pairs, remainder) = arguments[1..].as_chunks::<2>();
+    for pair in pairs {
+        let name = pair[0].to_str().context("Windows Store 启动参数名称无效")?;
+        if name.eq_ignore_ascii_case("--launch-state") {
+            anyhow::ensure!(feedback_path.is_none(), "Windows Store 启动通知路径重复");
+            feedback_path = Some(std::path::PathBuf::from(&pair[1]));
+            continue;
+        }
+        if name.eq_ignore_ascii_case("--launch-id") {
+            anyhow::ensure!(launch_id.is_none(), "Windows Store 启动标识重复");
+            let value = pair[1].to_str().context("Windows Store 启动标识无效")?;
+            let id = uuid::Uuid::parse_str(value).context("Windows Store 启动标识无效")?;
+            anyhow::ensure!(!id.is_nil(), "Windows Store 启动标识为空");
+            launch_id = Some(id);
+            continue;
+        }
+        let target = if name.eq_ignore_ascii_case("-p") {
+            &mut process_id
+        } else if name.eq_ignore_ascii_case("-tid") {
+            &mut thread_id
+        } else {
+            anyhow::bail!("Windows Store 启动参数不受支持");
+        };
+        anyhow::ensure!(target.is_none(), "Windows Store 启动参数重复");
+        let value = pair[1]
+            .to_str()
+            .context("Windows Store 进程或线程 ID 无效")?;
+        anyhow::ensure!(
+            !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()),
+            "Windows Store 进程或线程 ID 无效"
+        );
+        let value = value
+            .parse::<u32>()
+            .context("Windows Store 进程或线程 ID 无效")?;
+        anyhow::ensure!(value != 0, "Windows Store 进程或线程 ID 为空");
+        *target = Some(value);
+    }
+    anyhow::ensure!(remainder.is_empty(), "Windows Store 启动参数缺少值");
+    let launch_id = launch_id.context("Windows Store 未传递启动标识")?;
+    let feedback_path = feedback_path.context("Windows Store 未传递启动通知路径")?;
+    anyhow::ensure!(
+        feedback_path.is_absolute()
+            && feedback_path.file_name() == Some(OsStr::new(&format!("resume-{launch_id}.json"))),
+        "Windows Store 启动通知路径与本次启动不匹配"
+    );
+    Ok(Some(WindowsPackageResumeTarget {
+        process_id: process_id.context("Windows Store 未传递待恢复的进程 ID")?,
+        thread_id: thread_id.context("Windows Store 未传递待恢复的线程 ID")?,
+        launch_id,
+        feedback_path,
+    }))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+/// 包装器向启动器汇报进度的两条通道：回环握手连接和记录文件。任一到达即可确认。
+#[cfg(any(windows, target_os = "macos", test))]
+struct CliWrapperReadiness {
+    stream: Option<std::net::TcpStream>,
+    marker: Option<std::path::PathBuf>,
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+impl CliWrapperReadiness {
+    fn begin() -> Self {
+        let started = std::time::Instant::now();
+        let marker = cli_wrapper_marker_path_from_env(std::env::var_os(CLI_WRAPPER_MARKER_ENV));
+        let handshake_required = cli_wrapper_handshake_required(
+            std::env::var_os(CLI_WRAPPER_HANDSHAKE_OPTIONAL_ENV).as_deref(),
+        );
+        Self::begin_with_diagnostics(
+            marker,
+            handshake_required,
+            started,
+            connect_cli_wrapper_handshake,
+        )
+    }
+
+    #[cfg(test)]
+    fn begin_with(
+        marker: Option<std::path::PathBuf>,
+        handshake_required: bool,
+        connect: impl FnOnce() -> Result<std::net::TcpStream>,
+    ) -> Self {
+        Self::begin_with_diagnostics(
+            marker,
+            handshake_required,
+            std::time::Instant::now(),
+            connect,
+        )
+    }
+
+    fn begin_with_diagnostics(
+        marker: Option<std::path::PathBuf>,
+        handshake_required: bool,
+        started: std::time::Instant,
+        connect: impl FnOnce() -> Result<std::net::TcpStream>,
+    ) -> Self {
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.cli_wrapper_started",
+            serde_json::json!({
+                "pid": std::process::id(),
+                "markerPresent": marker.is_some(),
+                "handshakeRequired": handshake_required,
+            }),
+        );
+        let readiness = Self {
+            stream: None,
+            marker,
+        };
+        readiness.mark(CliWrapperMarkerStatus::Launching, None);
+        let stream = if !handshake_required {
+            None
+        } else {
+            match connect() {
+                Ok(stream) => Some(stream),
+                Err(error) => {
+                    // 端口被拒绝说明启动器已不再监听（例如 app-server 重启），属正常情况。
+                    if error
+                        .downcast_ref::<std::io::Error>()
+                        .is_none_or(|error| error.kind() != std::io::ErrorKind::ConnectionRefused)
+                    {
+                        crate::error_log::record_failure(
+                            "compatibility_fallback",
+                            "connect_cli_wrapper_handshake",
+                            format!("{error:#}"),
+                            serde_json::json!({ "markerPresent": readiness.marker.is_some() }),
+                        );
+                    }
+                    None
+                }
+            }
+        };
+        let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+            "launcher.cli_wrapper_handshake_connect",
+            serde_json::json!({
+                "connected": stream.is_some(),
+                "elapsedMs": started.elapsed().as_millis(),
+            }),
+        );
+        Self {
+            stream,
+            ..readiness
+        }
+    }
+
+    fn mark(&self, status: CliWrapperMarkerStatus, failure: Option<&CliWrapperFailure>) {
+        let Some(path) = self.marker.as_deref() else {
+            return;
+        };
+        let mut marker = CliWrapperMarker::new(status);
+        if let Some(failure) = failure {
+            marker.message = Some(failure.message.clone());
+            marker.retryable = Some(failure.retryable);
+        }
+        if let Err(error) = marker.write(path) {
+            crate::error_log::record_failure(
+                "compatibility_fallback",
+                "write_cli_wrapper_marker",
+                format!("{error:#}"),
+                serde_json::json!({ "marker": path, "status": status }),
+            );
+        }
+    }
+
+    fn mark_executed(&self) {
+        self.mark(CliWrapperMarkerStatus::Executed, None);
+    }
+
+    fn fail(mut self, failure: &CliWrapperFailure) {
+        self.mark(CliWrapperMarkerStatus::Failed, Some(failure));
+        if let Some(mut stream) = self.stream.take() {
+            let _ = stream.write_all(b"!");
+            let _ = serde_json::to_writer(&mut stream, failure);
+        }
+    }
+
+    /// 记录已执行；随后 drop 关闭握手连接，启动器以 EOF 作为执行确认。
+    fn executed(self) {
+        self.mark_executed();
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn cli_wrapper_handshake_required(optional: Option<&OsStr>) -> bool {
+    optional != Some(OsStr::new("1"))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn connect_cli_wrapper_handshake() -> Result<std::net::TcpStream> {
+    let port = std::env::var(CLI_WRAPPER_PORT_ENV)
+        .context("Codex CLI 缺少兼容校验端口")?
+        .parse::<u16>()
+        .context("Codex CLI 兼容校验端口无效")?;
+    anyhow::ensure!(port != 0, "Codex CLI 兼容校验端口不能为 0");
+    let token = std::env::var(CLI_WRAPPER_TOKEN_ENV).context("Codex CLI 缺少兼容校验令牌")?;
+    anyhow::ensure!(
+        !token.is_empty() && token.len() <= 128,
+        "Codex CLI 兼容校验令牌无效"
+    );
+    let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let mut stream = connect_loopback_with_retry(
+        &address,
+        std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET,
+    )
+    .context("连接 Codex CLI 兼容校验端口失败")?;
+    stream
+        .set_write_timeout(Some(CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT))
+        .context("设置 Codex CLI 兼容校验写入时限失败")?;
+    stream
+        .write_all(token.as_bytes())
+        .context("发送 Codex CLI 兼容校验令牌失败")?;
+    Ok(stream)
+}
+
+/// 被拒绝立即返回；超时等暂时性错误在预算内重试，避免单次 500ms 连不上就静默放弃握手。
+#[cfg(any(windows, target_os = "macos", test))]
+fn connect_loopback_with_retry(
+    address: &std::net::SocketAddr,
+    deadline: std::time::Instant,
+) -> std::io::Result<std::net::TcpStream> {
+    connect_loopback_with_retry_using(address, deadline, std::net::TcpStream::connect_timeout)
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn connect_loopback_with_retry_using(
+    address: &std::net::SocketAddr,
+    deadline: std::time::Instant,
+    mut connect: impl FnMut(
+        &std::net::SocketAddr,
+        std::time::Duration,
+    ) -> std::io::Result<std::net::TcpStream>,
+) -> std::io::Result<std::net::TcpStream> {
+    let mut attempts = 0_u32;
+    loop {
+        attempts += 1;
+        match connect(address, CLI_WRAPPER_HANDSHAKE_CONNECT_TIMEOUT) {
+            Ok(stream) => return Ok(stream),
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                return Err(error);
+            }
+            Err(error) => {
+                let now = std::time::Instant::now();
+                if now + CLI_WRAPPER_HANDSHAKE_RETRY_DELAY >= deadline {
+                    return Err(std::io::Error::new(
+                        error.kind(),
+                        format!("{error}（已重试 {attempts} 次）"),
+                    ));
+                }
+                std::thread::sleep(CLI_WRAPPER_HANDSHAKE_RETRY_DELAY);
+            }
+        }
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn runtime_override_key(config: &str) -> &str {
+    config.split_once('=').map_or(config, |(key, _)| key).trim()
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn app_server_runtime_configs(runtime_overrides: &[String]) -> Vec<String> {
+    let mut configs = vec!["analytics.enabled=false".to_string()];
+    for config in runtime_overrides {
+        let key = runtime_override_key(config);
+        if key.is_empty() || key == "analytics.enabled" {
+            continue;
+        }
+        if let Some(index) = configs
+            .iter()
+            .position(|existing| runtime_override_key(existing) == key)
+        {
+            configs[index] = config.clone();
+        } else {
+            configs.push(config.clone());
+        }
+    }
+    configs
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+pub(crate) fn local_router_runtime_enabled(overrides: &[String]) -> bool {
+    runtime_override_string(overrides, "model_provider")
+        .is_some_and(|provider| crate::local_router::is_router_provider(&provider))
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn runtime_override_string(overrides: &[String], name: &str) -> Option<String> {
+    let (_, value) = overrides
+        .iter()
+        .rev()
+        .filter_map(|entry| entry.split_once('='))
+        .find(|(key, _)| key.trim() == name)?;
+    match format!("value={value}").parse::<toml_edit::DocumentMut>() {
+        Ok(document) => document.get("value")?.as_str().map(str::to_string),
+        // Codex also accepts bare strings in CLI configuration overrides.
+        Err(_) => Some(value.trim().to_string()),
+    }
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn router_provider_for_params(
+    _method: &str,
+    _params: &serde_json::Map<String, serde_json::Value>,
+    _overrides: &[String],
+) -> &'static str {
+    crate::local_router::ROUTER_PROVIDER_ID
+}
+
+#[cfg(any(windows, target_os = "macos", test))]
+fn rewrite_app_server_args(
+    args: &[OsString],
+    runtime_overrides: &[String],
+) -> Result<Vec<OsString>> {
+    if args
+        .iter()
+        .filter(|argument| argument.as_os_str() == OsStr::new("app-server"))
+        .count()
+        != 1
+    {
+        return Ok(args.to_vec());
+    }
+
+    anyhow::ensure!(
+        !local_router_runtime_enabled(runtime_overrides)
+            || !args.iter().any(|arg| arg == "proxy" || arg == "daemon"),
+        "本地路由模式不能使用 app-server proxy/daemon；请移除自定义后台服务启动命令"
+    );
+
+    let configs = app_server_runtime_configs(runtime_overrides);
+    let managed_keys = configs
+        .iter()
+        .map(|config| runtime_override_key(config))
+        .collect::<std::collections::HashSet<_>>();
+    let mut rewritten = Vec::with_capacity(args.len() + configs.len() * 2);
+    let mut index = 0;
+    while index < args.len() {
+        let argument = &args[index];
+        if argument.as_os_str() == OsStr::new("--analytics-default-enabled") {
+            index += 1;
+            continue;
+        }
+        if (argument.as_os_str() == OsStr::new("-c")
+            || argument.as_os_str() == OsStr::new("--config"))
+            && let Some(config) = args.get(index + 1).and_then(|value| value.to_str())
+        {
+            if !managed_keys.contains(runtime_override_key(config)) {
+                rewritten.push(argument.clone());
+                rewritten.push(args[index + 1].clone());
+            }
+            index += 2;
+            continue;
+        }
+        if let Some(config) = argument
+            .to_str()
+            .and_then(|value| value.strip_prefix("--config="))
+            && managed_keys.contains(runtime_override_key(config))
+        {
+            index += 1;
+            continue;
+        }
+        rewritten.push(argument.clone());
+        index += 1;
+    }
+
+    // Parent-table overrides from Desktop must precede the runtime fields.
+    rewritten.extend(
+        configs
+            .into_iter()
+            .flat_map(|config| [OsString::from("-c"), OsString::from(config)]),
+    );
+    Ok(rewritten)
+}
+
+pub async fn install(
+    port: u16,
+    options: PatchOptions,
+    runtime_config_overrides: &[String],
+    require_app_server_runtime_overrides: bool,
+    renderer_debug_port: Option<u16>,
+) -> Result<()> {
+    let websocket_url = wait_for_inspector(port, renderer_debug_port).await?;
+    let expression = patch_expression_with_runtime_overrides_and_validation(
+        options,
+        runtime_config_overrides,
+        require_app_server_runtime_overrides,
+    );
+    let install_timeout = if require_app_server_runtime_overrides {
+        STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT
+    } else {
+        STARTUP_PATCH_INSTALL_TIMEOUT
+    };
+    tokio::time::timeout(
+        install_timeout,
+        install_over_websocket(
+            &websocket_url,
+            &expression,
+            require_app_server_runtime_overrides,
+        ),
+    )
+    .await
+    .map_err(|_| startup_debug_session_timeout())??;
+    Ok(())
+}
+
+/// 调试会话没在时限内返回。保留为可重试的超时，Windows 才会进行下一次启动尝试。
+pub(crate) fn startup_debug_session_timeout() -> anyhow::Error {
+    std::io::Error::new(std::io::ErrorKind::TimedOut, "Codex 启动补丁调试会话超时").into()
+}
+
+/// 运行时覆盖确认的异常。未观察到启动是超时，配置不兼容则保持不可重试。
+pub(crate) fn app_server_runtime_override_confirmation_error(
+    exception: &serde_json::Value,
+) -> anyhow::Error {
+    if exception
+        .to_string()
+        .contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER)
+    {
+        return std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            format!("Codex app-server 运行时覆盖确认超时：{exception}"),
+        )
+        .into();
+    }
+    anyhow::anyhow!("Codex app-server 运行时覆盖校验失败：{exception}")
+}
+
+/// 从 reqwest 错误链里找出底层 socket 错误类型，用于区分「被拒绝」与「被拖住」。
+fn connect_error_kind(error: &anyhow::Error) -> Option<std::io::ErrorKind> {
+    for current in error.chain() {
+        if current
+            .downcast_ref::<reqwest::Error>()
+            .is_some_and(reqwest::Error::is_timeout)
+        {
+            return Some(std::io::ErrorKind::TimedOut);
+        }
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            return Some(io_error.kind());
+        }
+    }
+    None
+}
+
+/// 等待 Inspector 的 `/json/list`。传入渲染进程调试端口时，一旦该端口已应答而 Inspector
+/// 端口仍被拒绝，立即返回 [`InspectorUnavailable`]：Chromium 的调试服务在应用脚本运行后
+/// 才监听，此时 Node 环境早已创建，Inspector 不会再出现，无需耗满发现窗口。
+async fn wait_for_inspector(port: u16, renderer_debug_port: Option<u16>) -> Result<String> {
+    // 这里只访问本机 HTTP，无需同步加载系统 TLS 证书库。
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .tls_built_in_root_certs(false)
+        .timeout(std::time::Duration::from_millis(750))
+        .build()?;
+    let endpoint = format!("http://127.0.0.1:{port}/json/list");
+    wait_for_inspector_with_probe(port, renderer_debug_port, || async {
+        client
+            .get(&endpoint)
+            .send()
+            .await
+            .map_err(anyhow::Error::from)
+    })
+    .await
+}
+
+async fn wait_for_inspector_with_probe<F, Fut>(
+    port: u16,
+    renderer_debug_port: Option<u16>,
+    mut probe: F,
+) -> Result<String>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response>>,
+{
+    let started = tokio::time::Instant::now();
+    let deadline = started + STARTUP_READY_TIMEOUT;
+    let mut last_error = "调试端口尚未响应".to_string();
+    let mut retry_delay = std::time::Duration::from_millis(20);
+    let mut refused = 0_u32;
+    let mut timed_out = 0_u32;
+    let mut other_errors = 0_u32;
+    let mut next_renderer_probe = started;
+
+    while tokio::time::Instant::now() < deadline {
+        match probe().await {
+            Ok(response) if response.status().is_success() => {
+                let targets = crate::http_response::read_bounded_body(
+                    response,
+                    MAX_INSPECTOR_TARGET_RESPONSE_BYTES,
+                    "Codex Inspector 目标响应",
+                )
+                .await
+                .and_then(|body| {
+                    serde_json::from_slice::<Vec<serde_json::Value>>(&body)
+                        .map_err(anyhow::Error::from)
+                });
+                match targets {
+                    Ok(targets) => {
+                        if let Some(url) = targets.iter().find_map(|target| {
+                            target
+                                .get("webSocketDebuggerUrl")
+                                .and_then(serde_json::Value::as_str)
+                        }) {
+                            let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                                "launcher.inspector_discovered",
+                                serde_json::json!({ "port": port }),
+                            );
+                            return Ok(url.to_string());
+                        }
+                        last_error = "调试端口没有可连接的目标".to_string();
+                    }
+                    Err(error) => return Err(error.context("Codex Inspector 返回了无效的目标响应")),
+                }
+            }
+            Ok(response) => anyhow::bail!("Codex Inspector 返回 HTTP {}", response.status()),
+            Err(error) => {
+                match connect_error_kind(&error) {
+                    Some(std::io::ErrorKind::ConnectionRefused) => {
+                        refused += 1;
+                        let now = tokio::time::Instant::now();
+                        if let Some(debug_port) = renderer_debug_port
+                            && now >= next_renderer_probe
+                        {
+                            next_renderer_probe = now + std::time::Duration::from_millis(500);
+                            if loopback_port_accepts(debug_port).await {
+                                let elapsed_ms = started.elapsed().as_millis();
+                                let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+                                    "launcher.inspector_probe_summary",
+                                    serde_json::json!({
+                                        "port": port,
+                                        "outcome": "unavailable",
+                                        "refused": refused,
+                                        "timedOut": timed_out,
+                                        "otherErrors": other_errors,
+                                        "rendererReady": true,
+                                        "elapsedMs": elapsed_ms,
+                                    }),
+                                );
+                                return Err(InspectorUnavailable {
+                                    refused,
+                                    elapsed_ms,
+                                }
+                                .into());
+                            }
+                        }
+                    }
+                    Some(std::io::ErrorKind::TimedOut) => timed_out += 1,
+                    _ => other_errors += 1,
+                }
+                last_error = format!("{error:#}");
+            }
+        }
+        tokio::time::sleep(retry_delay).await;
+        retry_delay = std::cmp::min(
+            retry_delay.saturating_mul(2),
+            std::time::Duration::from_millis(100),
+        );
+    }
+
+    let renderer_ready = match renderer_debug_port {
+        Some(debug_port) => Some(loopback_port_accepts(debug_port).await),
+        None => None,
+    };
+    let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
+        "launcher.inspector_probe_summary",
+        serde_json::json!({
+            "port": port,
+            "outcome": "timeout",
+            "refused": refused,
+            "timedOut": timed_out,
+            "otherErrors": other_errors,
+            "rendererReady": renderer_ready,
+            "elapsedMs": started.elapsed().as_millis(),
+        }),
+    );
+    let renderer_state = match renderer_ready {
+        Some(true) => "，渲染进程调试端口已就绪",
+        Some(false) => "，渲染进程调试端口未就绪",
+        None => "",
+    };
+    Err(std::io::Error::new(
+        std::io::ErrorKind::TimedOut,
+        format!(
+            "等待 Codex 启动补丁超时：{last_error}；连接被拒绝 {refused} 次、超时 {timed_out} 次、其他错误 {other_errors} 次{renderer_state}"
+        ),
+    )
+    .into())
+}
+
+async fn install_over_websocket(
+    websocket_url: &str,
+    expression: &str,
+    require_app_server_runtime_overrides: bool,
+) -> Result<()> {
+    use futures_util::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let (mut socket, _) = tokio_tungstenite::connect_async(websocket_url).await?;
+    send_command(&mut socket, 1, "Runtime.enable", serde_json::json!({})).await?;
+    send_command(&mut socket, 2, "Debugger.enable", serde_json::json!({})).await?;
+
+    let mut runtime_enabled = false;
+    let mut debugger_enabled = false;
+    let mut continued = false;
+    let mut evaluation_sent = false;
+
+    while let Some(message) = socket.next().await {
+        let message = message?;
+        let text = match message {
+            Message::Text(text) => text,
+            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
+                continue;
+            }
+            Message::Close(_) => anyhow::bail!("Codex 启动补丁调试连接提前关闭"),
+        };
+        let payload: serde_json::Value = serde_json::from_str(text.as_ref())?;
+
+        match payload.get("id").and_then(serde_json::Value::as_u64) {
+            Some(1) => {
+                ensure_protocol_success(&payload, "Runtime.enable")?;
+                runtime_enabled = true;
+            }
+            Some(2) => {
+                ensure_protocol_success(&payload, "Debugger.enable")?;
+                debugger_enabled = true;
+            }
+            Some(3) => {
+                ensure_protocol_success(&payload, "Runtime.runIfWaitingForDebugger")?;
+            }
+            Some(4) => {
+                ensure_protocol_success(&payload, "Debugger.evaluateOnCallFrame")?;
+                if let Some(exception) = payload
+                    .get("result")
+                    .and_then(|result| result.get("exceptionDetails"))
+                {
+                    anyhow::bail!("Codex 启动补丁执行异常：{exception}");
+                }
+                let value = payload
+                    .pointer("/result/result/value")
+                    .and_then(serde_json::Value::as_str);
+                if value != Some(PATCH_RESULT) {
+                    anyhow::bail!("Codex 启动补丁未返回预期状态");
+                }
+                send_command(&mut socket, 5, "Debugger.resume", serde_json::json!({})).await?;
+            }
+            Some(5) => {
+                ensure_protocol_success(&payload, "Debugger.resume")?;
+                if require_app_server_runtime_overrides {
+                    send_command(
+                        &mut socket,
+                        6,
+                        "Runtime.evaluate",
+                        serde_json::json!({
+                            "expression": "globalThis.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__()",
+                            "awaitPromise": true,
+                            "returnByValue": true,
+                            "silent": false,
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
+                let _ = socket.close(None).await;
+                return Ok(());
+            }
+            Some(6) => {
+                ensure_protocol_success(&payload, "Runtime.evaluate")?;
+                if let Some(exception) = payload
+                    .get("result")
+                    .and_then(|result| result.get("exceptionDetails"))
+                {
+                    return Err(app_server_runtime_override_confirmation_error(exception));
+                }
+                let value = payload
+                    .pointer("/result/result/value")
+                    .and_then(serde_json::Value::as_str);
+                match value {
+                    Some(APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT) => {}
+                    // JS 已确认运行时配置和转发入口，仅消息补丁失配。
+                    Some(APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT) => {
+                        crate::error_log::record_failure(
+                            "patch_failed",
+                            "app_server_runtime_overrides_degraded",
+                            "启动补丁锚点漂移，已降级为 stdin relay 协议层改写".to_string(),
+                            serde_json::json!({
+                                "degraded": true,
+                                "transport": "stdin-relay",
+                            }),
+                        );
+                    }
+                    _ => anyhow::bail!("Codex app-server 运行时覆盖校验未返回预期状态"),
+                }
+                let _ = socket.close(None).await;
+                return Ok(());
+            }
+            _ => {}
+        }
+
+        if runtime_enabled && debugger_enabled && !continued {
+            continued = true;
+            send_command(
+                &mut socket,
+                3,
+                "Runtime.runIfWaitingForDebugger",
+                serde_json::json!({}),
+            )
+            .await?;
+        }
+
+        if payload.get("method").and_then(serde_json::Value::as_str) == Some("Debugger.paused")
+            && !evaluation_sent
+        {
+            let frame_id = payload
+                .pointer("/params/callFrames/0/callFrameId")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("Codex 启动补丁没有收到可用的调用栈"))?;
+            evaluation_sent = true;
+            send_command(
+                &mut socket,
+                4,
+                "Debugger.evaluateOnCallFrame",
+                serde_json::json!({
+                    "callFrameId": frame_id,
+                    "expression": expression,
+                    "returnByValue": true,
+                    "silent": false,
+                }),
+            )
+            .await?;
+        }
+    }
+
+    anyhow::bail!("Codex 启动补丁调试连接未返回执行结果")
+}
+
+async fn send_command<S>(
+    socket: &mut tokio_tungstenite::WebSocketStream<S>,
+    id: u64,
+    method: &str,
+    params: serde_json::Value,
+) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::SinkExt;
+    use tokio_tungstenite::tungstenite::Message;
+
+    let message = serde_json::json!({
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    socket
+        .send(Message::Text(message.to_string().into()))
+        .await?;
+    Ok(())
+}
+
+fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<()> {
+    if let Some(error) = payload.get("error") {
+        anyhow::bail!("{method} 失败：{error}");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_cli_wrapper_handshake_writes_marker_without_connecting() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker_path = temporary.path().join("wrapper.json");
+        let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), false, || {
+            panic!("an Inspector-capable launch must not open a discarded handshake listener")
+        });
+        assert!(readiness.stream.is_none());
+        assert_eq!(
+            CliWrapperMarker::read(&marker_path)
+                .unwrap()
+                .unwrap()
+                .status,
+            CliWrapperMarkerStatus::Launching
+        );
+        assert!(cli_wrapper_handshake_required(Some(OsStr::new("0"))));
+        assert!(!cli_wrapper_handshake_required(Some(OsStr::new("1"))));
+    }
+
+    #[test]
+    fn cli_input_routes_thread_requests_and_preserves_other_protocol_messages() {
+        for method in ["thread/start", "thread/resume", "thread/fork"] {
+            let message = serde_json::json!({
+                "id": 17, "method": method,
+                "params": { "threadId": "old-thread", "model": "route-second/gpt-6-astra",
+                    "modelProvider": null, "config": { "model_provider": "first",
+                        "model_provider.name": "first", "model_providers": {"first": {}},
+                        "model_providers.codey_router.base_url": "https://wrong.example",
+                        "service_tier": "fast", "artifact.session": "keep" } }
+            });
+            let passthrough = b"{\"id\":18,\"method\":\"turn/start\",\"params\":{\"model\":\"route-second/gpt-6-astra\"}}\r\n{\"id\":19,\"result\":{}}\ninvalid-json\n";
+            let mut input = serde_json::to_vec(&message).unwrap();
+            input.push(b'\n');
+            input.extend_from_slice(passthrough);
+            let mut output = Vec::new();
+            // One-byte buffers exercise split messages without changing framing.
+            route_local_app_server_input(
+                std::io::BufReader::with_capacity(1, input.as_slice()),
+                &mut output,
+                &[],
+            )
+            .unwrap();
+            let first_line = output.iter().position(|byte| *byte == b'\n').unwrap();
+            let routed: serde_json::Value = serde_json::from_slice(&output[..first_line]).unwrap();
+            assert_eq!(
+                routed,
+                serde_json::json!({ "id": 17, "method": method,
+                    "params": { "threadId": "old-thread", "model": "route-second/gpt-6-astra",
+                        "modelProvider": "codey_router", "config": { "service_tier": "fast", "artifact.session": "keep" } }
+                })
+            );
+            assert_eq!(&output[first_line + 1..], passthrough);
+        }
+    }
+
+    #[test]
+    fn cli_input_uses_one_provider_in_mixed_catalogs() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"models":[
+                {"slug":"remote/shared", "codey_remote_compaction":true},
+                {"slug":"local/shared", "codey_remote_compaction":false}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        let overrides = vec![
+            "model_provider=\"codey_router_remote\"".into(),
+            format!(
+                "model_catalog_json={}",
+                toml_edit::Value::from(path.to_str().unwrap())
+            ),
+            "model=\"remote/shared\"".into(),
+        ];
+        assert!(local_router_runtime_enabled(&overrides));
+        for method in ["thread/start", "thread/resume", "thread/fork"] {
+            for (model, provider) in [
+                ("remote/shared", "codey_router"),
+                ("local/shared", "codey_router"),
+                ("shared", "codey_router"),
+            ] {
+                let input = serde_json::json!({"method":method, "params":{"model":model,"modelProvider":"codey_router_remote"}}).to_string();
+                let mut output = Vec::new();
+                route_local_app_server_input(input.as_bytes(), &mut output, &overrides).unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                assert_eq!(result["params"]["modelProvider"], provider);
+            }
+        }
+        let empty = serde_json::Map::new();
+        assert_eq!(
+            router_provider_for_params("thread/start", &empty, &overrides),
+            "codey_router"
+        );
+        let params = serde_json::json!({"modelProvider":"codey_router"});
+        assert_eq!(
+            router_provider_for_params("thread/start", params.as_object().unwrap(), &overrides),
+            "codey_router"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            router_provider_for_params("thread/start", &empty, &overrides),
+            "codey_router"
+        );
+    }
+
+    #[test]
+    fn model_less_history_requests_keep_the_model_and_use_the_shared_provider() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("catalog.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"models":[
+                {"slug":"remote/shared", "codey_remote_compaction":true}
+            ]})
+            .to_string(),
+        )
+        .unwrap();
+        for default_provider in ["codey_router", "codey_router_remote"] {
+            for with_catalog in [false, true] {
+                let mut overrides = vec![
+                    format!("model_provider=\"{default_provider}\""),
+                    "model=\"remote/shared\"".into(),
+                ];
+                if with_catalog {
+                    overrides.push(format!(
+                        "model_catalog_json={}",
+                        toml_edit::Value::from(path.to_str().unwrap())
+                    ));
+                }
+                for method in ["thread/resume", "thread/fork"] {
+                    for model in [
+                        None,
+                        Some(serde_json::Value::Null),
+                        Some("".into()),
+                        Some("  ".into()),
+                    ] {
+                        let mut params = serde_json::json!({
+                            "threadId":"saved", "modelProvider":"codey_router_remote"
+                        });
+                        if let Some(model) = model {
+                            params["model"] = model;
+                        }
+                        let input =
+                            serde_json::json!({"method":method,"params":params}).to_string();
+                        let mut output = Vec::new();
+                        route_local_app_server_input(input.as_bytes(), &mut output, &overrides)
+                            .unwrap();
+                        let result: serde_json::Value = serde_json::from_slice(&output).unwrap();
+                        params["modelProvider"] = "codey_router".into();
+                        assert_eq!(result["params"], params);
+                    }
+                }
+            }
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn detached_cli_calls_resolve_the_saved_app_or_fail_without_starting_the_desktop() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = crate::config::ConfigStore::new(temp.path().join("config.json"));
+        #[cfg(target_os = "macos")]
+        let app = temp.path().join("Codex.app");
+        #[cfg(windows)]
+        let app = temp.path().join("Codex");
+        #[cfg(target_os = "macos")]
+        let target = app.join("Contents/Resources/codex");
+        #[cfg(windows)]
+        let target = app.join("resources/codex.exe");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, "test CLI").unwrap();
+        #[cfg(windows)]
+        std::fs::write(app.join("Codex.exe"), "test desktop").unwrap();
+        store
+            .save(&crate::config::CodeyConfig {
+                codex_app_path: app.to_string_lossy().into_owned(),
+                ..Default::default()
+            })
+            .unwrap();
+        for args in [
+            vec!["sandbox", "windows", "--", "node.exe"],
+            vec!["-c", "key=value", "app-server"],
+            vec!["exec-server"],
+            vec!["--version"],
+        ] {
+            assert_eq!(
+                cli_wrapper_target(
+                    &args.iter().map(OsString::from).collect::<Vec<_>>(),
+                    None,
+                    &store
+                )
+                .unwrap(),
+                Some(target.clone()),
+            );
+        }
+        std::fs::remove_file(&target).unwrap();
+        assert!(cli_wrapper_target(&["sandbox".into()], None, &store).is_err());
+        assert_eq!(cli_wrapper_target(&[], None, &store).unwrap(), None);
+        assert_eq!(
+            cli_wrapper_target(&["--debug-port".into(), "9333".into()], None, &store).unwrap(),
+            None,
+        );
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            cli_wrapper_target(&["-psn_0_1".into()], None, &store).unwrap(),
+            None
+        );
+        std::fs::write(store.path(), "invalid config").unwrap();
+        assert!(cli_wrapper_target(&["sandbox".into()], None, &store).is_err());
+        assert_eq!(
+            cli_wrapper_target(&[], Some(target.clone().into_os_string()), &store).unwrap(),
+            Some(target),
+        );
+    }
+
+    #[test]
+    fn windows_package_resume_helper_requires_both_process_and_thread() {
+        let launch_id = "37f4f759-55f1-4b66-a45d-160644fe20d4";
+        let feedback_path = std::env::temp_dir()
+            .join("自定义 Codey 状态")
+            .join(format!("resume-{launch_id}.json"));
+        assert_eq!(windows_package_resume_target(&[]).unwrap(), None);
+        assert_eq!(
+            windows_package_resume_target(&["--debug-port".into()]).unwrap(),
+            None
+        );
+        for args in [["-p", "42", "-tid", "73"], ["-TID", "73", "-P", "42"]] {
+            let args = std::iter::once(WINDOWS_PACKAGE_RESUME_ARGUMENT)
+                .chain(["--launch-id", launch_id])
+                .chain(args)
+                .map(OsString::from)
+                .chain([
+                    OsString::from("--launch-state"),
+                    feedback_path.clone().into_os_string(),
+                ])
+                .collect::<Vec<_>>();
+            assert_eq!(
+                windows_package_resume_target(&args).unwrap(),
+                Some(WindowsPackageResumeTarget {
+                    process_id: 42,
+                    thread_id: 73,
+                    launch_id: uuid::Uuid::parse_str(launch_id).unwrap(),
+                    feedback_path: feedback_path.clone()
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn windows_package_resume_helper_rejects_malformed_targets() {
+        let feedback_path =
+            std::env::temp_dir().join("resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json");
+        for args in [
+            vec![],
+            vec!["-tid", "73"],
+            vec!["-p", "42"],
+            vec!["-p", "42", "-tid"],
+            vec!["-p", "0", "-tid", "73"],
+            vec!["-p", "42", "-tid", "0"],
+            vec!["-p", "invalid", "-tid", "73"],
+            vec!["-p", "42", "-tid", "4294967296"],
+            vec!["-p", "42", "-tid", "+73"],
+            vec!["-p", "42", "-tid", "-73"],
+            vec!["-p", "42", "-tid", "73", "-P", "42"],
+            vec!["-p", "42", "-tid", "73", "-tid", "74"],
+            vec!["-p", "42", "-tid", "73", "--extra", "1"],
+        ] {
+            let args = std::iter::once(WINDOWS_PACKAGE_RESUME_ARGUMENT)
+                .chain(["--launch-id", "37f4f759-55f1-4b66-a45d-160644fe20d4"])
+                .chain(args)
+                .map(OsString::from)
+                .chain([
+                    OsString::from("--launch-state"),
+                    feedback_path.clone().into_os_string(),
+                ])
+                .collect::<Vec<_>>();
+            assert!(windows_package_resume_target(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn windows_package_resume_helper_requires_valid_unique_launch_id() {
+        let feedback_path =
+            std::env::temp_dir().join("resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json");
+        for extra in [
+            vec![],
+            vec!["--launch-id", "../other-launch"],
+            vec!["--launch-id", "00000000-0000-0000-0000-000000000000"],
+            vec![
+                "--launch-id",
+                "37f4f759-55f1-4b66-a45d-160644fe20d4",
+                "--launch-id",
+                "37f4f759-55f1-4b66-a45d-160644fe20d4",
+            ],
+        ] {
+            let args = [WINDOWS_PACKAGE_RESUME_ARGUMENT, "-p", "42", "-tid", "73"]
+                .into_iter()
+                .chain(extra)
+                .map(OsString::from)
+                .chain([
+                    OsString::from("--launch-state"),
+                    feedback_path.clone().into_os_string(),
+                ])
+                .collect::<Vec<_>>();
+            assert!(windows_package_resume_target(&args).is_err(), "{args:?}");
+        }
+    }
+
+    #[test]
+    fn windows_package_resume_helper_rejects_missing_or_unrelated_state_path() {
+        let base = [
+            WINDOWS_PACKAGE_RESUME_ARGUMENT,
+            "-p",
+            "42",
+            "-tid",
+            "73",
+            "--launch-id",
+            "37f4f759-55f1-4b66-a45d-160644fe20d4",
+        ]
+        .map(OsString::from)
+        .to_vec();
+        assert!(windows_package_resume_target(&base).is_err());
+        for path in [
+            std::path::PathBuf::from("relative/resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json"),
+            std::env::temp_dir().join("unrelated.json"),
+        ] {
+            let mut args = base.clone();
+            args.extend([OsString::from("--launch-state"), path.into_os_string()]);
+            assert!(windows_package_resume_target(&args).is_err());
+        }
+        let path = std::env::temp_dir().join("resume-37f4f759-55f1-4b66-a45d-160644fe20d4.json");
+        let mut args = base;
+        args.extend([
+            OsString::from("--launch-state"),
+            path.clone().into_os_string(),
+        ]);
+        assert!(windows_package_resume_target(&args).is_ok());
+        args.extend([OsString::from("--launch-state"), path.into_os_string()]);
+        assert!(windows_package_resume_target(&args).is_err());
+    }
+
+    #[test]
+    fn cli_wrapper_rewrites_only_managed_app_server_configs() {
+        let args = [
+            "-c",
+            "features.code_mode_host=true",
+            "app-server",
+            "--analytics-default-enabled",
+            "--config",
+            "model_provider=old",
+            "-c",
+            "unmanaged=true",
+        ]
+        .map(OsString::from);
+        let overrides = vec![
+            "model_provider=first".to_string(),
+            "features.hooks=true".to_string(),
+            "model_provider=codey_router".to_string(),
+        ];
+
+        assert_eq!(
+            rewrite_app_server_args(&args, &overrides).unwrap(),
+            [
+                "-c",
+                "features.code_mode_host=true",
+                "app-server",
+                "-c",
+                "unmanaged=true",
+                "-c",
+                "analytics.enabled=false",
+                "-c",
+                "model_provider=codey_router",
+                "-c",
+                "features.hooks=true",
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn router_runtime_rejects_shared_app_server_commands() {
+        for id in crate::local_router::ROUTER_PROVIDER_IDS {
+            for router in [
+                format!("model_provider=\"{id}\""),
+                format!("model_provider='{id}'"),
+                format!("model_provider={id}"),
+            ] {
+                let router = vec![router];
+                assert!(local_router_runtime_enabled(&router));
+                assert!(!local_router_runtime_enabled(&[
+                    router[0].clone(),
+                    "model_provider=\"openai\"".to_string(),
+                ]));
+                for subcommand in ["proxy", "daemon"] {
+                    let args = ["app-server", subcommand].map(OsString::from);
+                    assert!(rewrite_app_server_args(&args, &router).is_err());
+                    assert!(rewrite_app_server_args(&args, &[]).is_ok());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn inspector_is_loopback_only_and_pauses_before_startup() {
+        assert_eq!(inspector_argument(19321), "--inspect-brk=127.0.0.1:19321");
+    }
+
+    #[test]
+    fn patch_result_is_stable_for_launch_status_validation() {
+        assert_eq!(PATCH_RESULT, "codey-startup-patch-installed-v40");
+        assert_eq!(
+            APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT,
+            "codey-app-server-runtime-overrides-verified"
+        );
+        assert_eq!(
+            APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT,
+            "codey-app-server-runtime-overrides-degraded"
+        );
+        // 降级态必须与已验证态可区分，否则启动器会把锚点漂移当成正常结果。
+        assert_ne!(
+            APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT,
+            APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT
+        );
+        assert!(STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT > STARTUP_PATCH_INSTALL_TIMEOUT);
+        // 调试会话必须盖住 JS 的等待，否则慢启动会先被会话超时掐断。
+        // 外层启动预算再盖住调试会话，避免窗口还没出来就结束这次尝试。
+        assert!(
+            STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT
+                >= std::time::Duration::from_secs(150) + std::time::Duration::from_secs(10)
+        );
+        assert!(STARTUP_CLI_READY_TIMEOUT > STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT);
+        assert!(STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER));
+        assert!(STARTUP_PATCH_TEMPLATE.contains("appServerRuntimeOverrideTimeoutMs = 150_000"));
+    }
+
+    #[test]
+    fn runtime_override_timeouts_stay_retryable() {
+        let session = startup_debug_session_timeout();
+        let session_io = session
+            .downcast_ref::<std::io::Error>()
+            .expect("debug session timeout should stay an io timeout");
+        assert_eq!(session_io.kind(), std::io::ErrorKind::TimedOut);
+        assert!(session.to_string().contains("调试会话超时"));
+
+        let timed_out = app_server_runtime_override_confirmation_error(&serde_json::json!({
+            "exception": {
+                "description": format!("{APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER} 未观察到 app-server 启动调用")
+            }
+        }));
+        assert_eq!(
+            timed_out
+                .downcast_ref::<std::io::Error>()
+                .map(std::io::Error::kind),
+            Some(std::io::ErrorKind::TimedOut)
+        );
+
+        let incompatible = app_server_runtime_override_confirmation_error(&serde_json::json!({
+            "exception": { "description": "缺失：model_provider" }
+        }));
+        assert!(incompatible.downcast_ref::<std::io::Error>().is_none());
+        assert!(incompatible.to_string().contains("运行时覆盖校验失败"));
+    }
+
+    /// 状态字是 Rust 与 JS 两侧各自硬编码的跨语言契约：改了一边而忘了另一边，
+    /// 判定点会静默走 `_ => bail!` 分支，把降级重新变回「进不去」。
+    #[test]
+    fn app_server_override_status_is_a_shared_cross_language_contract() {
+        assert!(
+            STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT),
+            "JS payload must return the verified status the launcher compares against"
+        );
+        assert!(
+            STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT),
+            "JS payload must return the degraded status the launcher accepts"
+        );
+        assert!(
+            STARTUP_PATCH_TEMPLATE.contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER),
+            "JS payload must mark an unobserved app-server wait so the launcher can retry"
+        );
+    }
+
+    #[test]
+    fn patch_expression_keeps_pet_slimming_voice_compatible() {
+        let expression = patch_expression(PatchOptions {
+            disable_pet: true,
+            subagent_gate_active: true,
+            misc_model: None,
+        });
+
+        assert!(expression.contains("const disablePet = true"));
+        assert!(
+            expression
+                .contains("const disableWindowsOptimizations = process.platform === \"win32\"")
+        );
+        assert!(expression.contains("const disableMicro = disableWindowsOptimizations"));
+        assert!(
+            expression.contains("const disableWindowsWmiSampler = disableWindowsOptimizations")
+        );
+        assert!(expression.contains("CodeyDisabledWmiSnapshotWorker"));
+        assert!(expression.contains("patchCodexAvatarOverlayPrewarm"));
+        assert!(expression.contains("throttleHiddenAvatarOverlay: disablePet"));
+        assert!(expression.contains("CODEY_STARTUP_PATCH_MARKER"));
+        assert!(expression.contains("delete process.env.NODE_OPTIONS"));
+        assert!(expression.contains("isRequireArgument"));
+        assert!(expression.contains("patchCodexRendererResponse"));
+        assert!(expression.contains("pet settings avatar resources"));
+        assert!(expression.contains("restoreNativeModelAndSpeedControls: true"));
+        assert!(!expression.contains("CodeyPetBlockedBrowserWindow"));
+        assert!(!expression.contains("__CODEY_DISABLED_PET_MANAGER__"));
+        assert!(!expression.contains("__CODEY_PET_HARD_DISABLE_STATUS__"));
+        assert!(!expression.contains("CODEY_PET_DISABLED"));
+        assert!(!expression.contains("guardAvatarOverlayLifecycle"));
+        assert!(!expression.contains("Codex pet window disabled by Codey"));
+        assert!(expression.contains("process.getBuiltinModule(\"inspector\").close()"));
+        assert!(expression.contains("disableAppServerAnalytics: true"));
+        assert!(expression.contains("get disableDesktopCesAnalytics()"));
+        assert!(expression.contains("analytics.enabled=false"));
+        assert!(expression.contains("reconcileExternalPluginState"));
+        assert!(expression.contains("get throttleExternalPluginFocusReconcile()"));
+        assert!(expression.contains("get disableAppStateHeartbeat()"));
+        assert!(expression.contains("get optionalMainBundlePatchFailures()"));
+        assert!(expression.contains("const originalCompile = module._compile"));
+        assert!(expression.contains("CODEY_SUBAGENT_GATE_RUNTIME_ID"));
+        assert!(!expression.contains("localeOverride"));
+        assert!(expression.contains("spawnSync"));
+        assert!(expression.contains("writeCodeyPatchFailuresAsync"));
+        assert!(expression.contains("optionalPatchFailureQueue"));
+        assert!(expression.contains("--codey-record-error"));
+        assert!(expression.contains("codex: readCodexAppVersion()"));
+        assert!(expression.replace("\r\n", "\n").contains(
+            "setImmediate(() => {\n        try { process.getBuiltinModule(\"inspector\").close()"
+        ));
+        assert!(!expression.contains("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__"));
+        assert!(!expression.contains("\"__CODEY_ERROR_LOGGER_EXECUTABLE__\""));
+    }
+
+    #[test]
+    fn patch_expression_embeds_runtime_config_overrides_as_json() {
+        let overrides = vec![
+            "features.hooks=true".to_string(),
+            "developer_instructions=\"line one\\nline two\"".to_string(),
+        ];
+        let expression = patch_expression_with_runtime_overrides(
+            PatchOptions {
+                disable_pet: false,
+                subagent_gate_active: true,
+                misc_model: None,
+            },
+            &overrides,
+        );
+
+        assert!(expression.contains("const codeyRuntimeConfigOverrides = ["));
+        assert!(expression.contains("features.hooks=true"));
+        assert!(expression.contains("developer_instructions="));
+        assert!(!expression.contains("__CODEY_RUNTIME_CONFIG_OVERRIDES__"));
+    }
+
+    #[test]
+    fn patch_expression_injects_the_misc_model_without_renaming_its_global() {
+        let unset = patch_expression(PatchOptions {
+            disable_pet: false,
+            subagent_gate_active: true,
+            misc_model: None,
+        });
+        assert!(!unset.contains("__CODEY_MISC_MODEL_ID__"));
+        assert!(unset.contains("const rawMiscModelId = null"));
+        assert!(unset.contains("globalThis, \"__CODEY_MISC_MODEL__\""));
+
+        let selected = patch_expression(PatchOptions {
+            disable_pet: false,
+            subagent_gate_active: true,
+            misc_model: Some("relay/housekeeping".to_string()),
+        });
+        assert!(selected.contains("const rawMiscModelId = \"relay/housekeeping\""));
+        assert!(selected.contains("globalThis, \"__CODEY_MISC_MODEL__\""));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn inspector_discovery_accepts_cold_start_after_fifteen_seconds() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let port = reserve_loopback_port().unwrap();
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(18)).await;
+            tokio::time::resume();
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+                .await
+                .unwrap();
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 1024];
+            assert_ne!(stream.read(&mut request).await.unwrap(), 0);
+            let body = r#"[{"webSocketDebuggerUrl":"ws://127.0.0.1/test"}]"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        assert_eq!(
+            wait_for_inspector(port, None).await.unwrap(),
+            "ws://127.0.0.1/test"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspector_protocol_installs_stub_before_resuming() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            for expected_id in [1_u64, 2] {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("expected inspector command");
+                };
+                let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+                assert_eq!(command["id"], expected_id);
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({"id": expected_id, "result": {}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected runIfWaitingForDebugger");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["method"], "Runtime.runIfWaitingForDebugger");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({"id": 3, "result": {}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "method": "Debugger.paused",
+                        "params": {
+                            "callFrames": [{"callFrameId": "frame-1"}]
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected evaluateOnCallFrame");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["method"], "Debugger.evaluateOnCallFrame");
+            assert_eq!(command["params"]["callFrameId"], "frame-1");
+            let expression = command["params"]["expression"].as_str().unwrap();
+            assert!(expression.contains("@worklouder/device-kit-oai"));
+            assert!(expression.contains("pet settings avatar resources"));
+            assert!(!expression.contains("CodeyPetBlockedBrowserWindow"));
+            assert!(!expression.contains("CODEY_PET_DISABLED"));
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "id": 4,
+                        "result": {
+                            "result": {
+                                "type": "string",
+                                "value": PATCH_RESULT
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected Debugger.resume");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["method"], "Debugger.resume");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({"id": 5, "result": {}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let expression = patch_expression(PatchOptions {
+            disable_pet: true,
+            subagent_gate_active: true,
+            misc_model: None,
+        });
+        install_over_websocket(&format!("ws://{address}"), &expression, false)
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    /// 驱动完整的 Inspector 安装协议，确认结果由用例指定。
+    async fn run_inspector_runtime_override_case(status: &'static str) -> anyhow::Result<()> {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            for expected_id in [1_u64, 2] {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("expected inspector command");
+                };
+                let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+                assert_eq!(command["id"], expected_id);
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({"id": expected_id, "result": {}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected runIfWaitingForDebugger");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["id"], 3);
+            assert_eq!(command["method"], "Runtime.runIfWaitingForDebugger");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({"id": 3, "result": {}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "method": "Debugger.paused",
+                        "params": {
+                            "callFrames": [{"callFrameId": "frame-1"}]
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected evaluateOnCallFrame");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["id"], 4);
+            assert_eq!(command["method"], "Debugger.evaluateOnCallFrame");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "id": 4,
+                        "result": {
+                            "result": {
+                                "type": "string",
+                                "value": PATCH_RESULT
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected Debugger.resume");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["id"], 5);
+            assert_eq!(command["method"], "Debugger.resume");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({"id": 5, "result": {}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected Runtime.evaluate");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["id"], 6);
+            assert_eq!(command["method"], "Runtime.evaluate");
+            assert_eq!(command["params"]["awaitPromise"], true);
+            assert!(
+                command["params"]["expression"]
+                    .as_str()
+                    .unwrap()
+                    .contains("__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__")
+            );
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "id": 6,
+                        "result": {
+                            "result": {
+                                "type": "string",
+                                "value": status
+                            }
+                        }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let expression = patch_expression(PatchOptions {
+            disable_pet: true,
+            subagent_gate_active: true,
+            misc_model: None,
+        });
+        let result = install_over_websocket(&format!("ws://{address}"), &expression, true).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn inspector_protocol_waits_for_app_server_runtime_override_validation() {
+        run_inspector_runtime_override_case(APP_SERVER_RUNTIME_OVERRIDES_VERIFIED_RESULT)
+            .await
+            .unwrap();
+    }
+
+    /// JS 确认满足降级条件后，启动器接受该状态。
+    #[tokio::test]
+    async fn inspector_protocol_accepts_the_degraded_runtime_override_status() {
+        run_inspector_runtime_override_case(APP_SERVER_RUNTIME_OVERRIDES_DEGRADED_RESULT)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspector_protocol_rejects_unknown_runtime_override_status() {
+        let error = run_inspector_runtime_override_case("unexpected-runtime-status")
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("运行时覆盖校验未返回预期状态"));
+    }
+
+    #[tokio::test]
+    async fn inspector_protocol_fails_immediately_when_continue_is_rejected() {
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+
+            for expected_id in [1_u64, 2] {
+                let message = socket.next().await.unwrap().unwrap();
+                let Message::Text(text) = message else {
+                    panic!("expected inspector command");
+                };
+                let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+                assert_eq!(command["id"], expected_id);
+                socket
+                    .send(Message::Text(
+                        serde_json::json!({"id": expected_id, "result": {}})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+
+            let message = socket.next().await.unwrap().unwrap();
+            let Message::Text(text) = message else {
+                panic!("expected runIfWaitingForDebugger");
+            };
+            let command: serde_json::Value = serde_json::from_str(text.as_ref()).unwrap();
+            assert_eq!(command["id"], 3);
+            assert_eq!(command["method"], "Runtime.runIfWaitingForDebugger");
+            socket
+                .send(Message::Text(
+                    serde_json::json!({
+                        "id": 3,
+                        "error": { "code": -32000, "message": "not waiting" }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+        });
+
+        let expression = patch_expression(PatchOptions {
+            disable_pet: true,
+            subagent_gate_active: true,
+            misc_model: None,
+        });
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            install_over_websocket(&format!("ws://{address}"), &expression, false),
+        )
+        .await
+        .expect("protocol error should not wait for the outer startup timeout")
+        .expect_err("runIfWaitingForDebugger error should fail installation");
+        let message = error.to_string();
+        assert!(
+            message.contains("Runtime.runIfWaitingForDebugger"),
+            "{message}"
+        );
+        assert!(message.contains("not waiting"), "{message}");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspector_wait_gives_up_once_the_renderer_port_answers_but_the_inspector_refuses() {
+        let renderer = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let renderer_port = renderer.local_addr().unwrap().port();
+        let started = std::time::Instant::now();
+        // Closed loopback ports can time out on Windows before refusal arrives.
+        // Supply the error explicitly so this test exercises refusal handling.
+        let mut probes = 0;
+        let error = wait_for_inspector_with_probe(0, Some(renderer_port), || {
+            probes += 1;
+            let kind = if probes == 1 {
+                std::io::ErrorKind::TimedOut
+            } else {
+                std::io::ErrorKind::ConnectionRefused
+            };
+            std::future::ready(Err(std::io::Error::from(kind).into()))
+        })
+        .await
+        .unwrap_err();
+        let unavailable = error
+            .downcast_ref::<InspectorUnavailable>()
+            .unwrap_or_else(|| panic!("expected InspectorUnavailable, got {error:#}"));
+        assert!(unavailable.refused >= 1);
+        assert!(
+            probes >= 2,
+            "a timeout alone must not mark Inspector unavailable"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "must not wait for the full discovery window"
+        );
+        drop(renderer);
+    }
+
+    #[test]
+    fn cli_wrapper_marker_round_trips_and_only_accepts_absolute_json_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("marker.json");
+        assert!(CliWrapperMarker::read(&path).unwrap().is_none());
+        let mut marker = CliWrapperMarker::new(CliWrapperMarkerStatus::Failed);
+        marker.message = Some("boom".to_string());
+        marker.retryable = Some(true);
+        marker.write(&path).unwrap();
+        let read = CliWrapperMarker::read(&path).unwrap().unwrap();
+        assert_eq!(read.status, CliWrapperMarkerStatus::Failed);
+        assert_eq!(read.pid, std::process::id());
+        assert_eq!(read.message.as_deref(), Some("boom"));
+        assert_eq!(read.retryable, Some(true));
+        CliWrapperMarker::new(CliWrapperMarkerStatus::Executed)
+            .write(&path)
+            .unwrap();
+        let read = CliWrapperMarker::read(&path).unwrap().unwrap();
+        assert_eq!(read.status, CliWrapperMarkerStatus::Executed);
+        assert_eq!(read.message, None);
+        std::fs::write(&path, "not json").unwrap();
+        assert!(CliWrapperMarker::read(&path).is_err());
+
+        assert_eq!(
+            cli_wrapper_marker_path_from_env(Some(path.clone().into_os_string())),
+            Some(path.clone())
+        );
+        assert_eq!(
+            cli_wrapper_marker_path_from_env(Some(OsString::from("relative.json"))),
+            None
+        );
+        assert_eq!(
+            cli_wrapper_marker_path_from_env(Some(temp.path().join("marker.txt").into_os_string())),
+            None
+        );
+        assert_eq!(cli_wrapper_marker_path_from_env(None), None);
+    }
+
+    #[test]
+    fn handshake_connect_connects_when_listening() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let deadline = std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET;
+        connect_loopback_with_retry(&address, deadline).unwrap();
+    }
+
+    #[test]
+    fn handshake_connect_does_not_retry_refusal() {
+        let address = "127.0.0.1:1".parse().unwrap();
+        let mut attempts = 0;
+        let error = connect_loopback_with_retry_using(
+            &address,
+            std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET,
+            |_, _| {
+                attempts += 1;
+                Err(std::io::ErrorKind::ConnectionRefused.into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionRefused);
+        assert_eq!(attempts, 1, "a refused connection must not be retried");
+    }
+
+    #[test]
+    fn handshake_connect_retries_timeout_and_connects_when_listening() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut attempts = 0;
+        connect_loopback_with_retry_using(
+            &address,
+            std::time::Instant::now() + CLI_WRAPPER_HANDSHAKE_CONNECT_BUDGET,
+            |address, timeout| {
+                attempts += 1;
+                if attempts == 1 {
+                    Err(std::io::ErrorKind::TimedOut.into())
+                } else {
+                    std::net::TcpStream::connect_timeout(address, timeout)
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    fn handshake_connect_stops_retrying_timeout_at_deadline() {
+        let address = "127.0.0.1:1".parse().unwrap();
+        let mut attempts = 0;
+        let error =
+            connect_loopback_with_retry_using(&address, std::time::Instant::now(), |_, _| {
+                attempts += 1;
+                Err(std::io::ErrorKind::TimedOut.into())
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn node_require_argument_is_a_single_unquoted_token() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("patch.js");
+        std::fs::write(&path, "0").unwrap();
+        let argument = node_require_argument(&path).unwrap();
+        assert!(argument.starts_with("--require="));
+        assert!(!argument.contains(char::is_whitespace));
+        assert!(argument.ends_with("patch.js"));
+    }
+
+    #[test]
+    fn prepare_startup_require_writes_js_and_marker_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let prepared = prepare_startup_require_in(
+            temp.path(),
+            PatchOptions {
+                disable_pet: false,
+                subagent_gate_active: true,
+                misc_model: None,
+            },
+            &["analytics.enabled=false".to_string()],
+        )
+        .unwrap();
+        let environment = prepared
+            .environment
+            .iter()
+            .cloned()
+            .collect::<std::collections::HashMap<_, _>>();
+        let node_options = environment
+            .get("NODE_OPTIONS")
+            .expect("NODE_OPTIONS must be set for --require");
+        assert_eq!(
+            environment.get("CODEX_SPARKLE_ENABLED"),
+            Some(&"false".to_string())
+        );
+        assert!(node_options.starts_with("--require="));
+        assert!(!node_options.contains(char::is_whitespace));
+        let script = std::path::PathBuf::from(node_options.trim_start_matches("--require="));
+        let source = std::fs::read_to_string(&script).unwrap();
+        assert!(source.contains("CODEY_STARTUP_PATCH_MARKER"));
+        assert!(source.contains("delete process.env.NODE_OPTIONS"));
+        assert!(source.contains("analytics.enabled=false"));
+        let marker = environment
+            .get(STARTUP_PATCH_MARKER_ENV)
+            .expect("require path must publish a marker");
+        assert_eq!(std::path::Path::new(marker), prepared.marker_path);
+        assert!(marker.ends_with(".json"));
+        assert!(!prepared.marker_path.exists());
+    }
+
+    #[test]
+    fn space_free_path_moves_off_whitespace() {
+        let temp = tempfile::tempdir().unwrap();
+        let spaced = temp.path().join("has space");
+        std::fs::create_dir(&spaced).unwrap();
+        let source = spaced.join(format!("{}.js", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&source, "1").unwrap();
+        let resolved = space_free_path(&source).unwrap();
+        assert!(!path_has_whitespace(&resolved));
+        assert_eq!(std::fs::read_to_string(&resolved).unwrap(), "1");
+        std::fs::remove_file(resolved).unwrap();
+    }
+
+    #[test]
+    fn failed_path_preparation_removes_the_unused_patch() {
+        let temp = tempfile::tempdir().unwrap();
+        let options = PatchOptions {
+            disable_pet: false,
+            subagent_gate_active: false,
+            misc_model: None,
+        };
+        let failure = prepare_startup_require_with_path(temp.path(), options.clone(), &[], |_| {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+        });
+        assert!(failure.is_err());
+        let invalid_argument =
+            prepare_startup_require_with_path(temp.path(), options.clone(), &[], |_| {
+                Ok(temp.path().join("missing patch.js"))
+            });
+        assert!(invalid_argument.is_err());
+        assert_eq!(
+            std::fs::read_dir(temp.path().join(STARTUP_REQUIRE_DIR))
+                .unwrap()
+                .count(),
+            0
+        );
+        let first = prepare_startup_require_in(temp.path(), options.clone(), &[]).unwrap();
+        let second = prepare_startup_require_in(temp.path(), options, &[]).unwrap();
+        assert_ne!(first.marker_path, second.marker_path);
+        assert!(first.marker_path.with_extension("js").is_file());
+        assert!(second.marker_path.with_extension("js").is_file());
+    }
+
+    #[test]
+    fn startup_require_temp_copy_preserves_content_and_cleanup_filename() {
+        let temp = tempfile::tempdir().unwrap();
+        let spaced = temp.path().join("has space");
+        std::fs::create_dir(&spaced).unwrap();
+        let source = spaced.join(format!("{}.js", uuid::Uuid::new_v4().simple()));
+        std::fs::write(&source, "module.exports = 1;").unwrap();
+
+        let resolved = copy_startup_require_to_temp(&source, temp.path()).unwrap();
+
+        assert_eq!(resolved, temp.path().join(source.file_name().unwrap()));
+        assert_eq!(
+            std::fs::read(&resolved).unwrap(),
+            std::fs::read(&source).unwrap()
+        );
+        assert_eq!(
+            node_require_argument(&resolved).unwrap(),
+            format!("--require={}", resolved.display())
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&resolved).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn startup_require_temp_copy_rejects_whitespace_destination() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("patch.js");
+        std::fs::write(&source, "1").unwrap();
+        let destination_dir = temp.path().join("has space");
+        std::fs::create_dir(&destination_dir).unwrap();
+
+        let error = copy_startup_require_to_temp(&source, &destination_dir).unwrap_err();
+
+        assert!(error.to_string().contains("临时补丁路径包含空白"));
+        assert!(!destination_dir.join("patch.js").exists());
+    }
+
+    #[test]
+    fn startup_require_temp_copy_reports_missing_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("has space").join("missing.js");
+
+        let error = copy_startup_require_to_temp(&source, temp.path()).unwrap_err();
+
+        assert!(error.to_string().contains("读取 Codex 启动补丁失败"));
+        assert!(error.to_string().contains("missing.js"));
+        assert!(!temp.path().join("missing.js").exists());
+    }
+
+    #[test]
+    fn prune_startup_require_files_removes_stale_payloads() {
+        let temp = tempfile::tempdir().unwrap();
+        let now = std::time::SystemTime::now();
+        let old = now - std::time::Duration::from_secs(2 * 60 * 60);
+        let stale_js = temp.path().join("stale.js");
+        let stale_json = temp.path().join("stale.json");
+        let stale_tmp = temp.path().join("stale.tmp");
+        let fresh = temp.path().join("fresh.js");
+        let other = temp.path().join("stale.txt");
+        for path in [&stale_js, &stale_json, &stale_tmp, &fresh, &other] {
+            std::fs::write(path, "{}").unwrap();
+        }
+        for path in [&stale_js, &stale_json, &stale_tmp, &other] {
+            std::fs::File::options()
+                .write(true)
+                .open(path)
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        assert_eq!(
+            prune_startup_require_files(temp.path(), now, STARTUP_REQUIRE_MAX_AGE),
+            3
+        );
+        assert!(!stale_js.exists());
+        assert!(!stale_json.exists());
+        assert!(!stale_tmp.exists());
+        assert!(fresh.exists());
+        assert!(other.exists());
+        assert_eq!(
+            prune_startup_require_files(&temp.path().join("missing"), now, STARTUP_REQUIRE_MAX_AGE),
+            0
+        );
+    }
+}

@@ -1,0 +1,49 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
+fn main() {
+    match codey_lib::run_plugin_log_terminal_if_requested() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("插件日志终端运行失败：{error:#}");
+            std::process::exit(1);
+        }
+    }
+    if let Some(code) = codey_lib::run_elevated_node_options_helper_if_requested() {
+        std::process::exit(code);
+    }
+    codey_lib::install_crash_log_hook("codey", "runtime.codey");
+    if let Err(error) = run() {
+        let error = format!("{error:#}");
+        codey_lib::record_process_failure(
+            "process_failed",
+            "run_codey",
+            error.clone(),
+            "runtime.codey",
+        );
+        eprintln!("Codey 运行失败：{error}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> anyhow::Result<()> {
+    if codey_lib::run_node_options_repair_if_requested()? {
+        return Ok(());
+    }
+    if codey_lib::run_fastctx_route_hook_if_requested()? {
+        return Ok(());
+    }
+    if codey_lib::run_subagent_gate_hook_if_requested()? {
+        return Ok(());
+    }
+    if codey_lib::run_error_log_helper_if_requested()? {
+        return Ok(());
+    }
+    if codey_lib::run_update_helper_if_requested()? {
+        return Ok(());
+    }
+    if codey_lib::run_codex_cli_wrapper_if_requested()? {
+        return Ok(());
+    }
+    codey_lib::run_desktop_application()
+}

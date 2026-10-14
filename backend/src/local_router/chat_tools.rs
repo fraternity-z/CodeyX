@@ -1,0 +1,2935 @@
+use super::*;
+
+pub(crate) fn append_chat_messages_from_responses_input(
+    input: Option<&Value>,
+    messages: &mut Vec<Value>,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<Vec<Option<String>>> {
+    let Some(input) = input else {
+        return Ok(Vec::new());
+    };
+    let mut replay = ChatReasoningReplay::default();
+    match input {
+        Value::String(text) => {
+            let start = messages.len();
+            push_chat_text_message(messages, "user", text)?;
+            replay.observe(None, messages, start);
+            Ok(replay.missing)
+        }
+        Value::Array(items) => {
+            for item in items {
+                let start = messages.len();
+                append_chat_message_item(item, messages, tool_bridge)?;
+                replay.observe(Some(item), messages, start);
+            }
+            move_tool_images_after_tool_results(messages);
+            Ok(replay.missing)
+        }
+        Value::Object(_) => {
+            let start = messages.len();
+            append_chat_message_item(input, messages, tool_bridge)?;
+            replay.observe(Some(input), messages, start);
+            Ok(replay.missing)
+        }
+        _ => anyhow::bail!("input 必须是字符串、对象或数组"),
+    }
+}
+
+/// 记录转换时被丢掉的摘要，供失败重试写回对应的助手消息。
+/// 首次发送的 messages 保持原样。
+#[derive(Default)]
+struct ChatReasoningReplay {
+    pending: Option<String>,
+    missing: Vec<Option<String>>,
+}
+
+impl ChatReasoningReplay {
+    fn observe(&mut self, item: Option<&Value>, messages: &[Value], start: usize) {
+        if let Some(item) = item
+            && item.get("type").and_then(Value::as_str) == Some("reasoning")
+        {
+            if reasoning_item_has_text(item) {
+                // 已有明文会进入 reasoning_content，未挂上的摘要不能串到后一回合。
+                self.pending = None;
+            } else if let Some(summary) = summary_replay_text(item) {
+                match &mut self.pending {
+                    Some(existing) => {
+                        existing.push('\n');
+                        existing.push_str(&summary);
+                    }
+                    None => self.pending = Some(summary),
+                }
+            }
+        }
+        for message in &messages[start..] {
+            match message.get("role").and_then(Value::as_str) {
+                Some("assistant") => {
+                    if message
+                        .get("reasoning_content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+                    {
+                        self.pending = None;
+                        continue;
+                    }
+                    self.missing.push(self.pending.take());
+                }
+                Some("user" | "system") => self.pending = None,
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Chat Completions 要求 assistant 的 tool_calls 后紧跟对应的 tool 消息。
+/// 工具输出中的图片会额外生成 user 消息，多个并行调用时这些消息会插在
+/// tool 消息之间，部分上游据此判定工具结果不完整并拒绝整条请求。这里把
+/// 夹在 tool 消息序列中的图片消息移到本轮全部 tool 消息之后，既保留图片
+/// 内容，也保持调用与结果的配对完整。
+pub(crate) fn move_tool_images_after_tool_results(messages: &mut Vec<Value>) {
+    let mut ordered = Vec::with_capacity(messages.len());
+    let mut pending_images = Vec::new();
+    let mut in_tool_run = false;
+    for message in messages.drain(..) {
+        if message.get("role").and_then(Value::as_str) == Some("tool") {
+            in_tool_run = true;
+            ordered.push(message);
+            continue;
+        }
+        if in_tool_run && is_tool_image_message(&message) {
+            pending_images.push(message);
+            continue;
+        }
+        if !pending_images.is_empty() {
+            ordered.append(&mut pending_images);
+        }
+        in_tool_run = false;
+        ordered.push(message);
+    }
+    if !pending_images.is_empty() {
+        ordered.append(&mut pending_images);
+    }
+    *messages = ordered;
+}
+
+pub(crate) fn is_tool_image_message(message: &Value) -> bool {
+    let Some(object) = message.as_object() else {
+        return false;
+    };
+    if object.get("role").and_then(Value::as_str) != Some("user") {
+        return false;
+    }
+    let Some(parts) = object.get("content").and_then(Value::as_array) else {
+        return false;
+    };
+    !parts.is_empty()
+        && parts
+            .iter()
+            .all(|part| part.get("type").and_then(Value::as_str) == Some("image_url"))
+}
+
+pub(crate) fn append_chat_message_item(
+    item: &Value,
+    messages: &mut Vec<Value>,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<()> {
+    if let Some(message) = codey_summary_message(item)? {
+        return append_chat_message_item(&message, messages, tool_bridge);
+    }
+    match item {
+        Value::String(text) => push_chat_text_message(messages, "user", text),
+        Value::Object(object) => match object.get("type").and_then(Value::as_str) {
+            Some("compaction" | "compaction_trigger") => anyhow::bail!(
+                "context_not_portable: compaction 历史不能转换到当前线路；请回到原线路完成本地摘要后再切换"
+            ),
+            Some("message") => append_responses_message_object(object, messages, tool_bridge),
+            Some("reasoning") => {
+                // 只回放 content 里的 reasoning_text。summary 和供应商密文不在这里展开，
+                // 否则所有 Chat 上游都会收到摘要。需要摘要的上游须在转换前写回明文。
+                if let Some(parts) = object.get("content").and_then(Value::as_array) {
+                    let mut reasoning = String::new();
+                    let mut present = false;
+                    for part in parts {
+                        if part.get("type").and_then(Value::as_str) == Some("reasoning_text")
+                            && let Some(text) = part.get("text").and_then(Value::as_str)
+                        {
+                            reasoning.push_str(text);
+                            present = true;
+                        }
+                    }
+                    if present {
+                        messages.push(json!({
+                            "role":"assistant", "content":Value::Null,
+                            "reasoning_content":reasoning,
+                        }));
+                    }
+                }
+                Ok(())
+            }
+            Some("agent_message") => {
+                append_responses_agent_message_object(object, messages, tool_bridge)
+            }
+            None if looks_like_message_object(object) => {
+                append_responses_message_object(object, messages, tool_bridge)
+            }
+            Some("function_call") => {
+                append_responses_function_call_item(object, messages, tool_bridge)
+            }
+            Some("function_call_output") => {
+                append_responses_tool_call_output_item(object, messages, "function_call_output")
+            }
+            Some("custom_tool_call") => {
+                append_responses_custom_tool_call_item(object, messages, tool_bridge)
+            }
+            Some("custom_tool_call_output") => {
+                append_responses_tool_call_output_item(object, messages, "custom_tool_call_output")
+            }
+            Some("tool_search_call") => {
+                append_responses_tool_search_call_item(object, messages, tool_bridge)
+            }
+            Some("tool_search_output") => {
+                append_responses_tool_search_output_item(object, messages)
+            }
+            Some("web_search_call")
+                if object.get("status").and_then(Value::as_str) == Some("completed") =>
+            {
+                Ok(())
+            }
+            Some(item_type) if is_opaque_responses_input_item_type(item_type) => Ok(()),
+            Some("input_text" | "output_text" | "text" | "input_image" | "image_url") => {
+                append_single_content_part_as_user_message(item, messages)
+            }
+            Some(item_type) => anyhow::bail!(
+                "Responses input item 类型 {item_type} 不能无损转换为 Chat Completions message"
+            ),
+            None => anyhow::bail!("Responses input item 缺少可转换的 role/content/type 字段"),
+        },
+        _ => anyhow::bail!("Responses input 数组只能包含字符串或对象"),
+    }
+}
+
+pub(crate) fn looks_like_message_object(object: &serde_json::Map<String, Value>) -> bool {
+    object.contains_key("role")
+        || object.contains_key("content")
+        || object.contains_key("tool_calls")
+        || object.contains_key("function_call")
+}
+
+pub(crate) fn append_responses_agent_message_object(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<()> {
+    let mut message = object.clone();
+    let role = if agent_message_carries_instruction(object) {
+        "user"
+    } else {
+        "assistant"
+    };
+    message.insert("role".to_string(), Value::String(role.to_string()));
+    if !message.contains_key("content")
+        && let Some(text) = message.get("message").and_then(Value::as_str)
+    {
+        message.insert("content".to_string(), Value::String(text.to_string()));
+    }
+    append_responses_message_object(&message, messages, tool_bridge)
+}
+
+/// 协作消息在对话历史中的方向由收发双方决定。上级发给下级的 NEW_TASK 与
+/// MESSAGE 是任务指令，必须作为用户消息回放；下级回报上级的 FINAL_ANSWER
+/// 与 MESSAGE 属于助手历史。协议转换若一律写成 assistant，模型会把任务正文
+/// 当成自己先前说过的话，从而报告任务正文缺失。
+fn agent_message_carries_instruction(object: &serde_json::Map<String, Value>) -> bool {
+    let content_texts = match object.get("content") {
+        Some(Value::Array(parts)) => parts.iter().filter_map(agent_message_part_text).collect(),
+        Some(Value::String(text)) => vec![text.as_str()],
+        Some(part @ Value::Object(_)) => agent_message_part_text(part).into_iter().collect(),
+        _ => Vec::new(),
+    };
+    let texts = content_texts
+        .into_iter()
+        .chain(
+            ["message", "text"]
+                .into_iter()
+                .filter_map(|field| object.get(field).and_then(Value::as_str)),
+        )
+        .collect::<Vec<_>>();
+    // FINAL_ANSWER 只向下级返回结果，始终属于助手历史。
+    if texts
+        .iter()
+        .any(|text| has_collaboration_header(text, "FINAL_ANSWER"))
+    {
+        return false;
+    }
+    let new_task = texts
+        .iter()
+        .any(|text| has_collaboration_header(text, "NEW_TASK"));
+    // MESSAGE 两个方向都会出现：上级用它补充要求，下级用它回报进度。
+    let message = texts
+        .iter()
+        .any(|text| has_collaboration_header(text, "MESSAGE"));
+    if !new_task && !message {
+        return false;
+    }
+    // 先按收发双方的层级判断方向，路径信息不足时退回 NEW_TASK 与根代理判断。
+    match agent_message_direction(object) {
+        Some(directed_to_child) => directed_to_child,
+        None => new_task || !agent_message_targets_root(object),
+    }
+}
+
+fn agent_message_part_text(part: &Value) -> Option<&str> {
+    part.get("text")
+        .or_else(|| part.get("input_text"))
+        .or_else(|| part.get("output_text"))
+        .and_then(Value::as_str)
+}
+
+fn agent_message_targets_root(object: &serde_json::Map<String, Value>) -> bool {
+    object
+        .get("recipient")
+        .and_then(Value::as_str)
+        .is_some_and(|recipient| recipient.trim() == "/root")
+}
+
+/// 返回 `Some(true)` 表示上级发给下级，`Some(false)` 表示下级回报上级，
+/// `None` 表示路径信息不足。只看收发双方的前缀层级，不假设根代理名称。
+fn agent_message_direction(object: &serde_json::Map<String, Value>) -> Option<bool> {
+    let author = object.get("author").and_then(Value::as_str)?.trim();
+    let recipient = object.get("recipient").and_then(Value::as_str)?.trim();
+    if author.is_empty() || recipient.is_empty() || author == recipient {
+        return None;
+    }
+    if path_nested_below(recipient, author) {
+        Some(true)
+    } else if path_nested_below(author, recipient) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn path_nested_below(candidate: &str, ancestor: &str) -> bool {
+    candidate
+        .strip_prefix(ancestor)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
+fn has_collaboration_header(text: &str, message_type: &str) -> bool {
+    let head = text.trim_start();
+    let marker = format!("Message Type: {message_type}");
+    head.strip_prefix(&marker).is_some_and(|rest| {
+        rest.is_empty()
+            || rest.starts_with('\n')
+            || rest.starts_with("\r\n")
+            || rest.starts_with(' ')
+    })
+}
+
+pub(crate) fn append_responses_message_object(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<()> {
+    let role = object
+        .get("role")
+        .and_then(Value::as_str)
+        .map(normalize_chat_role)
+        .transpose()?
+        .unwrap_or("user");
+    if role == "tool" {
+        return append_responses_tool_call_output_item(object, messages, "tool message");
+    }
+    let mut message = serde_json::Map::new();
+    message.insert("role".to_string(), Value::String(role.to_string()));
+    if role == "assistant" {
+        if let Some(mut reasoning) = messages.pop_if(|last| {
+            last["role"] == "assistant"
+                && last.get("reasoning_content").is_some()
+                && last["content"].is_null()
+                && last.get("tool_calls").is_none()
+                && last.get("function_call").is_none()
+        }) {
+            message.insert(
+                "reasoning_content".to_string(),
+                reasoning["reasoning_content"].take(),
+            );
+        }
+        if let Some(reasoning) = object.get("reasoning_content").and_then(Value::as_str) {
+            message.insert("reasoning_content".to_string(), json!(reasoning));
+        }
+    }
+    let chat_content = object
+        .get("content")
+        .filter(|content| role != "assistant" || !content.is_null())
+        .map(|content| responses_content_to_chat_content(content, role))
+        .transpose()?
+        .flatten();
+    if let Some(chat_content) = chat_content {
+        message.insert("content".to_string(), chat_content);
+    } else if let Some(text) = first_text_field(object) {
+        message.insert("content".to_string(), Value::String(text.to_string()));
+    }
+    if let Some(tool_calls) = object.get("tool_calls") {
+        message.insert(
+            "tool_calls".to_string(),
+            normalize_chat_tool_calls(tool_calls, tool_bridge)?,
+        );
+        message.entry("content".to_string()).or_insert(Value::Null);
+    }
+    if let Some(function_call) = object.get("function_call") {
+        message.insert(
+            "function_call".to_string(),
+            normalize_chat_legacy_function_call(function_call, tool_bridge)?,
+        );
+        message.entry("content".to_string()).or_insert(Value::Null);
+    }
+    if message.contains_key("content")
+        || message.contains_key("tool_calls")
+        || message.contains_key("function_call")
+        || message.contains_key("reasoning_content")
+    {
+        message.entry("content".to_string()).or_insert(Value::Null);
+        messages.push(Value::Object(message));
+    }
+    Ok(())
+}
+
+pub(crate) fn normalize_chat_role(role: &str) -> Result<&'static str> {
+    match role.trim() {
+        "user" => Ok("user"),
+        "assistant" => Ok("assistant"),
+        "system" | "developer" => Ok("system"),
+        "tool" => Ok("tool"),
+        other => anyhow::bail!("不支持的 Responses message role：{other}"),
+    }
+}
+
+pub(crate) fn first_text_field(object: &serde_json::Map<String, Value>) -> Option<&str> {
+    object
+        .get("text")
+        .or_else(|| object.get("input_text"))
+        .or_else(|| object.get("output_text"))
+        .or_else(|| object.get("message"))
+        .and_then(Value::as_str)
+}
+
+pub(crate) fn first_visible_content_part_text(
+    object: &serde_json::Map<String, Value>,
+) -> Option<&str> {
+    first_text_field(object).or_else(|| object.get("refusal").and_then(Value::as_str))
+}
+
+// Encrypted provider state cannot be represented by Chat Completions.
+pub(crate) fn is_opaque_responses_input_item_type(item_type: &str) -> bool {
+    matches!(item_type, "encrypted_content" | "compaction")
+}
+
+pub(crate) fn is_opaque_responses_content_part_type(part_type: &str) -> bool {
+    matches!(part_type, "encrypted_content" | "reasoning" | "compaction")
+}
+
+pub(crate) fn responses_content_to_chat_content(
+    content: &Value,
+    role: &str,
+) -> Result<Option<Value>> {
+    match content {
+        Value::String(text) => Ok((!text.is_empty()).then(|| Value::String(text.clone()))),
+        Value::Array(parts) => {
+            let mut chat_parts = Vec::new();
+            for part in parts {
+                if let Some(chat_part) = responses_content_part_to_chat_part(part)? {
+                    chat_parts.push(chat_part);
+                }
+            }
+            if chat_parts.is_empty() {
+                return Ok(None);
+            }
+            let has_image = chat_parts
+                .iter()
+                .any(|part| part.get("type").and_then(Value::as_str) == Some("image_url"));
+            if role != "user" {
+                if has_image {
+                    anyhow::bail!(
+                        "Chat Completions 只支持把用户消息中的 Responses 图片内容无损转换"
+                    );
+                }
+                let text = chat_parts
+                    .iter()
+                    .filter_map(|part| part.get("text").and_then(Value::as_str))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                return Ok((!text.is_empty()).then_some(Value::String(text)));
+            }
+            Ok(Some(Value::Array(chat_parts)))
+        }
+        Value::Object(_) => responses_content_part_to_chat_part(content)
+            .map(|part| part.map(|part| Value::Array(vec![part]))),
+        _ => anyhow::bail!("message.content 必须是字符串、对象或数组"),
+    }
+}
+
+pub(crate) fn responses_content_part_to_chat_part(part: &Value) -> Result<Option<Value>> {
+    match part {
+        Value::String(text) => Ok(Some(json!({"type":"text","text":text}))),
+        Value::Object(object) => {
+            let part_type = object.get("type").and_then(Value::as_str);
+            match part_type {
+                Some("input_text" | "output_text" | "text" | "refusal") => {
+                    let text = first_visible_content_part_text(object)
+                        .ok_or_else(|| anyhow::anyhow!("文本 content part 缺少 text"))?;
+                    Ok(Some(json!({"type":"text","text":text})))
+                }
+                None if first_visible_content_part_text(object).is_some() => {
+                    let text = first_visible_content_part_text(object).unwrap_or_default();
+                    Ok(Some(json!({"type":"text","text":text})))
+                }
+                Some("input_image" | "image_url") => Ok(Some(json!({
+                    "type": "image_url",
+                    "image_url": responses_image_url_to_chat_image_url(object)?
+                }))),
+                None if object.contains_key("image_url") || object.contains_key("url") => {
+                    Ok(Some(json!({
+                        "type": "image_url",
+                        "image_url": responses_image_url_to_chat_image_url(object)?
+                    })))
+                }
+                Some(part_type) if is_opaque_responses_content_part_type(part_type) => Ok(None),
+                None if object.contains_key("encrypted_content") => Ok(None),
+                Some(part_type) => anyhow::bail!(
+                    "Responses content part 类型 {part_type} 不能无损转换为 Chat Completions content"
+                ),
+                None => anyhow::bail!("Responses content part 缺少 text 或 image_url"),
+            }
+        }
+        _ => anyhow::bail!("Responses content part 必须是字符串或对象"),
+    }
+}
+
+pub(crate) fn responses_image_url_to_chat_image_url(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Value> {
+    if object.contains_key("file_id")
+        && !object.contains_key("image_url")
+        && !object.contains_key("url")
+    {
+        anyhow::bail!(
+            "input_image.file_id 依赖 Responses 文件状态，不能无损转换为 Chat Completions"
+        );
+    }
+    let mut image_url = match object.get("image_url").or_else(|| object.get("url")) {
+        Some(Value::String(url)) if !url.is_empty() => json!({ "url": url }),
+        Some(Value::Object(image_url)) => Value::Object(image_url.clone()),
+        Some(_) => anyhow::bail!("input_image.image_url 必须是字符串或对象"),
+        None => anyhow::bail!("input_image 缺少 image_url"),
+    };
+    // Chat Completions 只有 auto、low、high 三档，Responses 的 original 只表示
+    // 希望保留原始图像细节，降级为 high 仍然把图片本身完整送达上游。目录门控负责
+    // 让兼容线路不再声明该能力，这里兜住尚未刷新的目录、历史会话和直接调用方，
+    // 使这类请求不再整条失败。外层 input_image 和内层 image_url 对象都允许携带
+    // detail，两处都要归一，否则无效取值会原样透传给上游。
+    let outer_detail = match object.get("detail") {
+        Some(detail) => Some(
+            detail
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("input_image.detail 必须是字符串"))
+                .and_then(normalize_chat_image_detail)?,
+        ),
+        None => None,
+    };
+    if let Some(image_url) = image_url.as_object_mut() {
+        let inner_detail = match image_url.get("detail") {
+            Some(detail) => Some(
+                detail
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("input_image.image_url.detail 必须是字符串"))
+                    .and_then(normalize_chat_image_detail)?,
+            ),
+            None => None,
+        };
+        // 内层取值优先，外层只作为缺省补充，与转换前的行为一致。
+        if let Some(detail) = inner_detail.or(outer_detail) {
+            image_url.insert("detail".to_string(), Value::String(detail.to_string()));
+        }
+    }
+    Ok(image_url)
+}
+
+fn normalize_chat_image_detail(detail: &str) -> Result<&str> {
+    match detail {
+        "original" => Ok("high"),
+        detail @ ("auto" | "low" | "high") => Ok(detail),
+        detail => anyhow::bail!(
+            "input_image.detail={detail} 不能无损转换为 Chat Completions image_url.detail"
+        ),
+    }
+}
+
+pub(crate) fn append_single_content_part_as_user_message(
+    item: &Value,
+    messages: &mut Vec<Value>,
+) -> Result<()> {
+    if let Some(chat_part) = responses_content_part_to_chat_part(item)? {
+        messages.push(json!({"role":"user","content":[chat_part]}));
+    }
+    Ok(())
+}
+
+pub(crate) fn append_responses_function_call_item(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<()> {
+    let call_id = object
+        .get("call_id")
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("function_call 缺少 call_id"))?;
+    let tool_name = responses_tool_name_from_call_object(object, "function_call")?;
+    let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
+    let arguments =
+        json_value_as_chat_string(object.get("arguments")).unwrap_or_else(|| "{}".to_string());
+    append_chat_assistant_tool_call(messages, call_id, &upstream_name, &arguments)
+}
+
+pub(crate) fn append_responses_custom_tool_call_item(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<()> {
+    let call_id = object
+        .get("call_id")
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("custom_tool_call 缺少 call_id"))?;
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("custom_tool_call 缺少 name"))?;
+    let input = object
+        .get("input")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("custom_tool_call.input 必须是字符串"))?;
+    let namespace =
+        responses_namespace_path(object.get("namespace"), "custom_tool_call.namespace")?;
+    let tool_name = ResponsesToolName::custom_in_namespace(&namespace, name);
+    let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
+    let arguments = wrap_custom_tool_input(input)?;
+    append_chat_assistant_tool_call(messages, call_id, &upstream_name, &arguments)
+}
+
+pub(crate) fn append_responses_tool_search_call_item(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<()> {
+    if object.get("execution").and_then(Value::as_str) != Some("client") {
+        anyhow::bail!("tool_search_call 只允许 execution=client 的历史调用");
+    }
+    let call_id = object
+        .get("call_id")
+        .or_else(|| object.get("id"))
+        .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("tool_search_call 缺少 call_id"))?;
+    let upstream_name = tool_bridge.upstream_name_for_call(&ResponsesToolName::tool_search())?;
+    let arguments = object
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
+    if !arguments.is_object() {
+        anyhow::bail!("tool_search_call.arguments 必须是 JSON 对象");
+    }
+    let arguments =
+        serde_json::to_string(&arguments).context("序列化 tool_search_call.arguments 失败")?;
+    append_chat_assistant_tool_call(messages, call_id, &upstream_name, &arguments)
+}
+
+pub(crate) fn append_responses_tool_search_output_item(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+) -> Result<()> {
+    validate_client_tool_search_execution(object, "tool_search_output")?;
+    let call_id = object
+        .get("call_id")
+        .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("tool_search_output 缺少 call_id"))?;
+    let tools = object
+        .get("tools")
+        .and_then(Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("tool_search_output.tools 必须是数组"))?;
+    let content = serde_json::to_string(&json!({"tools":tools}))
+        .context("序列化 tool_search_output.tools 失败")?;
+    messages.push(json!({
+        "role":"tool",
+        "tool_call_id":call_id,
+        "content":content,
+    }));
+    Ok(())
+}
+
+pub(crate) fn validate_client_tool_search_execution(
+    object: &serde_json::Map<String, Value>,
+    context: &str,
+) -> Result<()> {
+    match object.get("execution").and_then(Value::as_str) {
+        Some("client") => Ok(()),
+        Some(execution) => anyhow::bail!("{context}.execution={execution} 不受支持；必须是 client"),
+        None => anyhow::bail!("{context} 缺少 execution=client"),
+    }
+}
+
+pub(crate) fn append_chat_assistant_tool_call(
+    messages: &mut Vec<Value>,
+    call_id: &str,
+    upstream_name: &str,
+    arguments: &str,
+) -> Result<()> {
+    let tool_call = json!({
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": upstream_name,
+            "arguments": arguments
+        }
+    });
+    if let Some(last) = messages.last_mut().and_then(Value::as_object_mut)
+        && last.get("role").and_then(Value::as_str) == Some("assistant")
+        && last.get("content").is_none_or(|content| {
+            content.is_null()
+                || content.as_str() == Some("")
+                || last.contains_key("reasoning_content")
+        })
+        && !last.contains_key("function_call")
+    {
+        last.entry("content".to_string()).or_insert(Value::Null);
+        match last.get_mut("tool_calls") {
+            Some(Value::Array(tool_calls)) => {
+                tool_calls.push(tool_call);
+                return Ok(());
+            }
+            Some(_) => anyhow::bail!("assistant message.tool_calls 必须是数组"),
+            None => {
+                last.insert("tool_calls".to_string(), Value::Array(vec![tool_call]));
+                return Ok(());
+            }
+        }
+    }
+    messages.push(json!({
+        "role": "assistant",
+        "content": Value::Null,
+        "tool_calls": [tool_call]
+    }));
+    Ok(())
+}
+
+pub(crate) fn append_responses_tool_call_output_item(
+    object: &serde_json::Map<String, Value>,
+    messages: &mut Vec<Value>,
+    context: &str,
+) -> Result<()> {
+    let call_id = object
+        .get("call_id")
+        .or_else(|| object.get("tool_call_id"))
+        .and_then(Value::as_str)
+        .filter(|call_id| !call_id.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{context} 缺少 call_id"))?;
+    let output = object
+        .get("output")
+        .or_else(|| object.get("content"))
+        .ok_or_else(|| anyhow::anyhow!("{context} 缺少 output"))?;
+    let (content, images) = responses_tool_output_content(output)?.unwrap_or_else(|| {
+        (
+            json_value_as_chat_string(Some(output)).unwrap_or_default(),
+            Vec::new(),
+        )
+    });
+    messages.push(json!({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": content,
+    }));
+    if !images.is_empty() {
+        messages.push(json!({
+            "role": "user",
+            "content": images,
+        }));
+    }
+    Ok(())
+}
+
+pub(crate) fn responses_tool_output_content(
+    output: &Value,
+) -> Result<Option<(String, Vec<Value>)>> {
+    let parts = match output {
+        Value::Array(parts) => parts.as_slice(),
+        Value::Object(_) => std::slice::from_ref(output),
+        _ => return Ok(None),
+    };
+    // Arbitrary JSON remains a supported tool result. Once a known content
+    // part is present, reject mixed/unknown entries instead of serializing the
+    // original array and accidentally restoring filtered encrypted content.
+    let typed = parts.iter().any(|part| {
+        part.get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|kind| {
+                matches!(
+                    kind,
+                    "input_text" | "output_text" | "text" | "refusal" | "input_image" | "image_url"
+                ) || is_opaque_responses_content_part_type(kind)
+            })
+    });
+    if !typed {
+        return Ok(None);
+    }
+    let mut text = Vec::new();
+    let mut images = Vec::new();
+    for part in parts {
+        let Some(part) = part.as_object() else {
+            anyhow::bail!("工具结构化内容不能混合未识别的条目");
+        };
+        match part.get("type").and_then(Value::as_str) {
+            Some("compaction" | "compaction_trigger") => {
+                anyhow::bail!("context_not_portable: 工具输出包含无法转换的 compaction 内容")
+            }
+            Some("input_text" | "output_text" | "text" | "refusal") => {
+                text.push(
+                    first_visible_content_part_text(part)
+                        .ok_or_else(|| anyhow::anyhow!("工具文本输出缺少 text"))?
+                        .to_string(),
+                );
+            }
+            Some("input_image" | "image_url") => images.push(json!({
+                "type": "image_url",
+                "image_url": responses_image_url_to_chat_image_url(part)?,
+            })),
+            Some(part_type) if is_opaque_responses_content_part_type(part_type) => {}
+            _ => anyhow::bail!("工具结构化内容包含无法转换的类型"),
+        }
+    }
+    Ok(Some((text.join("\n"), images)))
+}
+
+pub(crate) fn normalize_chat_tool_calls(
+    tool_calls: &Value,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<Value> {
+    let tool_calls = tool_calls
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("tool_calls 必须是数组"))?;
+    let mut normalized = Vec::new();
+    for tool_call in tool_calls {
+        let object = tool_call
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("tool_calls 条目必须是对象"))?;
+        let call_type = object
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("function");
+        if call_type != "function" {
+            anyhow::bail!("Chat tool_call 类型 {call_type} 不支持");
+        }
+        let function = object
+            .get("function")
+            .and_then(Value::as_object)
+            .ok_or_else(|| anyhow::anyhow!("tool_call 缺少 function"))?;
+        let tool_name = responses_tool_name_from_function_object(
+            function,
+            object.get("namespace"),
+            "tool_call.function",
+        )?;
+        let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
+        let arguments = json_value_as_chat_string(function.get("arguments"))
+            .unwrap_or_else(|| "{}".to_string());
+        let id = object
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| format!("call_codey_{}", Uuid::new_v4()));
+        normalized.push(json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": upstream_name,
+                "arguments": arguments,
+            }
+        }));
+    }
+    Ok(Value::Array(normalized))
+}
+
+pub(crate) fn normalize_chat_legacy_function_call(
+    function_call: &Value,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<Value> {
+    match function_call {
+        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => {
+            Ok(Value::String(choice.clone()))
+        }
+        Value::Object(object) => {
+            let tool_name = responses_tool_name_from_call_object(object, "function_call")?;
+            let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
+            Ok(json!({"name": upstream_name}))
+        }
+        _ => anyhow::bail!("function_call 必须是 auto/none 或包含 name 的对象"),
+    }
+}
+
+pub(crate) const NAMESPACE_UPSTREAM_TOOL_PREFIX: &str = "codey_ns__";
+pub(crate) const CUSTOM_UPSTREAM_TOOL_PREFIX: &str = "codey_custom__";
+pub(crate) const TOOL_SEARCH_UPSTREAM_TOOL_NAME: &str = "codey_tool_search__client__bridge_v1";
+pub(crate) const UPSTREAM_FUNCTION_NAME_MAX_BYTES: usize = 64;
+pub(crate) const MAX_RESPONSES_NAMESPACE_DEPTH: usize = 8;
+
+#[derive(Default)]
+pub(crate) struct ResponsesChatTools {
+    pub(crate) tools: Option<Value>,
+    pub(crate) web_search_options: Option<Value>,
+    pub(crate) web_search_tool_seen: bool,
+}
+
+pub(crate) struct ResponsesChatToolsConversion<'a> {
+    pub(crate) tool_bridge: &'a mut ResponsesToolBridge,
+    pub(crate) upstream_names: HashMap<String, ResponsesToolName>,
+    pub(crate) bridged_definitions: HashMap<ResponsesToolName, Value>,
+    pub(crate) converted: Vec<Value>,
+    pub(crate) web_search_options: Option<Value>,
+    pub(crate) web_search_tool_seen: bool,
+}
+
+// Tool calls always carry object arguments, but some OpenAI-compatible
+// providers reject a root union when any branch also permits a scalar or null.
+pub(crate) fn normalize_responses_tool_parameter_roots(body: &mut Value) -> bool {
+    let Some(body) = body.as_object_mut() else {
+        return false;
+    };
+    let mut changed = normalize_responses_tool_list(body.get_mut("tools"));
+    match body.get_mut("input") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                changed |= normalize_responses_input_tool_list(item);
+            }
+        }
+        Some(item) => changed |= normalize_responses_input_tool_list(item),
+        None => {}
+    }
+    changed
+}
+
+pub(crate) fn normalize_responses_input_tool_list(item: &mut Value) -> bool {
+    let Some(item) = item.as_object_mut() else {
+        return false;
+    };
+    if !matches!(
+        item.get("type").and_then(Value::as_str),
+        Some("additional_tools" | "tool_search_output")
+    ) {
+        return false;
+    }
+    normalize_responses_tool_list(item.get_mut("tools"))
+}
+
+pub(crate) fn normalize_responses_tool_list(tools: Option<&mut Value>) -> bool {
+    let Some(tools) = tools.and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for tool in tools {
+        // 仍叫 `collaboration` 的命名空间会按保留名逐字校验 schema，归一化不能进入。
+        // 改名到别名命名空间后这里照常处理。
+        if is_reserved_collaboration_namespace(tool) {
+            continue;
+        }
+        let Some(tool) = tool.as_object_mut() else {
+            continue;
+        };
+        let mut relaxed_schema = false;
+        if let Some(parameters) = tool.get_mut("parameters") {
+            relaxed_schema |= tool_parameter_root_needs_relaxation(parameters);
+            changed |= normalize_tool_parameter_root(parameters);
+        }
+        if let Some(parameters) = tool
+            .get_mut("function")
+            .and_then(Value::as_object_mut)
+            .and_then(|function| function.get_mut("parameters"))
+        {
+            relaxed_schema |= tool_parameter_root_needs_relaxation(parameters);
+            changed |= normalize_tool_parameter_root(parameters);
+        }
+        if let Some(input_schema) = tool.get_mut("input_schema") {
+            relaxed_schema |= tool_parameter_root_needs_relaxation(input_schema);
+            changed |= normalize_tool_parameter_root(input_schema);
+        }
+        if relaxed_schema {
+            changed |= disable_tool_strict(tool);
+        }
+        for field in ["tools", "children"] {
+            changed |= normalize_responses_tool_list(tool.get_mut(field));
+        }
+    }
+    changed
+}
+
+/// 协作工具的 `message` 参数带 `encrypted` 标记时，Responses 上游会把任务正文替换成
+/// 只有它能解开的令牌。子代理线路没有该密钥，正文会随协议转换一起丢失，因此转发前
+/// 摘掉标记，让上游按明文返回任务正文。官方上游按模型保留配置逐字校验
+/// `collaboration` 命名空间的 schema；未能改到别名命名空间时，官方线路保留其中的标记。
+pub(crate) fn strip_collaboration_message_encryption(
+    body: &mut Value,
+    preserve_reserved_namespace: bool,
+) -> bool {
+    let Some(body) = body.as_object_mut() else {
+        return false;
+    };
+    let preserve = preserve_reserved_namespace;
+    let mut changed =
+        strip_message_encryption_in_tool_scope(body.get_mut("tools"), false, preserve);
+    match body.get_mut("input") {
+        Some(Value::Array(items)) => {
+            for item in items {
+                changed |=
+                    strip_message_encryption_in_tool_scope(item.get_mut("tools"), false, preserve);
+            }
+        }
+        Some(item) => {
+            changed |=
+                strip_message_encryption_in_tool_scope(item.get_mut("tools"), false, preserve)
+        }
+        None => {}
+    }
+    changed
+}
+
+fn strip_message_encryption_in_tool_scope(
+    tools: Option<&mut Value>,
+    reserved: bool,
+    preserve_reserved_namespace: bool,
+) -> bool {
+    let Some(tools) = tools.and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for tool in tools {
+        let nested_reserved =
+            reserved || (preserve_reserved_namespace && is_reserved_collaboration_namespace(tool));
+        if !reserved && is_collaboration_message_tool(tool) {
+            changed |= remove_message_encrypted_marker(tool.get_mut("parameters"));
+            changed |= remove_message_encrypted_marker(tool.get_mut("input_schema"));
+            if let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut) {
+                changed |= remove_message_encrypted_marker(function.get_mut("parameters"));
+            }
+        }
+        for field in ["tools", "children"] {
+            changed |= strip_message_encryption_in_tool_scope(
+                tool.get_mut(field),
+                nested_reserved,
+                preserve_reserved_namespace,
+            );
+        }
+    }
+    changed
+}
+
+fn is_reserved_collaboration_namespace(tool: &Value) -> bool {
+    tool.get("name").and_then(Value::as_str) == Some("collaboration")
+}
+
+fn remove_message_encrypted_marker(schema: Option<&mut Value>) -> bool {
+    schema
+        .and_then(Value::as_object_mut)
+        .and_then(|schema| schema.get_mut("properties"))
+        .and_then(Value::as_object_mut)
+        .and_then(|properties| properties.get_mut("message"))
+        .and_then(Value::as_object_mut)
+        .is_some_and(|message| message.remove("encrypted").is_some())
+}
+
+fn is_collaboration_message_tool(tool: &Value) -> bool {
+    let Some(tool) = tool.as_object() else {
+        return false;
+    };
+    let is_message_tool = |name: Option<&Value>| {
+        name.and_then(Value::as_str)
+            .is_some_and(|name| COLLABORATION_MESSAGE_TOOLS.contains(&name))
+    };
+    is_message_tool(tool.get("name"))
+        || is_message_tool(
+            tool.get("function")
+                .and_then(|function| function.get("name")),
+        )
+}
+
+const COLLABORATION_MESSAGE_TOOLS: [&str; 3] = ["spawn_agent", "send_message", "followup_task"];
+
+pub(crate) fn normalize_tool_parameter_root(schema: &mut Value) -> bool {
+    let mut changed = match restrict_tool_parameter_schema_to_object(schema) {
+        Some(changed) => changed,
+        None => {
+            *schema = json!({"type":"object","properties":{}});
+            return true;
+        }
+    };
+    if let Some(root) = schema.as_object_mut() {
+        for keyword in TOP_LEVEL_FORBIDDEN_SCHEMA_KEYWORDS {
+            if root.remove(*keyword).is_some() {
+                changed = true;
+            }
+        }
+    }
+    changed |= flatten_tool_parameter_root_union(schema);
+    changed
+}
+
+const TOP_LEVEL_FORBIDDEN_SCHEMA_KEYWORDS: &[&str] = &["enum", "const", "not"];
+
+/// 归一化会删掉顶层联合结构和 enum/const/not，合并后的约束弱于原定义，
+/// 这类工具必须同时关闭 strict，否则等于向语义不同的 schema 声明强校验。
+fn tool_parameter_root_needs_relaxation(schema: &Value) -> bool {
+    let Value::Object(object) = schema else {
+        // 非对象 schema 会被替换成空 object。
+        return true;
+    };
+    if ["anyOf", "oneOf", "allOf"]
+        .iter()
+        .any(|keyword| object.get(*keyword).is_some_and(Value::is_array))
+    {
+        return true;
+    }
+    if TOP_LEVEL_FORBIDDEN_SCHEMA_KEYWORDS
+        .iter()
+        .any(|keyword| object.contains_key(*keyword))
+    {
+        return true;
+    }
+    // 顶层声明了其它类型，或声明成含 null 等类型的数组时，原定义会被收窄成 object。
+    match object.get("type") {
+        Some(Value::String(name)) => name != "object",
+        Some(Value::Array(names)) => !(names.len() == 1 && names[0].as_str() == Some("object")),
+        Some(_) => true,
+        None => false,
+    }
+}
+
+/// 部分上游拒绝顶层带 anyOf/oneOf/allOf 的函数参数 schema。这里把顶层联合结构合并成
+/// 单个 object：属性名取各分支并集，同名属性的定义不一致时退回公共类型，required 在
+/// anyOf/oneOf 上取交集、在 allOf 上取并集。合并后 schema 弱于原定义，调用方会关闭 strict。
+fn flatten_tool_parameter_root_union(schema: &mut Value) -> bool {
+    let Some(root) = schema.as_object() else {
+        return false;
+    };
+    if !["anyOf", "oneOf", "allOf"]
+        .iter()
+        .any(|keyword| root.get(*keyword).is_some_and(Value::is_array))
+    {
+        return false;
+    }
+    let definitions = root
+        .get("$defs")
+        .or_else(|| root.get("definitions"))
+        .cloned();
+    let definitions = definitions.as_ref().and_then(Value::as_object);
+
+    let union_branches: Vec<&Value> = ["anyOf", "oneOf"]
+        .iter()
+        .filter_map(|keyword| root.get(*keyword).and_then(Value::as_array))
+        .flatten()
+        .collect();
+    let all_of_branches: Vec<&Value> = root
+        .get("allOf")
+        .and_then(Value::as_array)
+        .map(|branches| branches.iter().collect())
+        .unwrap_or_default();
+
+    let mut property_defs: Vec<(String, Vec<Value>)> = Vec::new();
+    let mut property_index: HashMap<String, usize> = HashMap::new();
+    let mut degraded: HashSet<String> = HashSet::new();
+    let mut union_presence: HashMap<String, usize> = HashMap::new();
+    for branch in &union_branches {
+        let names = collect_schema_properties(
+            branch,
+            definitions,
+            0,
+            &mut property_defs,
+            &mut property_index,
+            &mut degraded,
+        );
+        for name in names {
+            *union_presence.entry(name).or_insert(0) += 1;
+        }
+    }
+    for branch in &all_of_branches {
+        collect_schema_properties(
+            branch,
+            definitions,
+            0,
+            &mut property_defs,
+            &mut property_index,
+            &mut degraded,
+        );
+    }
+    let mut root_properties: Vec<String> = Vec::new();
+    if let Some(existing) = root.get("properties").and_then(Value::as_object) {
+        for (name, value) in existing {
+            push_property_definition(
+                &mut property_defs,
+                &mut property_index,
+                name,
+                expand_local_schema_ref(value, definitions),
+            );
+            root_properties.push(name.clone());
+        }
+    }
+    // 某属性只在部分 anyOf/oneOf 分支里出现时，其余分支并不约束它，
+    // 合并后必须放宽到公共类型，否则等于凭空收紧了可选范围。
+    if !union_branches.is_empty() {
+        for name in union_presence.keys() {
+            if union_presence[name] < union_branches.len() && !root_properties.contains(name) {
+                degraded.insert(name.clone());
+            }
+        }
+    }
+    let required = collect_required_keys(schema, definitions, 0);
+
+    let mut properties = serde_json::Map::new();
+    for (name, definitions) in property_defs {
+        let partially_defined = degraded.contains(&name);
+        properties.insert(
+            name,
+            merge_property_schemas(&definitions, partially_defined),
+        );
+    }
+    let Some(root) = schema.as_object_mut() else {
+        return false;
+    };
+    for keyword in ["anyOf", "oneOf", "allOf"] {
+        root.remove(keyword);
+    }
+    root.insert("properties".to_string(), Value::Object(properties));
+    if required.is_empty() {
+        root.remove("required");
+    } else {
+        root.insert(
+            "required".to_string(),
+            Value::Array(required.into_iter().map(Value::String).collect()),
+        );
+    }
+    true
+}
+
+fn disable_tool_strict(tool: &mut serde_json::Map<String, Value>) -> bool {
+    let mut changed = false;
+    if tool.get("strict") == Some(&Value::Bool(true)) {
+        tool.insert("strict".to_string(), Value::Bool(false));
+        changed = true;
+    }
+    if let Some(function) = tool.get_mut("function").and_then(Value::as_object_mut)
+        && function.get("strict") == Some(&Value::Bool(true))
+    {
+        function.insert("strict".to_string(), Value::Bool(false));
+        changed = true;
+    }
+    changed
+}
+
+fn expand_local_schema_ref(
+    value: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+) -> Value {
+    expand_local_schema_ref_at(value, definitions, 0)
+}
+
+fn expand_local_schema_ref_at(
+    value: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+    depth: usize,
+) -> Value {
+    if depth >= 8 {
+        return value.clone();
+    }
+    match value {
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .map(|item| expand_local_schema_ref_at(item, definitions, depth + 1))
+                .collect(),
+        ),
+        Value::Object(object) => {
+            let resolved_target = object
+                .get("$ref")
+                .and_then(Value::as_str)
+                .and_then(local_schema_ref_name)
+                .and_then(|name| definitions.and_then(|definitions| definitions.get(name)));
+            match resolved_target {
+                Some(target) => {
+                    let Value::Object(mut resolved) =
+                        expand_local_schema_ref_at(target, definitions, depth + 1)
+                    else {
+                        return Value::Object(object.clone());
+                    };
+                    for (key, item) in object {
+                        if key != "$ref" {
+                            resolved.insert(
+                                key.clone(),
+                                expand_local_schema_ref_at(item, definitions, depth + 1),
+                            );
+                        }
+                    }
+                    Value::Object(resolved)
+                }
+                None => Value::Object(
+                    object
+                        .iter()
+                        .map(|(key, item)| {
+                            (
+                                key.clone(),
+                                expand_local_schema_ref_at(item, definitions, depth + 1),
+                            )
+                        })
+                        .collect(),
+                ),
+            }
+        }
+        _ => value.clone(),
+    }
+}
+
+fn local_schema_ref_name(reference: &str) -> Option<&str> {
+    reference
+        .strip_prefix("#/$defs/")
+        .or_else(|| reference.strip_prefix("#/definitions/"))
+}
+
+/// 递归收集一个分支直接或嵌套定义的属性，并记录只出现在部分 anyOf/oneOf 分支里的属性。
+fn collect_schema_properties(
+    branch: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+    depth: usize,
+    property_defs: &mut Vec<(String, Vec<Value>)>,
+    property_index: &mut HashMap<String, usize>,
+    degraded: &mut HashSet<String>,
+) -> Vec<String> {
+    if depth >= 8 {
+        return Vec::new();
+    }
+    let resolved = expand_local_schema_ref(branch, definitions);
+    let Some(object) = resolved.as_object() else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = Vec::new();
+    if let Some(properties) = object.get("properties").and_then(Value::as_object) {
+        for (name, value) in properties {
+            push_property_definition(property_defs, property_index, name, value.clone());
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
+    }
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        if branches.is_empty() {
+            continue;
+        }
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut union_names: Vec<String> = Vec::new();
+        for nested in branches {
+            let nested_names = collect_schema_properties(
+                nested,
+                definitions,
+                depth + 1,
+                property_defs,
+                property_index,
+                degraded,
+            );
+            for name in nested_names {
+                *counts.entry(name.clone()).or_insert(0) += 1;
+                if !union_names.contains(&name) {
+                    union_names.push(name);
+                }
+            }
+        }
+        // allOf 所有分支同时生效，缺少不构成放宽；anyOf/oneOf 的其它分支不约束该属性。
+        if keyword != "allOf" {
+            for (name, count) in &counts {
+                if *count < branches.len() {
+                    degraded.insert(name.clone());
+                }
+            }
+        }
+        for name in union_names {
+            if !names.contains(&name) {
+                names.push(name);
+            }
+        }
+    }
+    names
+}
+
+fn push_property_definition(
+    property_defs: &mut Vec<(String, Vec<Value>)>,
+    property_index: &mut HashMap<String, usize>,
+    name: &str,
+    value: Value,
+) {
+    match property_index.get(name).copied() {
+        Some(index) => property_defs[index].1.push(value),
+        None => {
+            property_index.insert(name.to_string(), property_defs.len());
+            property_defs.push((name.to_string(), vec![value]));
+        }
+    }
+}
+
+/// 计算一个 schema 一定要求出现的属性：自身 required、allOf 分支的并集、
+/// anyOf/oneOf 各分支的交集。无法解析的分支按不约束处理，宁可放宽也不收紧。
+fn collect_required_keys(
+    schema: &Value,
+    definitions: Option<&serde_json::Map<String, Value>>,
+    depth: usize,
+) -> Vec<String> {
+    if depth >= 8 {
+        return Vec::new();
+    }
+    let resolved = expand_local_schema_ref(schema, definitions);
+    let Some(object) = resolved.as_object() else {
+        return Vec::new();
+    };
+    let mut keys: Vec<String> = object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|required| {
+            required
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    for keyword in ["allOf", "anyOf", "oneOf"] {
+        let Some(branches) = object.get(keyword).and_then(Value::as_array) else {
+            continue;
+        };
+        if branches.is_empty() {
+            continue;
+        }
+        let branch_keys: Vec<Vec<String>> = branches
+            .iter()
+            .map(|branch| collect_required_keys(branch, definitions, depth + 1))
+            .collect();
+        if keyword == "allOf" {
+            for required in branch_keys {
+                extend_unique(&mut keys, required);
+            }
+        } else {
+            let mut intersection = branch_keys.into_iter();
+            let Some(mut common) = intersection.next() else {
+                continue;
+            };
+            for required in intersection {
+                common.retain(|key| required.contains(key));
+            }
+            extend_unique(&mut keys, common);
+        }
+    }
+    keys
+}
+
+fn extend_unique(target: &mut Vec<String>, items: Vec<String>) {
+    for item in items {
+        if !target.contains(&item) {
+            target.push(item);
+        }
+    }
+}
+
+/// 同名属性在不同分支里定义不同时，只保留各分支共有的类型信息。
+fn merge_property_schemas(definitions: &[Value], degraded: bool) -> Value {
+    let Some(first) = definitions.first() else {
+        return json!({});
+    };
+    if !degraded && definitions.iter().all(|definition| definition == first) {
+        return first.clone();
+    }
+    let mut kinds: Vec<&'static str> = Vec::new();
+    for definition in definitions {
+        let Some(kind) = schema_value_kind(definition) else {
+            return json!({});
+        };
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    if kinds.len() != 1 {
+        return json!({});
+    }
+    let mut merged = json!({"type": kinds[0]});
+    if let Some(description) = first.get("description").and_then(Value::as_str)
+        && definitions.iter().all(|definition| {
+            definition.get("description").and_then(Value::as_str) == Some(description)
+        })
+    {
+        merged["description"] = Value::String(description.to_string());
+    }
+    merged
+}
+
+fn schema_value_kind(schema: &Value) -> Option<&'static str> {
+    let object = schema.as_object()?;
+    if let Some(kind) = object.get("type").and_then(json_schema_type_name) {
+        return Some(kind);
+    }
+    if let Some(value) = object.get("const") {
+        return Some(json_value_kind(value));
+    }
+    let values = object.get("enum").and_then(Value::as_array)?;
+    let first = values.first()?;
+    let kind = json_value_kind(first);
+    values
+        .iter()
+        .all(|value| json_value_kind(value) == kind)
+        .then_some(kind)
+}
+
+fn json_schema_type_name(value: &Value) -> Option<&'static str> {
+    match value {
+        Value::String(name) => json_schema_type_from_str(name),
+        Value::Array(names) => {
+            let mut names = names
+                .iter()
+                .filter_map(Value::as_str)
+                .filter_map(json_schema_type_from_str);
+            let first = names.next()?;
+            names.next().is_none().then_some(first)
+        }
+        _ => None,
+    }
+}
+
+fn json_schema_type_from_str(name: &str) -> Option<&'static str> {
+    match name {
+        "string" => Some("string"),
+        "number" => Some("number"),
+        "integer" => Some("integer"),
+        "boolean" => Some("boolean"),
+        "object" => Some("object"),
+        "array" => Some("array"),
+        "null" => Some("null"),
+        _ => None,
+    }
+}
+
+fn json_value_kind(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(number) => {
+            if number.is_i64() || number.is_u64() {
+                "integer"
+            } else {
+                "number"
+            }
+        }
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+pub(crate) fn restrict_tool_parameter_schema_to_object(schema: &mut Value) -> Option<bool> {
+    match schema {
+        Value::Bool(true) => {
+            *schema = json!({"type":"object"});
+            Some(true)
+        }
+        Value::Object(schema) => {
+            let mut changed = match schema.get("type") {
+                Some(Value::String(schema_type)) if schema_type == "object" => false,
+                Some(Value::Array(schema_types))
+                    if schema_types
+                        .iter()
+                        .any(|schema_type| schema_type.as_str() == Some("object")) =>
+                {
+                    schema.insert("type".to_string(), Value::String("object".to_string()));
+                    true
+                }
+                None => {
+                    schema.insert("type".to_string(), Value::String("object".to_string()));
+                    true
+                }
+                _ => return None,
+            };
+            for keyword in ["anyOf", "oneOf"] {
+                let mut remove_keyword = false;
+                if let Some(branches) = schema.get_mut(keyword).and_then(Value::as_array_mut) {
+                    branches.retain_mut(|branch| {
+                        let Some(branch_changed) = restrict_tool_parameter_schema_to_object(branch)
+                        else {
+                            changed = true;
+                            return false;
+                        };
+                        changed |= branch_changed;
+                        true
+                    });
+                    remove_keyword = branches.is_empty();
+                }
+                if remove_keyword {
+                    schema.remove(keyword);
+                    changed = true;
+                }
+            }
+            Some(changed)
+        }
+        _ => None,
+    }
+}
+
+pub(crate) fn responses_tools_to_chat_tools_with_bridge(
+    tools: &Value,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<ResponsesChatTools> {
+    let tools = tools
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("tools 必须是数组"))?;
+    let mut conversion = ResponsesChatToolsConversion {
+        tool_bridge,
+        upstream_names: HashMap::new(),
+        bridged_definitions: HashMap::new(),
+        converted: Vec::new(),
+        web_search_options: None,
+        web_search_tool_seen: false,
+    };
+    for tool in tools {
+        append_responses_tool_to_chat_tools(tool, &[], &mut conversion)?;
+    }
+    Ok(ResponsesChatTools {
+        tools: (!conversion.converted.is_empty()).then_some(Value::Array(conversion.converted)),
+        web_search_options: conversion.web_search_options,
+        web_search_tool_seen: conversion.web_search_tool_seen,
+    })
+}
+
+pub(crate) fn append_responses_tool_to_chat_tools(
+    tool: &Value,
+    namespace_path: &[String],
+    conversion: &mut ResponsesChatToolsConversion<'_>,
+) -> Result<()> {
+    let object = tool
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("tools 条目必须是对象"))?;
+    let tool_type = object.get("type").and_then(Value::as_str);
+    if matches!(tool_type, Some("function"))
+        || (tool_type.is_none() && object.contains_key("function"))
+    {
+        let mut function = responses_function_tool_map(object)?;
+        let name = response_function_name(&function, "function tool")?.to_string();
+        let tool_name = ResponsesToolName {
+            kind: ResponsesToolKind::Function,
+            namespace: namespace_path.to_vec(),
+            name: name.clone(),
+        };
+        let should_push = if namespace_path.is_empty() {
+            register_plain_tool_name(
+                &name,
+                conversion.tool_bridge,
+                &mut conversion.upstream_names,
+            )?;
+            true
+        } else {
+            validate_namespaced_function_name(&name)?;
+            let original_definition = Value::Object(function.clone());
+            match register_namespaced_tool_name(
+                tool_name,
+                &original_definition,
+                conversion.tool_bridge,
+                &mut conversion.upstream_names,
+                &mut conversion.bridged_definitions,
+            )? {
+                Some(upstream_name) => {
+                    function.insert("name".to_string(), Value::String(upstream_name));
+                    true
+                }
+                None => false,
+            }
+        };
+        if should_push {
+            if namespace_path.is_empty() {
+                function.insert("name".to_string(), Value::String(name));
+            }
+            conversion
+                .converted
+                .push(json!({"type":"function","function":Value::Object(function)}));
+        }
+        return Ok(());
+    }
+    if tool_type == Some("namespace") {
+        return append_responses_namespace_tools(object, namespace_path, conversion);
+    }
+    if tool_type == Some("custom") {
+        let name = response_function_name(object, "custom tool")?.to_string();
+        let tool_name = ResponsesToolName::custom_in_namespace(namespace_path, &name);
+        let original_definition = Value::Object(object.clone());
+        let Some(upstream_name) = register_custom_tool_name(
+            tool_name,
+            &original_definition,
+            conversion.tool_bridge,
+            &mut conversion.upstream_names,
+            &mut conversion.bridged_definitions,
+        )?
+        else {
+            return Ok(());
+        };
+        conversion.converted.push(json!({
+            "type":"function",
+            "function":{
+                "name":upstream_name,
+                "description":custom_tool_bridge_description(object)?,
+                "parameters":{
+                    "type":"object",
+                    "properties":{
+                        "input":{
+                            "type":"string",
+                            "description":"Raw free-form input for the original Responses custom tool."
+                        }
+                    },
+                    "required":["input"],
+                    "additionalProperties":false
+                }
+            }
+        }));
+        return Ok(());
+    }
+    if tool_type == Some("tool_search") {
+        if !namespace_path.is_empty() {
+            anyhow::bail!("namespace.tools 不支持工具类型 tool_search");
+        }
+        match object.get("execution").and_then(Value::as_str) {
+            Some("client") => {}
+            Some("server") | None => anyhow::bail!(
+                "Responses 托管工具 tool_search 不能转换为 Chat/Anthropic function 工具；仅 execution=client 可桥接"
+            ),
+            Some(execution) => {
+                anyhow::bail!("tool_search.execution={execution} 不受支持；仅 client 可桥接")
+            }
+        }
+        let description = object
+            .get("description")
+            .and_then(Value::as_str)
+            .filter(|description| !description.is_empty())
+            .ok_or_else(|| {
+                anyhow::anyhow!("execution=client tool_search.description 必须是非空字符串")
+            })?;
+        let parameters = object
+            .get("parameters")
+            .filter(|parameters| parameters.is_object())
+            .cloned()
+            .ok_or_else(|| {
+                anyhow::anyhow!("execution=client tool_search.parameters 必须是 JSON 对象")
+            })?;
+        let tool_name = ResponsesToolName::tool_search();
+        if let Some(existing) = conversion
+            .upstream_names
+            .get(TOOL_SEARCH_UPSTREAM_TOOL_NAME)
+            && existing != &tool_name
+        {
+            anyhow::bail!(
+                "客户端 tool_search 保留函数名 {TOOL_SEARCH_UPSTREAM_TOOL_NAME} 与 function 工具冲突"
+            );
+        }
+        let original_definition = Value::Object(object.clone());
+        if let Some(existing_definition) = conversion.bridged_definitions.get(&tool_name) {
+            if existing_definition == &original_definition {
+                return Ok(());
+            }
+            anyhow::bail!("客户端 tool_search 存在定义冲突");
+        }
+        conversion
+            .bridged_definitions
+            .insert(tool_name.clone(), original_definition);
+        conversion.upstream_names.insert(
+            TOOL_SEARCH_UPSTREAM_TOOL_NAME.to_string(),
+            tool_name.clone(),
+        );
+        conversion.tool_bridge.response_to_upstream.insert(
+            tool_name.clone(),
+            TOOL_SEARCH_UPSTREAM_TOOL_NAME.to_string(),
+        );
+        conversion
+            .tool_bridge
+            .upstream_to_response
+            .insert(TOOL_SEARCH_UPSTREAM_TOOL_NAME.to_string(), tool_name);
+        conversion.converted.push(json!({
+            "type":"function",
+            "function":{
+                "name":TOOL_SEARCH_UPSTREAM_TOOL_NAME,
+                "description":description,
+                "parameters":parameters,
+            }
+        }));
+        return Ok(());
+    }
+    if matches!(tool_type, Some("web_search" | "web_search_preview")) {
+        conversion.web_search_tool_seen = true;
+        if !namespace_path.is_empty() {
+            let tool_name = tool_type.unwrap_or("unknown");
+            anyhow::bail!("namespace.tools 不支持工具类型 {tool_name}");
+        }
+        let options = responses_web_search_tool_to_chat_options(object)?;
+        if let Some(existing) = conversion.web_search_options.as_ref() {
+            if existing == &options {
+                return Ok(());
+            }
+            anyhow::bail!("Responses web_search 工具存在定义冲突");
+        }
+        conversion.web_search_options = Some(options);
+        return Ok(());
+    }
+    if !namespace_path.is_empty() {
+        let tool_name = tool_type.unwrap_or("unknown");
+        anyhow::bail!("namespace.tools 不支持工具类型 {tool_name}");
+    }
+    let tool_name = tool_type.unwrap_or("unknown");
+    anyhow::bail!(
+        "Responses 内置工具 {tool_name} 不能转换为 Chat Completions tools，请改用支持 Responses 的线路"
+    )
+}
+
+pub(crate) fn responses_web_search_tool_to_chat_options(
+    object: &serde_json::Map<String, Value>,
+) -> Result<Value> {
+    if let Some(filters) = object.get("filters")
+        && !filters.is_null()
+    {
+        anyhow::bail!("Chat Completions web_search_options 不支持 Responses web_search.filters");
+    }
+    if let Some(return_token_budget) = object.get("return_token_budget")
+        && !return_token_budget.is_null()
+    {
+        anyhow::bail!(
+            "Chat Completions web_search_options 不支持 Responses web_search.return_token_budget"
+        );
+    }
+    if object.get("external_web_access").and_then(Value::as_bool) == Some(false) {
+        anyhow::bail!("Chat Completions web_search_options 不能表达 external_web_access=false");
+    }
+
+    let mut options = serde_json::Map::new();
+    if let Some(search_context_size) = object.get("search_context_size") {
+        let size = search_context_size
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("web_search.search_context_size 必须是字符串"))?;
+        if !matches!(size, "low" | "medium" | "high") {
+            anyhow::bail!("web_search.search_context_size 必须是 low/medium/high");
+        }
+        options.insert(
+            "search_context_size".to_string(),
+            Value::String(size.to_string()),
+        );
+    }
+    if let Some(user_location) = object.get("user_location")
+        && !user_location.is_null()
+    {
+        options.insert(
+            "user_location".to_string(),
+            responses_web_search_user_location_to_chat(user_location)?,
+        );
+    }
+    Ok(Value::Object(options))
+}
+
+pub(crate) fn responses_web_search_user_location_to_chat(user_location: &Value) -> Result<Value> {
+    let object = user_location
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("web_search.user_location 必须是对象"))?;
+    let location_type = object
+        .get("type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("web_search.user_location 缺少 type"))?;
+    if location_type != "approximate" {
+        anyhow::bail!("web_search.user_location.type 只能是 approximate");
+    }
+    let approximate = if let Some(approximate) = object.get("approximate") {
+        approximate
+            .as_object()
+            .ok_or_else(|| anyhow::anyhow!("web_search.user_location.approximate 必须是对象"))?
+            .clone()
+    } else {
+        let mut approximate = serde_json::Map::new();
+        for key in ["city", "country", "region", "timezone"] {
+            if let Some(value) = object.get(key) {
+                if !value.is_string() && !value.is_null() {
+                    anyhow::bail!("web_search.user_location.{key} 必须是字符串");
+                }
+                if !value.is_null() {
+                    approximate.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        approximate
+    };
+    Ok(json!({
+        "type":"approximate",
+        "approximate":Value::Object(approximate),
+    }))
+}
+
+pub(crate) fn append_responses_namespace_tools(
+    object: &serde_json::Map<String, Value>,
+    parent_namespace: &[String],
+    conversion: &mut ResponsesChatToolsConversion<'_>,
+) -> Result<()> {
+    let namespace = responses_namespace_name(object)?;
+    let mut namespace_path = parent_namespace.to_vec();
+    namespace_path.push(namespace);
+    if namespace_path.len() > MAX_RESPONSES_NAMESPACE_DEPTH {
+        anyhow::bail!("namespace 嵌套层级超过 {MAX_RESPONSES_NAMESPACE_DEPTH}");
+    }
+    let tools = object.get("tools");
+    let children = object.get("children");
+    if tools.is_none() && children.is_none() {
+        anyhow::bail!("namespace 工具缺少 tools 或 children");
+    }
+    if let Some(tools) = tools {
+        let tools = tools
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("namespace.tools 必须是数组"))?;
+        for tool in tools {
+            append_responses_tool_to_chat_tools(tool, &namespace_path, conversion)?;
+        }
+    }
+    if let Some(children) = children {
+        let children = children
+            .as_array()
+            .ok_or_else(|| anyhow::anyhow!("namespace.children 必须是数组"))?;
+        for child in children {
+            append_responses_tool_to_chat_tools(child, &namespace_path, conversion)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn responses_function_tool_map(
+    object: &serde_json::Map<String, Value>,
+) -> Result<serde_json::Map<String, Value>> {
+    let mut function = if let Some(function) = object.get("function").and_then(Value::as_object) {
+        function.clone()
+    } else {
+        object
+            .iter()
+            .filter(|(key, _)| !matches!(key.as_str(), "type" | "defer_loading"))
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<serde_json::Map<_, _>>()
+    };
+    function.remove("defer_loading");
+    let name = response_function_name(&function, "function tool")?.to_string();
+    function.insert("name".to_string(), Value::String(name));
+    Ok(function)
+}
+
+pub(crate) fn register_plain_tool_name(
+    name: &str,
+    tool_bridge: &mut ResponsesToolBridge,
+    upstream_names: &mut HashMap<String, ResponsesToolName>,
+) -> Result<()> {
+    let tool_name = ResponsesToolName::plain(name);
+    if let Some(existing) = upstream_names.get(name) {
+        if existing != &tool_name {
+            anyhow::bail!("桥接工具展开名称 {name} 与 function 工具冲突");
+        }
+    } else {
+        upstream_names.insert(name.to_string(), tool_name.clone());
+    }
+    tool_bridge
+        .upstream_to_response
+        .entry(name.to_string())
+        .or_insert_with(|| tool_name.clone());
+    tool_bridge
+        .response_to_upstream
+        .entry(tool_name)
+        .or_insert_with(|| name.to_string());
+    Ok(())
+}
+
+pub(crate) fn register_namespaced_tool_name(
+    tool_name: ResponsesToolName,
+    original_definition: &Value,
+    tool_bridge: &mut ResponsesToolBridge,
+    upstream_names: &mut HashMap<String, ResponsesToolName>,
+    namespace_definitions: &mut HashMap<ResponsesToolName, Value>,
+) -> Result<Option<String>> {
+    if let Some(existing_definition) = namespace_definitions.get(&tool_name) {
+        if existing_definition == original_definition {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "namespace 工具 {}.{} 存在定义冲突",
+            tool_name.namespace.join("."),
+            tool_name.name
+        );
+    }
+    let upstream_name = namespaced_upstream_tool_name(&tool_name.namespace, &tool_name.name);
+    if let Some(existing) = upstream_names.get(&upstream_name)
+        && existing != &tool_name
+    {
+        anyhow::bail!("namespace 工具展开名称 {upstream_name} 发生冲突");
+    }
+    namespace_definitions.insert(tool_name.clone(), original_definition.clone());
+    upstream_names.insert(upstream_name.clone(), tool_name.clone());
+    tool_bridge.has_namespace_tools = true;
+    tool_bridge
+        .response_to_upstream
+        .insert(tool_name.clone(), upstream_name.clone());
+    tool_bridge
+        .upstream_to_response
+        .insert(upstream_name.clone(), tool_name);
+    Ok(Some(upstream_name))
+}
+
+pub(crate) fn register_custom_tool_name(
+    tool_name: ResponsesToolName,
+    original_definition: &Value,
+    tool_bridge: &mut ResponsesToolBridge,
+    upstream_names: &mut HashMap<String, ResponsesToolName>,
+    bridged_definitions: &mut HashMap<ResponsesToolName, Value>,
+) -> Result<Option<String>> {
+    if let Some(existing_definition) = bridged_definitions.get(&tool_name) {
+        if existing_definition == original_definition {
+            return Ok(None);
+        }
+        anyhow::bail!(
+            "custom 工具 {}{} 存在定义冲突",
+            tool_name
+                .namespace_string()
+                .map(|namespace| format!("{namespace}."))
+                .unwrap_or_default(),
+            tool_name.name,
+        );
+    }
+    let upstream_name = custom_upstream_tool_name(&tool_name.namespace, &tool_name.name);
+    if let Some(existing) = upstream_names.get(&upstream_name)
+        && existing != &tool_name
+    {
+        anyhow::bail!("custom 工具展开名称 {upstream_name} 发生冲突");
+    }
+    bridged_definitions.insert(tool_name.clone(), original_definition.clone());
+    upstream_names.insert(upstream_name.clone(), tool_name.clone());
+    tool_bridge.has_custom_tools = true;
+    tool_bridge
+        .response_to_upstream
+        .insert(tool_name.clone(), upstream_name.clone());
+    tool_bridge
+        .upstream_to_response
+        .insert(upstream_name.clone(), tool_name);
+    Ok(Some(upstream_name))
+}
+
+pub(crate) fn custom_tool_bridge_description(
+    object: &serde_json::Map<String, Value>,
+) -> Result<String> {
+    let mut description = object
+        .get("description")
+        .and_then(Value::as_str)
+        .filter(|description| !description.is_empty())
+        .map(|description| {
+            format!(
+                "{}\n\n",
+                utf8_prefix(description, MAX_CUSTOM_TOOL_SOURCE_DESCRIPTION_BYTES)
+            )
+        })
+        .unwrap_or_default();
+    description.push_str(
+        "[Codey compatibility bridge] This was an OpenAI Responses custom free-form tool. \
+Call this function with exactly one `input` string containing the complete raw tool input. \
+Do not JSON-encode the string again and do not add wrapper text.",
+    );
+    if let Some(format) = object.get("format") {
+        description.push_str(" Format: ");
+        description.push_str(
+            &serde_json::to_string(format).context("序列化 Responses custom 工具格式提示失败")?,
+        );
+    }
+    if description.len() > MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES {
+        let mut end = MAX_CUSTOM_TOOL_BRIDGE_DESCRIPTION_BYTES - '…'.len_utf8();
+        while !description.is_char_boundary(end) {
+            end -= 1;
+        }
+        description.truncate(end);
+        description.push('…');
+    }
+    Ok(description)
+}
+
+pub(crate) fn utf8_prefix(value: &str, max_bytes: usize) -> &str {
+    if value.len() <= max_bytes {
+        return value;
+    }
+    let mut end = max_bytes;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    &value[..end]
+}
+
+pub(crate) fn response_function_name<'a>(
+    object: &'a serde_json::Map<String, Value>,
+    context: &str,
+) -> Result<&'a str> {
+    object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{context} 缺少 name"))
+}
+
+pub(crate) fn responses_namespace_name(object: &serde_json::Map<String, Value>) -> Result<String> {
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("namespace 工具缺少 name"))?;
+    validate_namespace_segment(name, "namespace.name")
+}
+
+pub(crate) fn validate_namespace_segment(segment: &str, field: &str) -> Result<String> {
+    if segment.is_empty()
+        || segment.trim() != segment
+        || segment.contains('.')
+        || segment.chars().any(char::is_control)
+    {
+        anyhow::bail!("{field} 必须是非空、无控制字符且不包含点号的字符串");
+    }
+    Ok(segment.to_string())
+}
+
+pub(crate) fn validate_namespaced_function_name(name: &str) -> Result<()> {
+    if name.is_empty() || name.trim() != name || name.chars().any(char::is_control) {
+        anyhow::bail!("namespace function tool.name 必须是非空且无控制字符的字符串");
+    }
+    Ok(())
+}
+
+pub(crate) fn namespaced_upstream_tool_name(namespace: &[String], name: &str) -> String {
+    let canonical = format!("{}\u{1e}{name}", namespace.join("\u{1f}"));
+    let hash = stable_tool_hash_hex(&canonical);
+    let stem_source = format!("{}__{name}", namespace.join("__"));
+    let stem = sanitize_upstream_tool_stem(&stem_source);
+    let suffix = format!("__{hash}");
+    let max_stem_len = UPSTREAM_FUNCTION_NAME_MAX_BYTES
+        .saturating_sub(NAMESPACE_UPSTREAM_TOOL_PREFIX.len())
+        .saturating_sub(suffix.len());
+    let stem = stem.chars().take(max_stem_len).collect::<String>();
+    format!("{NAMESPACE_UPSTREAM_TOOL_PREFIX}{stem}{suffix}")
+}
+
+pub(crate) fn custom_upstream_tool_name(namespace: &[String], name: &str) -> String {
+    let canonical = format!("custom\u{1e}{}\u{1e}{name}", namespace.join("\u{1f}"));
+    let hash = stable_tool_hash_hex(&canonical);
+    let stem_source = if namespace.is_empty() {
+        name.to_string()
+    } else {
+        format!("{}__{name}", namespace.join("__"))
+    };
+    let stem = sanitize_upstream_tool_stem(&stem_source);
+    let suffix = format!("__{hash}");
+    let max_stem_len = UPSTREAM_FUNCTION_NAME_MAX_BYTES
+        .saturating_sub(CUSTOM_UPSTREAM_TOOL_PREFIX.len())
+        .saturating_sub(suffix.len());
+    let stem = stem.chars().take(max_stem_len).collect::<String>();
+    format!("{CUSTOM_UPSTREAM_TOOL_PREFIX}{stem}{suffix}")
+}
+
+pub(crate) fn stable_tool_hash_hex(value: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+pub(crate) fn sanitize_upstream_tool_stem(value: &str) -> String {
+    let mut sanitized = String::with_capacity(value.len());
+    let mut last_was_separator = false;
+    for ch in value.chars() {
+        let next = if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-') {
+            ch
+        } else {
+            '_'
+        };
+        if next == '_' && last_was_separator {
+            continue;
+        }
+        last_was_separator = next == '_';
+        sanitized.push(next);
+    }
+    let sanitized = sanitized.trim_matches('_');
+    if sanitized.is_empty() {
+        "tool".to_string()
+    } else {
+        sanitized.to_string()
+    }
+}
+
+pub(crate) fn looks_like_namespace_upstream_name(name: &str) -> bool {
+    name.starts_with(NAMESPACE_UPSTREAM_TOOL_PREFIX)
+}
+
+pub(crate) fn looks_like_custom_upstream_name(name: &str) -> bool {
+    name.starts_with(CUSTOM_UPSTREAM_TOOL_PREFIX)
+}
+
+pub(crate) fn could_be_namespace_upstream_name(name: &str) -> bool {
+    !name.is_empty()
+        && (NAMESPACE_UPSTREAM_TOOL_PREFIX.starts_with(name)
+            || name.starts_with(NAMESPACE_UPSTREAM_TOOL_PREFIX))
+}
+
+pub(crate) fn could_be_custom_upstream_name(name: &str) -> bool {
+    !name.is_empty()
+        && (CUSTOM_UPSTREAM_TOOL_PREFIX.starts_with(name)
+            || name.starts_with(CUSTOM_UPSTREAM_TOOL_PREFIX))
+}
+
+pub(crate) fn responses_namespace_path(value: Option<&Value>, field: &str) -> Result<Vec<String>> {
+    match value {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::String(namespace)) => namespace
+            .split('.')
+            .map(|segment| validate_namespace_segment(segment, field))
+            .collect(),
+        Some(Value::Array(segments)) => segments
+            .iter()
+            .map(|segment| {
+                segment
+                    .as_str()
+                    .ok_or_else(|| anyhow::anyhow!("{field} 数组只能包含字符串"))
+                    .and_then(|segment| validate_namespace_segment(segment, field))
+            })
+            .collect(),
+        Some(_) => anyhow::bail!("{field} 必须是字符串或字符串数组"),
+    }
+}
+
+pub(crate) fn merge_namespace_paths(
+    outer: Vec<String>,
+    inner: Vec<String>,
+    field: &str,
+) -> Result<Vec<String>> {
+    if outer.is_empty() {
+        return Ok(inner);
+    }
+    if inner.is_empty() || inner == outer {
+        return Ok(outer);
+    }
+    anyhow::bail!("{field} 同时包含冲突的 namespace")
+}
+
+pub(crate) fn responses_tool_name_from_function_object(
+    function: &serde_json::Map<String, Value>,
+    outer_namespace: Option<&Value>,
+    context: &str,
+) -> Result<ResponsesToolName> {
+    let name = response_function_name(function, context)?;
+    let namespace = merge_namespace_paths(
+        responses_namespace_path(outer_namespace, "namespace")?,
+        responses_namespace_path(function.get("namespace"), "function.namespace")?,
+        context,
+    )?;
+    Ok(ResponsesToolName {
+        kind: ResponsesToolKind::Function,
+        namespace,
+        name: name.to_string(),
+    })
+}
+
+pub(crate) fn responses_tool_name_from_call_object(
+    object: &serde_json::Map<String, Value>,
+    context: &str,
+) -> Result<ResponsesToolName> {
+    if let Some(function) = object.get("function").and_then(Value::as_object) {
+        return responses_tool_name_from_function_object(
+            function,
+            object.get("namespace"),
+            context,
+        );
+    }
+    let name = object
+        .get("name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("{context} 缺少 name"))?;
+    Ok(ResponsesToolName {
+        kind: ResponsesToolKind::Function,
+        namespace: responses_namespace_path(object.get("namespace"), "namespace")?,
+        name: name.to_string(),
+    })
+}
+
+pub(crate) fn responses_tool_choice_to_chat_tool_choice(
+    tool_choice: &Value,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<Value> {
+    match tool_choice {
+        Value::String(choice) if matches!(choice.as_str(), "auto" | "none" | "required") => {
+            Ok(Value::String(choice.clone()))
+        }
+        Value::Object(object) => {
+            let choice_type = object.get("type").and_then(Value::as_str);
+            let tool_name = match choice_type {
+                Some("function") => {
+                    responses_tool_name_from_call_object(object, "function tool_choice")?
+                }
+                Some("custom") => {
+                    let name = response_function_name(object, "custom tool_choice")?;
+                    let namespace = responses_namespace_path(
+                        object.get("namespace"),
+                        "custom tool_choice.namespace",
+                    )?;
+                    ResponsesToolName::custom_in_namespace(&namespace, name)
+                }
+                Some("tool_search") => ResponsesToolName::tool_search(),
+                _ => {
+                    let tool_name = choice_type.unwrap_or("unknown");
+                    anyhow::bail!(
+                        "Responses tool_choice 类型 {tool_name} 不能转换为 Chat Completions tool_choice"
+                    );
+                }
+            };
+            let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
+            Ok(json!({"type":"function","function":{"name":upstream_name}}))
+        }
+        _ => anyhow::bail!("tool_choice 必须是 auto/none/required 或 function 对象"),
+    }
+}
+
+pub(crate) fn responses_function_call_choice_to_chat(
+    function_call: &Value,
+    tool_bridge: &mut ResponsesToolBridge,
+) -> Result<Value> {
+    match function_call {
+        Value::String(choice) if matches!(choice.as_str(), "auto" | "none") => {
+            Ok(Value::String(choice.clone()))
+        }
+        Value::Object(object) => {
+            let tool_name = responses_tool_name_from_call_object(object, "function_call")?;
+            let upstream_name = tool_bridge.upstream_name_for_call(&tool_name)?;
+            Ok(json!({"name":upstream_name}))
+        }
+        _ => anyhow::bail!("function_call 必须是 auto/none 或 function name 对象"),
+    }
+}
+
+pub(crate) fn json_value_as_chat_string(value: Option<&Value>) -> Option<String> {
+    value.map(|value| match value {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => serde_json::to_string(other).unwrap_or_else(|_| other.to_string()),
+    })
+}
+
+pub(crate) fn wrap_custom_tool_input(input: &str) -> Result<String> {
+    serde_json::to_string(&json!({"input":input})).context("序列化 custom 工具 input 包装失败")
+}
+
+pub(crate) fn custom_tool_input_from_value(value: &Value, context: &str) -> Result<String> {
+    value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("{context} 必须是 JSON 对象"))?
+        .get("input")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| anyhow::anyhow!("{context}.input 必须是字符串"))
+}
+
+pub(crate) fn custom_tool_input_from_arguments(arguments: &str, context: &str) -> Result<String> {
+    let value = serde_json::from_str::<Value>(arguments)
+        .with_context(|| format!("{context} 不是有效 JSON"))?;
+    custom_tool_input_from_value(&value, context)
+}
+
+pub(crate) fn responses_tool_call_item_from_upstream_arguments(
+    tool_name: &ResponsesToolName,
+    call_id: String,
+    arguments: String,
+    status: &str,
+    context: &str,
+) -> Result<Value> {
+    let payload = if tool_name.is_custom() {
+        Value::String(custom_tool_input_from_arguments(&arguments, context)?)
+    } else if tool_name.is_tool_search() {
+        let arguments = serde_json::from_str::<Value>(&arguments)
+            .with_context(|| format!("{context} 不是有效 JSON"))?;
+        if !arguments.is_object() {
+            anyhow::bail!("{context} 必须是 JSON 对象");
+        }
+        arguments
+    } else {
+        Value::String(arguments)
+    };
+    Ok(responses_tool_call_item_from_payload(
+        tool_name, call_id, payload, status,
+    ))
+}
+
+pub(crate) fn responses_tool_call_item_from_payload(
+    tool_name: &ResponsesToolName,
+    call_id: String,
+    payload: Value,
+    status: &str,
+) -> Value {
+    let item_id = responses_tool_call_item_id(tool_name);
+    responses_tool_call_item_with_id(tool_name, item_id, call_id, payload, status)
+}
+
+pub(crate) fn responses_tool_call_item_id(tool_name: &ResponsesToolName) -> String {
+    let prefix = if tool_name.is_custom() {
+        "ctc_codey_"
+    } else if tool_name.is_tool_search() {
+        "tsc_codey_"
+    } else {
+        "fc_codey_"
+    };
+    format!("{prefix}{}", Uuid::new_v4())
+}
+
+pub(crate) fn responses_tool_call_item_with_id(
+    tool_name: &ResponsesToolName,
+    item_id: String,
+    call_id: String,
+    payload: Value,
+    status: &str,
+) -> Value {
+    let (item_type, payload_field) = match tool_name.kind {
+        ResponsesToolKind::Function => ("function_call", "arguments"),
+        ResponsesToolKind::Custom => ("custom_tool_call", "input"),
+        ResponsesToolKind::ToolSearch => ("tool_search_call", "arguments"),
+    };
+    let mut item = serde_json::Map::from_iter([
+        ("id".to_string(), Value::String(item_id)),
+        ("type".to_string(), Value::String(item_type.to_string())),
+        ("status".to_string(), Value::String(status.to_string())),
+        ("call_id".to_string(), Value::String(call_id)),
+        (payload_field.to_string(), payload),
+    ]);
+    tool_name.insert_response_fields(&mut item);
+    Value::Object(item)
+}
+
+pub(crate) fn push_chat_text_message(
+    messages: &mut Vec<Value>,
+    role: &str,
+    content: &str,
+) -> Result<()> {
+    if content.is_empty() {
+        return Ok(());
+    }
+    messages.push(json!({"role":role,"content":content}));
+    Ok(())
+}
+
+pub(crate) fn copy_number_or_string_field(
+    from: &serde_json::Map<String, Value>,
+    to: &mut serde_json::Map<String, Value>,
+    source: &str,
+    target: &str,
+) {
+    if let Some(value) = from.get(source)
+        && (value.is_number() || value.is_string() || value.is_boolean())
+    {
+        to.insert(target.to_string(), value.clone());
+    }
+}
+
+pub(crate) fn copy_json_field(
+    from: &serde_json::Map<String, Value>,
+    to: &mut serde_json::Map<String, Value>,
+    source: &str,
+    target: &str,
+) {
+    if let Some(value) = from.get(source) {
+        to.insert(target.to_string(), value.clone());
+    }
+}
+
+/// Moonshot / Kimi 的 Chat Completions 不接受 `$ref` 与其它关键字并列。
+/// Codex Desktop 的内置工具正好是这个形状。只改这些地址，其它上游的
+/// 工具 schema 保持原样。
+const REF_SIBLING_HOST_SUFFIXES: &[&str] = &["moonshot.cn", "moonshot.ai", "kimi.com"];
+
+const SCHEMA_MAP_KEYWORDS: &[&str] = &[
+    "properties",
+    "patternProperties",
+    "$defs",
+    "definitions",
+    "dependentSchemas",
+    "dependencies",
+];
+
+const SCHEMA_ARRAY_KEYWORDS: &[&str] = &["allOf", "anyOf", "oneOf", "prefixItems"];
+
+const SINGLE_SCHEMA_KEYWORDS: &[&str] = &[
+    "items",
+    "additionalItems",
+    "unevaluatedItems",
+    "contains",
+    "additionalProperties",
+    "unevaluatedProperties",
+    "propertyNames",
+    "not",
+    "if",
+    "then",
+    "else",
+    "contentSchema",
+];
+
+pub(crate) fn upstream_rejects_ref_sibling_keywords(upstream_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(upstream_url.trim()) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let host = host.to_ascii_lowercase();
+    REF_SIBLING_HOST_SUFFIXES.iter().any(|suffix| {
+        host == *suffix
+            || host
+                .strip_suffix(suffix)
+                .is_some_and(|prefix| prefix.ends_with('.'))
+    })
+}
+
+pub(crate) fn wrap_chat_tool_ref_siblings(body: &mut Value) -> bool {
+    let Some(tools) = body.get_mut("tools").and_then(Value::as_array_mut) else {
+        return false;
+    };
+    let mut changed = false;
+    for tool in tools {
+        let Some(parameters) = tool
+            .get_mut("function")
+            .and_then(Value::as_object_mut)
+            .and_then(|function| function.get_mut("parameters"))
+        else {
+            continue;
+        };
+        if wrap_ref_siblings(parameters) > 0 {
+            changed = true;
+        }
+    }
+    changed
+}
+
+fn wrap_ref_siblings(schema: &mut Value) -> usize {
+    let Value::Object(map) = schema else {
+        return 0;
+    };
+    let mut rewritten = 0;
+    if map.len() > 1 && map.get("$ref").is_some_and(Value::is_string) {
+        move_ref_into_all_of(map);
+        rewritten += 1;
+    }
+    for (key, child) in map.iter_mut() {
+        if SCHEMA_MAP_KEYWORDS.contains(&key.as_str()) {
+            if let Value::Object(entries) = child {
+                rewritten += entries.values_mut().map(wrap_ref_siblings).sum::<usize>();
+            }
+        } else if SCHEMA_ARRAY_KEYWORDS.contains(&key.as_str()) {
+            if let Value::Array(entries) = child {
+                rewritten += entries.iter_mut().map(wrap_ref_siblings).sum::<usize>();
+            }
+        } else if SINGLE_SCHEMA_KEYWORDS.contains(&key.as_str()) {
+            match child {
+                Value::Array(entries) => {
+                    rewritten += entries.iter_mut().map(wrap_ref_siblings).sum::<usize>();
+                }
+                other => rewritten += wrap_ref_siblings(other),
+            }
+        }
+    }
+    rewritten
+}
+
+fn move_ref_into_all_of(map: &mut serde_json::Map<String, Value>) {
+    let Some(reference) = map.remove("$ref") else {
+        return;
+    };
+    let branch = json!({ "$ref": reference });
+    match map.get_mut("allOf") {
+        Some(Value::Array(branches)) => branches.push(branch),
+        _ => {
+            map.insert("allOf".to_string(), Value::Array(vec![branch]));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_final_upstream_tool_schema_shapes() {
+        let mut body = json!({
+            "tools": [{
+                "type": "function",
+                "name": "automation_update",
+                "strict": true,
+                "input_schema": {
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {"mode": {"type": "string"}},
+                            "required": ["mode"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"mode": {"type": "string"}, "id": {"type": "integer"}},
+                            "required": ["id"]
+                        },
+                        {"type": "null"}
+                    ]
+                }
+            }]
+        });
+
+        assert!(normalize_responses_tool_parameter_roots(&mut body));
+        let schema = &body["tools"][0]["input_schema"];
+        assert_eq!(schema["type"], "object");
+        for keyword in ["anyOf", "oneOf", "allOf"] {
+            assert!(schema.get(keyword).is_none(), "{keyword}");
+        }
+        assert_eq!(schema["properties"]["mode"]["type"], "string");
+        assert_eq!(schema["properties"]["id"]["type"], "integer");
+        // anyOf 缺少 required 的分支不约束任何字段，交集为空。
+        assert!(schema.get("required").is_none());
+        // 合并后 schema 弱于原定义，strict 必须关闭。
+        assert_eq!(body["tools"][0]["strict"], false);
+    }
+
+    #[test]
+    fn strips_encrypted_marker_only_from_collaboration_messages() {
+        let mut body = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "agents",
+                "tools": [
+                    {
+                        "type": "function",
+                        "name": "spawn_agent",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "task_name": {"type": "string"},
+                                "message": {"type": "string", "encrypted": true}
+                            },
+                            "required": ["task_name", "message"]
+                        }
+                    },
+                    {
+                        "type": "function",
+                        "name": "wait_agent",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"message": {"type": "string", "encrypted": true}}
+                        }
+                    }
+                ]
+            }, {
+                "type": "function",
+                "name": "followup_task",
+                "function": {
+                    "name": "followup_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }
+            }]
+        });
+
+        assert!(strip_collaboration_message_encryption(&mut body, false));
+
+        let spawn = &body["tools"][0]["tools"][0]["parameters"]["properties"];
+        assert!(spawn["message"].get("encrypted").is_none());
+        assert_eq!(spawn["message"]["type"], "string");
+        assert_eq!(spawn["task_name"]["type"], "string");
+        // 同命名空间下的其它工具不受影响。
+        assert_eq!(
+            body["tools"][0]["tools"][1]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+        assert!(
+            body["tools"][1]["function"]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+
+        // 标记已摘除后再次调用不产生改动。
+        assert!(!strip_collaboration_message_encryption(&mut body, false));
+    }
+
+    #[test]
+    fn keeps_encrypted_marker_inside_reserved_collaboration_namespace() {
+        let mut body = json!({
+            "tools": [{
+                "type": "namespace",
+                "name": "collaboration",
+                "tools": [{
+                    "type": "function",
+                    "name": "followup_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }, {
+                "type": "namespace",
+                "name": "agents",
+                "tools": [{
+                    "type": "function",
+                    "name": "followup_task",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }]
+        });
+
+        let mut third_party = body.clone();
+        assert!(strip_collaboration_message_encryption(&mut body, true));
+        // 官方上游按模型保留配置逐字校验 collaboration.* 的 schema，标记必须原样保留。
+        assert_eq!(
+            body["tools"][0]["tools"][0]["parameters"]["properties"]["message"]["encrypted"],
+            true
+        );
+        // agents 命名空间不是上游保留项，仍按明文派发摘掉标记。
+        assert!(
+            body["tools"][1]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+        assert!(!strip_collaboration_message_encryption(&mut body, true));
+
+        // 第三方线路不校验保留 schema，两个命名空间都摘掉标记。
+        assert!(strip_collaboration_message_encryption(
+            &mut third_party,
+            false
+        ));
+        assert!(
+            third_party["tools"][0]["tools"][0]["parameters"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn strips_encrypted_marker_from_input_tool_lists() {
+        let mut body = json!({
+            "input": [{
+                "type": "tool_search_output",
+                "tools": [{
+                    "type": "function",
+                    "name": "send_message",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {"message": {"type": "string", "encrypted": true}}
+                    }
+                }]
+            }]
+        });
+
+        assert!(strip_collaboration_message_encryption(&mut body, false));
+        assert!(
+            body["input"][0]["tools"][0]["input_schema"]["properties"]["message"]
+                .get("encrypted")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn flattens_conflicting_property_constraints_to_their_common_type() {
+        let mut schema = json!({
+            "oneOf": [
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "view"}, "kind": {"type": "string"}},
+                    "required": ["mode"]
+                },
+                {
+                    "type": "object",
+                    "properties": {"mode": {"const": "create"}, "kind": {"type": "string"}},
+                    "required": ["mode"]
+                }
+            ]
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("oneOf").is_none());
+        assert_eq!(schema["properties"]["mode"], json!({"type": "string"}));
+        assert_eq!(schema["properties"]["kind"], json!({"type": "string"}));
+        assert_eq!(schema["required"], json!(["mode"]));
+    }
+
+    #[test]
+    fn flattens_ref_branches_against_root_definitions() {
+        let mut schema = json!({
+            "anyOf": [
+                {"$ref": "#/$defs/create"},
+                {"$ref": "#/$defs/delete"}
+            ],
+            "$defs": {
+                "create": {
+                    "type": "object",
+                    "properties": {"prompt": {"type": "string"}},
+                    "required": ["prompt"]
+                },
+                "delete": {
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"]
+                }
+            }
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        assert_eq!(schema["type"], "object");
+        assert!(schema.get("anyOf").is_none());
+        assert_eq!(schema["properties"]["prompt"]["type"], "string");
+        assert_eq!(schema["properties"]["id"]["type"], "string");
+        assert!(schema.get("required").is_none());
+        assert!(schema.get("$defs").is_some());
+    }
+
+    #[test]
+    fn drops_forbidden_top_level_schema_keywords() {
+        let mut schema = json!({
+            "type": "object",
+            "enum": ["a", "b"],
+            "const": "a",
+            "not": {"type": "null"},
+            "properties": {"mode": {"type": "string"}}
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        for keyword in ["enum", "const", "not"] {
+            assert!(schema.get(keyword).is_none(), "{keyword}");
+        }
+        assert_eq!(schema["properties"]["mode"]["type"], "string");
+    }
+
+    #[test]
+    fn flattens_nested_unions_and_relaxes_absent_properties() {
+        let mut schema = json!({
+            "oneOf": [
+                {"$ref": "#/$defs/create"},
+                {"$ref": "#/$defs/query"},
+                {"type": "null"}
+            ],
+            "type": "object",
+            "$defs": {
+                "create": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": {"prompt": {"const": "a"}, "limit": {"type": "integer"}},
+                            "required": ["prompt"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {"prompt": {"const": "b"}},
+                            "required": ["prompt"]
+                        }
+                    ]
+                },
+                "query": {
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"]
+                }
+            }
+        });
+
+        assert!(normalize_tool_parameter_root(&mut schema));
+        for keyword in ["anyOf", "oneOf", "allOf"] {
+            assert!(schema.get(keyword).is_none(), "{keyword}");
+        }
+        // prompt 在 create 的两个嵌套分支里都能取到 string，query 只在 query 分支出现。
+        assert_eq!(schema["properties"]["prompt"]["type"], "string");
+        assert_eq!(schema["properties"]["query"], json!({"type": "string"}));
+        // limit 只在 create 的一个嵌套分支里定义，不能保留 integer 约束。
+        assert!(schema["properties"]["limit"].get("type").is_some());
+        // 只有 query 分支要求 query，交集为空。
+        assert!(schema.get("required").is_none());
+    }
+
+    #[test]
+    fn ref_sibling_rewrite_matches_moonshot_and_kimi_hosts_only() {
+        for url in [
+            "https://api.moonshot.cn/v1/chat/completions",
+            "https://api.moonshot.ai/v1/",
+            "https://api.kimi.com/coding/v1/chat/completions",
+            "https://API.KIMI.COM/coding/v1",
+        ] {
+            assert!(upstream_rejects_ref_sibling_keywords(url), "{url}");
+        }
+        for url in [
+            "https://api.openai.com/v1/chat/completions",
+            "https://moonshot.cn.example.com/v1",
+            "https://notkimi.com/v1",
+            "not a url",
+        ] {
+            assert!(!upstream_rejects_ref_sibling_keywords(url), "{url}");
+        }
+    }
+
+    #[test]
+    fn chat_tool_ref_siblings_move_into_all_of() {
+        let mut body = json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "automation_update",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "prompt": { "$ref": "#/$defs/__schema20", "description": "Prompt to run" },
+                            "mode": { "type": "string", "enum": ["fast", "slow"] }
+                        },
+                        "required": ["prompt"],
+                        "$defs": {
+                            "__schema20": { "$ref": "#/$defs/__schema2", "type": "string", "minLength": 1 },
+                            "__schema2": { "type": "string" }
+                        },
+                        "default": { "$ref": "#/$defs/__schema2", "type": "string" }
+                    }
+                }
+            }]
+        });
+
+        assert!(wrap_chat_tool_ref_siblings(&mut body));
+        let parameters = &body["tools"][0]["function"]["parameters"];
+        assert_eq!(
+            parameters["properties"]["prompt"]["allOf"][0]["$ref"],
+            "#/$defs/__schema20"
+        );
+        assert_eq!(
+            parameters["properties"]["prompt"]["description"],
+            "Prompt to run"
+        );
+        assert!(parameters["properties"]["prompt"].get("$ref").is_none());
+        assert_eq!(parameters["properties"]["mode"]["enum"][0], "fast");
+        assert_eq!(
+            parameters["$defs"]["__schema20"]["allOf"][0]["$ref"],
+            "#/$defs/__schema2"
+        );
+        assert_eq!(parameters["$defs"]["__schema20"]["type"], "string");
+        assert_eq!(parameters["$defs"]["__schema2"]["type"], "string");
+        assert!(parameters["$defs"]["__schema2"].get("allOf").is_none());
+        assert_eq!(parameters["default"]["$ref"], "#/$defs/__schema2");
+        assert!(!wrap_chat_tool_ref_siblings(&mut body));
+    }
+}

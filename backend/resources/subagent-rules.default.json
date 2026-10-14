@@ -1,0 +1,49 @@
+{
+  "schemaVersion": 1,
+  "revision": 11,
+  "conflictResolution": "highest_priority_deny_wins",
+  "fallback": "deny",
+  "roles": {
+    "codey_quick_scan": { "access": "write", "visual": true },
+    "codey_deep_research": { "access": "write", "visual": true },
+    "codey_visual_analysis": { "access": "write", "visual": true },
+    "codey_worker": { "access": "write", "visual": true },
+    "codey_visual_worker": { "access": "write", "visual": true },
+    "default": { "access": "write", "visual": true }
+  },
+  "rules": [
+    {
+      "id": "deny-nested-spawn",
+      "priority": 1000,
+      "effect": "deny",
+      "actors": ["child"],
+      "toolClasses": ["spawn"],
+      "explanation": "子代理不能继续派生子代理，避免权限与预算跨层扩散。"
+    },
+    {
+      "id": "deny-child-orchestration",
+      "priority": 950,
+      "effect": "deny",
+      "actors": ["child"],
+      "tools": ["wait_agent", "list_agents", "agent_status", "interrupt_agent", "followup_task"],
+      "explanation": "子代理只可向根代理回报，不得等待、查看、中断或追派其他代理。"
+    },
+    {
+      "id": "allow-role-capabilities",
+      "priority": 800,
+      "effect": "allow",
+      "actors": ["child"],
+      "roles": ["codey_quick_scan", "codey_deep_research", "codey_visual_analysis", "codey_worker", "codey_visual_worker", "default"],
+      "toolClasses": ["read", "write", "command", "network", "collaboration", "visual", "unknown"],
+      "explanation": "角色仅用于任务分工和模型选择，均可调用读写、命令、网络、视觉、协作和未归类工具；实际操作仍受任务范围、生命周期与 Codex 原生权限约束。"
+    },
+    {
+      "id": "allow-unbound-collaboration",
+      "priority": 100,
+      "effect": "allow",
+      "actors": ["child"],
+      "toolClasses": ["collaboration"],
+      "explanation": "缺少可恢复角色绑定时只保留向根代理发送消息；数据工具、副作用工具和编排工具全部 fail-closed。"
+    }
+  ]
+}

@@ -1,0 +1,133 @@
+export const CODEY_API_COMMANDS = [
+  "remote_control_status",
+  "start_remote_control",
+  "stop_remote_control",
+  "pair_remote_control",
+  "revoke_remote_device",
+  "load_codey_config",
+  "save_codey_config",
+  "sync_current_provider",
+  "set_route_enabled",
+  "reorder_route_models",
+  "delete_route",
+  "fetch_route_models",
+  "save_selected_models",
+  "save_default_model",
+  "save_official_route_models",
+  "runtime_status",
+  "open_route_request_logs",
+  "query_route_request_logs",
+  "query_route_request_log_stats",
+  "query_route_request_log_models",
+  "query_official_account_usage",
+  "store_official_account_usage",
+  "list_official_accounts",
+  "refresh_official_account_routes",
+  "start_official_account_login",
+  "poll_official_account_login",
+  "cancel_official_account_login",
+  "import_current_codex_login",
+  "import_official_account_credential",
+  "set_default_official_account",
+  "remove_official_account",
+  "start_official_account_siwc",
+  "poll_official_account_siwc",
+  "cancel_official_account_siwc",
+  "remove_official_account_siwc",
+  "save_official_account_route_settings",
+  "clear_route_request_logs",
+  "restart_codey",
+  "clear_diagnostic_storage",
+  "test_notification_channel",
+  "start_wechat_claw_login",
+  "poll_wechat_claw_login",
+  "optimize_prompt",
+  "test_prompt_optimization",
+  "fetch_prompt_optimization_models",
+  "check_for_updates",
+  "get_device_machine_no",
+  "download_update",
+  "install_downloaded_update",
+  "update_install_report",
+  "plugin_marketplace_status",
+  "repair_plugin_marketplace",
+  "prepare_computer_use",
+  "repair_main_process_injection",
+  "repair_codex_config",
+  "list_codey_plugins",
+  "get_codey_plugin_host_info",
+  "validate_codey_plugin_config",
+  "get_codey_plugin_config_file",
+  "select_codey_plugin_package",
+  "inspect_codey_plugin",
+  "install_codey_plugin",
+  "set_codey_plugin_enabled",
+  "save_codey_plugin_config_file",
+  "uninstall_codey_plugin",
+  "open_codey_plugin_directory",
+  "open_codey_plugin_logs",
+  "clear_codey_plugin_logs",
+  "invoke_codey_plugin",
+  "codex_extensions",
+  "conversation_git_status",
+  "conversation_git_preview",
+  "conversation_git_push_preview",
+  "conversation_git_cancel",
+  "conversation_git_execute",
+] as const;
+
+export type CodeyApiCommand = (typeof CODEY_API_COMMANDS)[number];
+
+const codeyApiCommandSet = new Set<string>(CODEY_API_COMMANDS);
+
+export function isCodeyApiCommand(command: string): command is CodeyApiCommand {
+  return codeyApiCommandSet.has(command);
+}
+
+export function codeyApiPath(command: string): `/api/${CodeyApiCommand}` {
+  if (!isCodeyApiCommand(command)) {
+    throw new Error(`不允许的 Codey API 命令：${command}`);
+  }
+  return `/api/${command}`;
+}
+
+declare global {
+  interface Window {
+    __codeyRemoteClient?: boolean;
+    __codeyInvokeApi?: (
+      command: CodeyApiCommand,
+      args: Record<string, unknown>,
+    ) => Promise<unknown>;
+  }
+}
+
+/** Cross-module marker: ESM loaders can hand different instances the class. */
+export const CodeyApiErrorMarker: unique symbol = Symbol.for("codey.api.error");
+
+/** A request the Codey bridge answered with an explicit failure. */
+export class CodeyApiError extends Error {
+  readonly [CodeyApiErrorMarker] = true;
+
+  constructor(message: string) {
+    super(message);
+    this.name = "CodeyApiError";
+  }
+}
+
+export function isCodeyApiError(error: unknown): error is CodeyApiError {
+  return typeof error === "object" && error !== null && CodeyApiErrorMarker in error;
+}
+
+export async function invoke<T>(
+  command: CodeyApiCommand,
+  args: Record<string, unknown> = {},
+): Promise<T> {
+  if (typeof window.__codeyInvokeApi !== "function") {
+    throw new Error("Codey bridge 尚未连接，请退出 Codex 后重新启动 Codey");
+  }
+  const value = await window.__codeyInvokeApi(command, args) as { status?: string; message?: string };
+  if (value?.status === "failed") {
+    throw new CodeyApiError(value.message || "Codey bridge 请求失败");
+  }
+  return value as T;
+}

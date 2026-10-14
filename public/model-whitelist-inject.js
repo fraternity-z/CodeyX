@@ -1,0 +1,3253 @@
+// Keep Codex's native model allowlist aligned with the current Codey channel.
+(() => {
+  const patchVersion = "66";
+  const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
+  const officialProviderId = "openai";
+  const localRouterProviderId = "codey_router";
+  const legacyRemoteCompactionProviderId = "codey_router_remote";
+  const routerProviderIds = new Set([localRouterProviderId, legacyRemoteCompactionProviderId]);
+  const legacyOfficialRouteProviderIds = new Set([
+    officialProviderId,
+    "local-official",
+  ]);
+  const gatewayProviderIds = new Set([
+    officialProviderId,
+    localRouterProviderId,
+    legacyRemoteCompactionProviderId,
+  ]);
+  const existingPatch = window.__codeyModelWhitelistPatch;
+  if (existingPatch?.version === patchVersion
+    && existingPatch.nativeSelectionOnly === nativeSelectionOnly) {
+    void existingPatch.refresh();
+    return;
+  }
+  existingPatch?.dispose?.();
+
+  const modelConfigId = "107580212";
+  const modelCatalogPath = "/codex-model-catalog";
+  const fastServiceTierId = "priority";
+  const fastSpeedTierId = "fast";
+  const interactionEvents = ["pointerdown", "click", "focusin", "keydown"];
+  const routeSelectionEvents = new Set(["pointerdown", "click"]);
+  const groupedMenuStyleId = "codey-model-route-menu-style";
+  const groupedMenuSelector = "[role='menu'], [role='listbox']";
+  const groupedMenuItemSelector = "[role='menuitem'], [role='menuitemradio'], [role='option']";
+  const subagentModelLabelSelector = "[class*='max-w-1/2']";
+  const modelPickerTriggerSelector = "button[aria-haspopup='menu'], button[aria-haspopup='listbox'], [data-model-picker-view-toggle]";
+  const modelQueryKey = ["models", "list"];
+  const modelResponseEvent = "message";
+  const modelRequestEvent = "codex-message-from-view";
+  const routableOutgoingMessageTypes = new Set([
+    "mcp-request",
+    "thread-prewarm-start",
+  ]);
+  const modelBoundRequestMethods = new Set([
+    "thread/start",
+    "thread/resume",
+    "thread/fork",
+    "thread/settings/update",
+    "turn/start",
+  ]);
+  const threadProviderRequestMethods = new Set([
+    "thread/start",
+    "thread/resume",
+    "thread/fork",
+  ]);
+  const providerBoundExistingThreadMethods = new Set([
+    "thread/resume",
+    "thread/settings/update",
+    "turn/start",
+  ]);
+  const routeMetadataParam = "responsesapiClientMetadata";
+  const routeMetadataKey = "codey_route";
+  const persistedThreadRoutesKey = "codey.thread-route-bindings.v1";
+  const persistedRequestedRoutesKey = "codey.thread-requested-routes.v1";
+  const persistedDefaultModelHistoryKey = "codey.default-model-history.v1";
+  let catalog = {
+    loaded: false,
+    models: [],
+    defaultModel: "",
+    modelMetadata: {},
+    routeMetadata: {},
+    modelNamesByKey: new Map(),
+    routes: [],
+    routeBySelectorKey: new Map(),
+    routesBySourceKey: new Map(),
+    routeByRouteProviderSource: new Map(),
+    routeByAnyProviderSource: new Map(),
+    legacyAliases: new Map(),
+    nativeProviderId: "",
+  };
+  let refreshTimer = 0;
+  let refreshUntil = 0;
+  let refreshRetryDelay = 120;
+  let refreshDeliveryInFlight = false;
+  let catalogRequestGeneration = 0;
+  let catalogLoadRequest = null;
+  let catalogRevision = 0;
+  let disposed = false;
+  const fullReactDiscoveryIntervalMs = 10_000;
+  const maxTrackedModelListRequests = 256;
+  const maxKnownModelQueryClients = 8;
+  let nextFullReactDiscoveryAt = 0;
+  const modelListRequestIds = new Set();
+  const knownModelQueryClients = new Set();
+  const nativeFastPermissions = new Map();
+  let originalDispatchEvent = null;
+  let patchedDispatchEvent = null;
+  let groupedMenuTimer = 0;
+  let groupedMenuObserver = null;
+  const groupedMenuTextObservers = new Map();
+  const subagentModelLabels = new Map();
+  const modelPickerTriggers = new Map();
+  const patchedProviderKey = Symbol("codeyPatchedModelProvider");
+  const patchedRouteKey = Symbol("codeyPatchedRoute");
+  const blockedProviderRequestKey = Symbol("codeyBlockedProviderRequest");
+  // Codex persists a thread's original provider in rollout data, while Codey
+  // can resume that same thread through the local router for this process.
+  // Keep the two identities separate so a later thread/list response cannot
+  // erase a successful runtime migration.
+  const threadPersistedProviders = new Map();
+  const threadRuntimeProviders = new Map();
+  const unconfirmedThreadProviders = new Set();
+  const threadRoutes = new Map();
+  // A blocked provider migration is an intent for the next process, not an active
+  // binding. Keep it separate so reopening a loaded thread cannot fake migration.
+  const threadRequestedRoutes = new Map();
+  const pendingThreadRequests = new Map();
+  const maxTrackedThreadProviders = 2048;
+  const maxPendingThreadRequests = 256;
+  const pendingRouteIntentMaxAgeMs = 5 * 60 * 1000;
+  let pendingRouteIntent = null;
+  const supersededModelMenuLabels = new Map();
+  const maxSupersededModelMenuLabels = 512;
+  const supersededDefaultRoutes = [];
+  const maxSupersededDefaultRoutes = 8;
+  // The default most recently delivered to this renderer. Codex keeps its own
+  // saved model preference, which outranks the catalog default, so a default
+  // that changed while Codex was closed (or before a patch reload) must still
+  // be recognised as stale on the next launch.
+  let lastDeliveredDefaultRoute = null;
+  let providerMismatchNoticeTimer = 0;
+  let deliveryState = {
+    revision: 0,
+    statsigClients: 0,
+    notifiedClients: 0,
+    queryClients: 0,
+    queryEntries: 0,
+    pendingQueryEntries: 0,
+    reactContainers: 0,
+    responsePatchInstalled: false,
+  };
+
+  const rememberBounded = (set, value, limit) => {
+    set.delete(value);
+    set.add(value);
+    while (set.size > limit) {
+      set.delete(set.values().next().value);
+    }
+  };
+  const rememberBoundedMap = (map, key, value, limit) => {
+    map.delete(key);
+    map.set(key, value);
+    while (map.size > limit) {
+      map.delete(map.keys().next().value);
+    }
+  };
+  const rememberBoundedThreadPersistedProvider = (threadId, providerId) => {
+    rememberBoundedMap(
+      threadPersistedProviders,
+      threadId,
+      providerId,
+      maxTrackedThreadProviders,
+    );
+  };
+  const rememberBoundedThreadRuntimeProvider = (threadId, providerId) => {
+    rememberBoundedMap(
+      threadRuntimeProviders,
+      threadId,
+      providerId,
+      maxTrackedThreadProviders,
+    );
+  };
+  const persistThreadRoutes = (routes = threadRoutes, key = persistedThreadRoutesKey) => {
+    try {
+      window.localStorage?.setItem(
+        key,
+        JSON.stringify(Array.from(routes.entries())),
+      );
+    } catch {
+      // Routing remains safe for this launch when renderer storage is unavailable.
+    }
+  };
+  const rememberBoundedThreadRoute = (threadId, route, routes = threadRoutes, key = persistedThreadRoutesKey) => {
+    const routeProviderId = requestProviderId(route?.routeProviderId);
+    const sourceModel = typeof route?.sourceModel === "string"
+      ? route.sourceModel.trim()
+      : "";
+    if (!threadId || !routeProviderId || !sourceModel) return;
+    const previous = routes.get(threadId);
+    const changed = !previous
+      || modelKey(previous.routeProviderId) !== modelKey(routeProviderId)
+      || modelKey(previous.sourceModel) !== modelKey(sourceModel);
+    rememberBoundedMap(
+      routes,
+      threadId,
+      { routeProviderId, sourceModel },
+      maxTrackedThreadProviders,
+    );
+    // Refresh the in-memory LRU on every turn, but avoid synchronously
+    // serializing the entire binding table when the persisted value is unchanged.
+    if (changed) persistThreadRoutes(routes, key);
+  };
+  const clearRequestedThreadRoute = (threadId) => {
+    if (threadRequestedRoutes.delete(threadId)) persistThreadRoutes(threadRequestedRoutes, persistedRequestedRoutesKey);
+  };
+  const restoreThreadRoutes = (routes = threadRoutes, key = persistedThreadRoutesKey) => {
+    try {
+      const entries = JSON.parse(window.localStorage?.getItem(key) || "[]");
+      if (!Array.isArray(entries)) return;
+      for (const entry of entries.slice(-maxTrackedThreadProviders)) {
+        if (!Array.isArray(entry) || entry.length !== 2) continue;
+        const threadId = typeof entry[0] === "string" ? entry[0].trim() : "";
+        const route = entry[1];
+        const routeProviderId = requestProviderId(route?.routeProviderId);
+        const sourceModel = typeof route?.sourceModel === "string"
+          ? route.sourceModel.trim()
+          : "";
+        if (threadId && routeProviderId && sourceModel) {
+          routes.set(threadId, { routeProviderId, sourceModel });
+        }
+      }
+    } catch {
+      // Ignore stale or user-cleared renderer storage.
+    }
+  };
+
+  const modelKey = (value) => String(value || "").trim().toLowerCase();
+  const routeFromNestedIndex = (index, providerId, sourceModel) => {
+    const providerKey = modelKey(providerId);
+    const sourceKey = modelKey(sourceModel);
+    return providerKey && sourceKey
+      ? index.get(providerKey)?.get(sourceKey) || null
+      : null;
+  };
+  const addRouteToNestedIndex = (index, providerId, sourceModel, route) => {
+    const providerKey = modelKey(providerId);
+    const sourceKey = modelKey(sourceModel);
+    if (!providerKey || !sourceKey) return;
+    let bySource = index.get(providerKey);
+    if (!bySource) {
+      bySource = new Map();
+      index.set(providerKey, bySource);
+    }
+    if (!bySource.has(sourceKey)) bySource.set(sourceKey, route);
+  };
+  const uniqueModelNames = (values) => {
+    const seen = new Set();
+    return (Array.isArray(values) ? values : []).reduce((models, value) => {
+      if (typeof value !== "string") return models;
+      const model = value.trim();
+      const key = modelKey(model);
+      if (!key || seen.has(key)) return models;
+      seen.add(key);
+      models.push(model);
+      return models;
+    }, []);
+  };
+  const canonicalModelName = (models, value) => {
+    const key = modelKey(value);
+    return key ? models.find((model) => modelKey(model) === key) || "" : "";
+  };
+  const requestProviderId = (providerId) => (
+    typeof providerId === "string" ? providerId.trim() : ""
+  );
+  const paramsProviderId = (params) => {
+    if (!params || typeof params !== "object") return "";
+    for (const value of [params.modelProvider, params.model_provider]) {
+      const providerId = requestProviderId(value);
+      if (providerId) return providerId;
+    }
+    return "";
+  };
+  const isGatewayProviderId = (providerId) => (
+    gatewayProviderIds.has(modelKey(providerId))
+  );
+  const isOfficialRoute = (route) => (
+    route?.officialAccount === true
+    || legacyOfficialRouteProviderIds.has(modelKey(route?.routeProviderId))
+  );
+  const providersAreCompatible = (method, currentProviderId, targetProviderId, threadId) => (
+    modelKey(currentProviderId) === modelKey(targetProviderId)
+    || (routerProviderIds.has(modelKey(currentProviderId))
+      && routerProviderIds.has(modelKey(targetProviderId)))
+    || (
+      method === "thread/resume"
+      && routerProviderIds.has(modelKey(targetProviderId))
+      && !threadRuntimeProviders.has(threadId)
+    )
+  );
+  const markPatchedProvider = (params, providerId) => {
+    try {
+      Object.defineProperty(params, patchedProviderKey, {
+        value: providerId,
+        configurable: true,
+      });
+    } catch {
+      // Ignore non-extensible request objects; the serialized request payload is unchanged.
+    }
+    return params;
+  };
+  const markPatchedRoute = (params, route) => {
+    try {
+      Object.defineProperty(params, patchedRouteKey, {
+        value: route,
+        configurable: true,
+      });
+    } catch {
+      // Ignore non-extensible request objects; the serialized request payload is unchanged.
+    }
+    return params;
+  };
+  const threadIdFromParams = (params) => (
+    typeof params?.threadId === "string" ? params.threadId.trim() : ""
+  );
+  const knownThreadProvider = (params) => {
+    const threadId = threadIdFromParams(params);
+    return requestProviderId(threadRuntimeProviders.get(threadId))
+      || requestProviderId(threadPersistedProviders.get(threadId))
+      || paramsProviderId(params);
+  };
+  const markBlockedProviderRequest = (params, detail) => {
+    try {
+      Object.defineProperty(params, blockedProviderRequestKey, {
+        value: detail,
+        configurable: true,
+      });
+    } catch {
+      // Frozen payloads are cloned by routedRequestParams before this point.
+    }
+    return params;
+  };
+  const routedRequestParams = (method, source, model, route) => {
+    const routeProviderId = requestProviderId(route?.routeProviderId);
+    const threadId = threadIdFromParams(source);
+    const currentProviderId = providerBoundExistingThreadMethods.has(method)
+      ? (threadId ? knownThreadProvider(source) : paramsProviderId(source))
+      : "";
+    const routedProviderId = localRouterProviderId;
+    const turnSendsUpstreamModel = method === "turn/start" && Boolean(routeProviderId);
+    const officialRoute = isOfficialRoute(route);
+    let routedModel = model;
+    if (officialRoute) {
+      routedModel = turnSendsUpstreamModel
+        ? cleanText(route?.sourceModel) || model
+        : cleanText(route?.selectorModel) || cleanText(route?.sourceModel) || model;
+    } else if (turnSendsUpstreamModel) {
+      routedModel = cleanText(route?.sourceModel) || model;
+    }
+    const next = { ...source };
+    // null 表示沿用对话模型；空字符串会让 app-server 报没有可用模型。
+    if (routedModel) next.model = routedModel;
+    delete next.model_provider;
+    if (threadProviderRequestMethods.has(method)) {
+      next.modelProvider = routedProviderId;
+      // Request-local config has higher priority than launch defaults. Keep
+      // provider transport owned by the launcher even for restored tasks.
+      if (source.config && typeof source.config === "object") {
+        next.config = Object.fromEntries(Object.entries(source.config).filter(([key]) => (
+          key !== "model_provider" && !key.startsWith("model_provider.")
+          && key !== "model_providers" && !key.startsWith("model_providers.")
+        )));
+      }
+    } else {
+      // `turn/start` has no modelProvider field. New, forked, and resumed
+      // threads may use the HTTP-only Codey carrier; the persisted rollout
+      // metadata remains untouched by a resume-time override.
+      delete next.modelProvider;
+    }
+    if (method === "turn/start" && routeProviderId) {
+      const existingMetadata = source[routeMetadataParam];
+      next[routeMetadataParam] = {
+        ...(existingMetadata && typeof existingMetadata === "object"
+          ? existingMetadata
+          : {}),
+        [routeMetadataKey]: routeProviderId,
+      };
+    }
+    let blocked = false;
+    if (providerBoundExistingThreadMethods.has(method) && routedProviderId) {
+      // Only an unloaded thread can migrate from an external provider during
+      // resume. Both Codey provider IDs share the same gateway carrier.
+      if (
+        threadId
+        && ((method !== "thread/resume" && unconfirmedThreadProviders.has(threadId)
+          && !routerProviderIds.has(modelKey(currentProviderId))) || (!currentProviderId
+          ? method !== "thread/resume"
+          : !providersAreCompatible(method, currentProviderId, routedProviderId, threadId)))
+      ) {
+        blocked = true;
+        markBlockedProviderRequest(next, {
+          method,
+          threadId,
+          model,
+          targetProviderId: routedProviderId,
+          currentProviderId,
+          routeName: cleanText(route?.routeName),
+          reason: "provider_migration_required",
+        });
+        if (routeProviderId) rememberBoundedThreadRoute(
+          threadId, route, threadRequestedRoutes, persistedRequestedRoutesKey,
+        );
+      }
+    }
+    if (!blocked && threadId && routeProviderId && !threadProviderRequestMethods.has(method)) {
+      rememberBoundedThreadRoute(threadId, route);
+      clearRequestedThreadRoute(threadId);
+    }
+    markPatchedRoute(next, route);
+    return markPatchedProvider(next, routedProviderId);
+  };
+  const cleanText = (value) => (
+    typeof value === "string" ? value.trim().replace(/\s+/g, " ") : ""
+  );
+  const metadataText = (metadata, key) => cleanText(
+    metadata && typeof metadata === "object" ? metadata[key] : "",
+  );
+  const metadataBoolean = (metadata, key) => (
+    Boolean(metadata && typeof metadata === "object" && metadata[key] === true)
+  );
+  const displayNameParts = (displayName) => {
+    const separator = displayName.indexOf(" / ");
+    return separator > 0
+      ? {
+        routeName: cleanText(displayName.slice(0, separator)),
+        modelName: cleanText(displayName.slice(separator + 3)),
+      }
+      : { routeName: "", modelName: cleanText(displayName) };
+  };
+  const modelFallbackName = (modelName) => {
+    const separator = modelName.indexOf("/");
+    return cleanText(separator > 0 ? modelName.slice(separator + 1) : modelName);
+  };
+
+  const sameModelNames = (left, right) => (
+    Array.isArray(left)
+    && left.length === right.length
+    && left.every((value, index) => value === right[index])
+  );
+
+  const normalizedCatalog = (value) => {
+    if (
+      !value
+      || typeof value !== "object"
+      || !["ok", "not_configured"].includes(value.status)
+      || (value.native_selection_only === true) !== nativeSelectionOnly
+    ) {
+      return null;
+    }
+    const models = uniqueModelNames(value.models);
+    if (nativeSelectionOnly && models.length === 0 && value.clear_models !== true) return null;
+    const requestedDefault = [value.default_model, value.model]
+      .map((model) => canonicalModelName(models, model))
+      .find(Boolean);
+    const modelMetadata = Object.fromEntries(
+      (Array.isArray(value.model_metadata) ? value.model_metadata : [])
+        .flatMap((metadata) => {
+          if (
+            !metadata
+            || typeof metadata !== "object"
+            || typeof metadata.model !== "string"
+          ) return [];
+          const model = canonicalModelName(models, metadata.model);
+          return model ? [[model, metadata]] : [];
+        }),
+    );
+    const routeMetadata = nativeSelectionOnly ? {} : Object.fromEntries(
+      Object.entries(modelMetadata).map(([model, metadata]) => {
+        const providerId = typeof metadata.provider_id === "string"
+          ? metadata.provider_id.trim()
+          : "";
+        let sourceModel = [metadata.upstream_model, metadata.source_model]
+          .find((candidate) => typeof candidate === "string" && candidate.trim())
+          ?.trim() || "";
+        const explicitRouteProviderId = typeof metadata.route_provider_id === "string"
+          ? metadata.route_provider_id.trim()
+          : "";
+        const selectorSeparator = model.indexOf("/");
+        const routeProviderId = explicitRouteProviderId
+          || (!isGatewayProviderId(providerId) ? providerId : "")
+          || (selectorSeparator > 0 ? model.slice(0, selectorSeparator).trim() : "")
+          || (modelKey(providerId) === officialProviderId ? officialProviderId : "");
+        const selectorPrefix = `${routeProviderId}/`;
+        if (
+          !metadataText(metadata, "upstream_model")
+          && modelKey(sourceModel) === modelKey(model)
+          && sourceModel.toLowerCase().startsWith(selectorPrefix.toLowerCase())
+        ) {
+          sourceModel = sourceModel.slice(selectorPrefix.length).replace(/#\d+$/, "").trim();
+        }
+        const routeName = typeof metadata.route_name === "string"
+          ? metadata.route_name.trim()
+          : displayNameParts(metadataText(metadata, "display_name")).routeName || providerId;
+        return [model, {
+          selectorModel: model,
+          providerId,
+          routeProviderId,
+          sourceModel,
+          routeName,
+          officialAccount: metadataBoolean(metadata, "official_account"),
+          supportsRemoteCompaction: typeof metadata?.supports_remote_compaction === "boolean"
+            ? metadata.supports_remote_compaction : modelKey(providerId) === legacyRemoteCompactionProviderId,
+        }];
+      }).filter(([, route]) => (
+        route.providerId && route.routeProviderId && route.sourceModel
+      )),
+    );
+    for (const model of models) {
+      if (nativeSelectionOnly) break;
+      if (routeMetadata[model]) continue;
+      const separator = model.indexOf("/");
+      if (separator <= 0) continue;
+      const providerId = model.slice(0, separator).trim();
+      const sourceModel = model.slice(separator + 1).replace(/#\d+$/, "").trim();
+      if (providerId && sourceModel) {
+        routeMetadata[model] = {
+          selectorModel: model,
+          providerId: localRouterProviderId,
+          routeProviderId: providerId,
+          sourceModel,
+          routeName: providerId,
+        };
+      }
+    }
+    const modelNamesByKey = new Map(models.map((model) => [modelKey(model), model]));
+    const routes = [];
+    const routeBySelectorKey = new Map();
+    const routesBySourceKey = new Map();
+    const routeByRouteProviderSource = new Map();
+    const routeByAnyProviderSource = new Map();
+    for (const model of models) {
+      const route = routeMetadata[model];
+      if (!route) continue;
+      routes.push(route);
+      routeBySelectorKey.set(modelKey(model), route);
+      const sourceKey = modelKey(route.sourceModel);
+      if (sourceKey) {
+        const sourceRoutes = routesBySourceKey.get(sourceKey) || [];
+        sourceRoutes.push(route);
+        routesBySourceKey.set(sourceKey, sourceRoutes);
+      }
+      addRouteToNestedIndex(
+        routeByRouteProviderSource,
+        route.routeProviderId,
+        route.sourceModel,
+        route,
+      );
+      addRouteToNestedIndex(
+        routeByAnyProviderSource,
+        route.routeProviderId,
+        route.sourceModel,
+        route,
+      );
+      addRouteToNestedIndex(
+        routeByAnyProviderSource,
+        route.providerId,
+        route.sourceModel,
+        route,
+      );
+    }
+    const legacyAliases = new Map(catalog.legacyAliases);
+    for (const route of catalog.routes) {
+      if (modelKey(route.selectorModel) !== modelKey(route.sourceModel)) {
+        legacyAliases.set(modelKey(route.selectorModel), route.sourceModel);
+      }
+    }
+    for (const [alias, source] of Object.entries(value.legacy_model_aliases || {})) {
+      const separator = alias.indexOf("/");
+      if (typeof source === "string" && source.trim() && separator > 0
+        && modelKey(alias.slice(separator + 1)) === modelKey(source)) {
+        legacyAliases.set(modelKey(alias), source.trim());
+      }
+    }
+    const routePrefixByProviderKey = new Map();
+    const rememberRoutePrefix = (providerId, prefix) => {
+      const key = modelKey(providerId);
+      if (!key || !prefix || routePrefixByProviderKey.has(key)) return;
+      routePrefixByProviderKey.set(key, prefix);
+    };
+    const bracketPrefix = (displayName) => {
+      const match = /^\[([^\[\]]+)\](?=\s+\S)/.exec(displayName);
+      return match ? cleanText(match[1]) : "";
+    };
+    for (const [model, metadata] of Object.entries(modelMetadata)) {
+      const prefix = metadataText(metadata, "route_prefix")
+        || bracketPrefix(metadataText(metadata, "display_name"));
+      if (!prefix) continue;
+      rememberRoutePrefix(metadataText(metadata, "route_provider_id"), prefix);
+      const separator = model.indexOf("/");
+      if (separator > 0) rememberRoutePrefix(model.slice(0, separator), prefix);
+    }
+    const historicalRouteProviderKeys = new Set();
+    for (const alias of legacyAliases.keys()) {
+      const separator = alias.indexOf("/");
+      if (separator > 0) historicalRouteProviderKeys.add(alias.slice(0, separator));
+    }
+    return {
+      loaded: true,
+      models,
+      defaultModel: requestedDefault?.trim() || models[0] || "",
+      modelMetadata,
+      routeMetadata,
+      modelNamesByKey,
+      routes,
+      routeBySelectorKey,
+      routesBySourceKey,
+      routeByRouteProviderSource,
+      routeByAnyProviderSource,
+      legacyAliases,
+      routePrefixByProviderKey,
+      historicalRouteProviderKeys,
+      nativeProviderId: nativeSelectionOnly ? requestProviderId(value.native_model_provider) : "",
+    };
+  };
+
+  const reasoningEffortName = (value) => (
+    typeof value === "string"
+      ? value.trim()
+      : typeof value?.reasoningEffort === "string"
+        ? value.reasoningEffort.trim()
+        : ""
+  );
+
+  const reasoningEffortDescriptors = (values) => uniqueModelNames(
+    (Array.isArray(values) ? values : []).map(reasoningEffortName),
+  ).map((reasoningEffort) => ({
+    reasoningEffort,
+    description: `${reasoningEffort} effort`,
+  }));
+
+  const sameReasoningEffortNames = (left, right) => (
+    Array.isArray(left)
+    && left.length === right.length
+    && left.every((value, index) => (
+      reasoningEffortName(value) === reasoningEffortName(right[index])
+    ))
+  );
+
+  const fallbackReasoningEfforts = () => reasoningEffortDescriptors([
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]);
+
+  const fastServiceTier = () => ({
+    id: fastServiceTierId,
+    name: "Fast",
+    description: "1.5x speed, increased usage",
+  });
+
+  const nativeFastServiceTiers = (value) => {
+    const tiers = Array.isArray(value) ? value : [];
+    const fastTierIndex = tiers.findIndex((tier) => tier?.id === fastServiceTierId);
+    if (fastTierIndex < 0) return [...tiers, fastServiceTier()];
+    const currentFastTier = tiers[fastTierIndex];
+    if (
+      !currentFastTier
+      || typeof currentFastTier !== "object"
+      || !Object.hasOwn(currentFastTier, "iconKind")
+    ) return tiers;
+    const nativeFastTier = { ...currentFastTier };
+    delete nativeFastTier.iconKind;
+    const nextTiers = [...tiers];
+    nextTiers[fastTierIndex] = nativeFastTier;
+    return nextTiers;
+  };
+
+  const nativeFastSpeedTiers = (value) => {
+    const tiers = Array.isArray(value) ? value : [];
+    return tiers.includes(fastSpeedTierId) ? tiers : [...tiers, fastSpeedTierId];
+  };
+
+  const generatedRouteProviderId = (providerId) => {
+    const key = modelKey(providerId);
+    return key.startsWith("codey-official-account-") || key.startsWith("route-");
+  };
+  // A historical thread can keep a route alias after that model leaves the
+  // enabled catalog. Sibling models on the same route still carry its short
+  // name; a removed route at least drops the provider id.
+  const routeQualifiedDisplayName = (sourceCatalog, modelName) => {
+    const model = cleanText(modelName);
+    const separator = model.indexOf("/");
+    if (separator <= 0) return "";
+    const encodedProviderId = model.slice(0, separator).trim();
+    let providerId = encodedProviderId;
+    try {
+      providerId = decodeURIComponent(encodedProviderId);
+    } catch {
+      return "";
+    }
+    const upstream = cleanText(model.slice(separator + 1).replace(/#\d+$/, ""));
+    if (!providerId || !upstream) return "";
+    const prefix = sourceCatalog.routePrefixByProviderKey?.get(modelKey(providerId))
+      || sourceCatalog.routePrefixByProviderKey?.get(modelKey(encodedProviderId))
+      || "";
+    if (prefix) return `[${prefix}] ${upstream}`;
+    const providerKey = modelKey(providerId);
+    if (
+      generatedRouteProviderId(providerId)
+      || sourceCatalog.historicalRouteProviderKeys?.has(providerKey)
+      || sourceCatalog.historicalRouteProviderKeys?.has(modelKey(encodedProviderId))
+    ) {
+      return upstream;
+    }
+    return "";
+  };
+
+  const modelPresentationFromCatalog = (sourceCatalog, modelName, current = null) => {
+    const canonicalModelName = sourceCatalog.modelNamesByKey?.get(modelKey(modelName)) || modelName;
+    const metadata = sourceCatalog.modelMetadata[canonicalModelName];
+    const route = sourceCatalog.routeMetadata[canonicalModelName];
+    const metadataDisplayName = metadataText(metadata, "display_name");
+    const displayParts = displayNameParts(metadataDisplayName);
+    const routeName = typeof metadata?.route_name === "string"
+      ? metadata.route_name.trim()
+      : route?.routeName ?? (displayParts.routeName || cleanText(route?.providerId) || "");
+    const routePrefix = metadataText(metadata, "route_prefix")
+      || /^\[([^\[\]]+)\]/.exec(metadataDisplayName)?.[1]?.trim()
+      || sourceCatalog.routePrefixByProviderKey?.get(modelKey(
+        metadataText(metadata, "route_provider_id") || route?.routeProviderId || route?.providerId,
+      ))
+      || Array.from(routeName).slice(0, 2).join("");
+    const sourceModel = metadataText(metadata, "source_model") || route?.sourceModel || "";
+    const modelLabel = metadataText(metadata, "model_display_name")
+      || sourceModel
+      || displayParts.modelName
+      || modelFallbackName(canonicalModelName);
+    const currentDisplayName = cleanText(current?.displayName);
+    const qualifiedDisplayName = metadata
+      ? ""
+      : routeQualifiedDisplayName(sourceCatalog, modelName);
+    const displayName = metadataDisplayName
+      || (routeName && modelLabel ? `${routeName} / ${modelLabel}` : "")
+      || qualifiedDisplayName
+      || currentDisplayName
+      || canonicalModelName;
+    return {
+      routeName,
+      routeLabel: routeName ? (routePrefix ? `[${routePrefix}] ${routeName}` : routeName) : routePrefix,
+      modelName: modelLabel,
+      displayName,
+      providerId: cleanText(route?.providerId) || metadataText(metadata, "provider_id"),
+      sourceModel: sourceModel || canonicalModelName,
+    };
+  };
+
+  const modelPresentation = (modelName, current = null) => (
+    modelPresentationFromCatalog(catalog, modelName, current)
+  );
+
+  const modelDescriptor = (modelName, current = null) => {
+    const metadata = catalog.modelMetadata[modelName];
+    const descriptorMetadata = {
+      serviceTiers: nativeFastServiceTiers(current?.serviceTiers),
+      additionalSpeedTiers: nativeFastSpeedTiers(current?.additionalSpeedTiers),
+      defaultServiceTier: Object.hasOwn(current || {}, "defaultServiceTier")
+        ? current.defaultServiceTier
+        : null,
+      contextWindow: Object.hasOwn(metadata || {}, "context_window") ? metadata.context_window : current?.contextWindow,
+      maxContextWindow: Object.hasOwn(metadata || {}, "max_context_window") ? metadata.max_context_window : current?.maxContextWindow,
+      effectiveContextWindowPercent: Object.hasOwn(metadata || {}, "effective_context_window_percent") ? metadata.effective_context_window_percent : current?.effectiveContextWindowPercent,
+      autoCompactTokenLimit: Object.hasOwn(metadata || {}, "auto_compact_token_limit") ? metadata.auto_compact_token_limit : current?.autoCompactTokenLimit,
+      contextSource: metadata?.codey_context_source ?? current?.contextSource,
+    };
+    const presentation = modelPresentation(modelName, current);
+    const displayName = presentation.displayName;
+    const supportedReasoningEfforts = reasoningEffortDescriptors(
+      metadata?.supported_reasoning_efforts,
+    );
+    if (nativeSelectionOnly && current && supportedReasoningEfforts.length === 0) {
+      return current.hidden !== true && Object.entries(descriptorMetadata).every(([key, value]) => current[key] === value)
+        ? current : { ...current, ...descriptorMetadata, hidden: false };
+    }
+    const currentReasoningEfforts = reasoningEffortDescriptors(
+      current?.supportedReasoningEfforts,
+    );
+    const resolvedReasoningEfforts = supportedReasoningEfforts.length > 0
+      ? supportedReasoningEfforts
+      : currentReasoningEfforts.length > 0
+        ? currentReasoningEfforts
+        : fallbackReasoningEfforts();
+    const supportedNames = resolvedReasoningEfforts.map(reasoningEffortName);
+    const requestedDefault = [
+      metadata?.default_reasoning_effort,
+      current?.defaultReasoningEffort,
+      "medium",
+      "low",
+      supportedNames[0],
+    ].find((effort) => (
+      typeof effort === "string" && supportedNames.includes(effort.trim())
+    ));
+    const defaultReasoningEffort = requestedDefault?.trim() || "medium";
+    if (nativeSelectionOnly) {
+      if (current) {
+        return (
+          current.hidden !== true
+          && Object.entries(descriptorMetadata).every(([key, value]) => current[key] === value)
+          && current.defaultReasoningEffort === defaultReasoningEffort
+          && sameReasoningEffortNames(
+            current.supportedReasoningEfforts,
+            resolvedReasoningEfforts,
+          )
+        ) ? current : {
+          ...current,
+          ...descriptorMetadata,
+          hidden: false,
+          defaultReasoningEffort,
+          supportedReasoningEfforts: resolvedReasoningEfforts,
+        };
+      }
+      return {
+        model: modelName,
+        ...descriptorMetadata,
+        id: modelName,
+        slug: modelName,
+        name: metadata?.display_name || modelName,
+        displayName: metadata?.display_name || modelName,
+        hidden: false,
+        isDefault: false,
+        defaultReasoningEffort,
+        supportedReasoningEfforts: resolvedReasoningEfforts,
+      };
+    }
+    return {
+      ...(current && typeof current === "object" ? current : {}),
+      ...descriptorMetadata,
+      model: modelName,
+      id: typeof current?.id === "string" && current.id ? current.id : modelName,
+      slug: typeof current?.slug === "string" && current.slug ? current.slug : modelName,
+      name: displayName
+        || (typeof current?.name === "string" && current.name ? current.name : modelName),
+      displayName,
+      routeName: presentation.routeName,
+      providerName: presentation.routeName,
+      providerId: presentation.providerId,
+      sourceModel: presentation.sourceModel,
+      codeyRouteName: presentation.routeName,
+      codeyModelName: presentation.modelName,
+      description: typeof current?.description === "string" && current.description
+        ? current.description
+        : presentation.routeName || "Custom model",
+      hidden: false,
+      isDefault: modelName === catalog.defaultModel,
+      defaultReasoningEffort,
+      supportedReasoningEfforts: resolvedReasoningEfforts,
+    };
+  };
+
+  const sameReasoningEfforts = (left, right) => (
+    Array.isArray(left)
+    && left.every((value) => (
+      value
+      && typeof value === "object"
+      && typeof value.reasoningEffort === "string"
+      && value.reasoningEffort.trim()
+    ))
+    && sameReasoningEffortNames(left, right)
+  );
+
+  const sameModelMetadata = (left, right, models) => models.every((modelName) => {
+    const leftMetadata = left[modelName];
+    const rightMetadata = right[modelName];
+    if (!leftMetadata || !rightMetadata) return leftMetadata === rightMetadata;
+    return (
+      leftMetadata.default_reasoning_effort === rightMetadata.default_reasoning_effort
+      && leftMetadata.context_window === rightMetadata.context_window
+      && leftMetadata.max_context_window === rightMetadata.max_context_window
+      && leftMetadata.effective_context_window_percent === rightMetadata.effective_context_window_percent
+      && leftMetadata.auto_compact_token_limit === rightMetadata.auto_compact_token_limit
+      && leftMetadata.codey_context_source === rightMetadata.codey_context_source
+      && leftMetadata.display_name === rightMetadata.display_name
+      && leftMetadata.route_name === rightMetadata.route_name
+      && leftMetadata.route_prefix === rightMetadata.route_prefix
+      && leftMetadata.model_display_name === rightMetadata.model_display_name
+      && leftMetadata.provider_id === rightMetadata.provider_id
+      && leftMetadata.source_model === rightMetadata.source_model
+      && leftMetadata.route_provider_id === rightMetadata.route_provider_id
+      && leftMetadata.official_account === rightMetadata.official_account
+      && leftMetadata.upstream_model === rightMetadata.upstream_model
+      && sameReasoningEffortNames(
+        leftMetadata.supported_reasoning_efforts,
+        rightMetadata.supported_reasoning_efforts,
+      )
+    );
+  });
+
+  const sameCatalog = (left, right) => (
+    left.loaded
+    && sameModelNames(left.models, right.models)
+    && left.defaultModel === right.defaultModel
+    && left.nativeProviderId === right.nativeProviderId
+    && left.legacyAliases.size === right.legacyAliases.size
+    && Array.from(left.legacyAliases).every(([alias, source]) => right.legacyAliases.get(alias) === source)
+    && sameModelMetadata(left.modelMetadata, right.modelMetadata, right.models)
+  );
+
+  const modelArrayLooksPatchable = (value, allowEmpty = false) => (
+    Array.isArray(value)
+    && (allowEmpty || value.length > 0)
+    && Array.from(value).every((item) => (
+      item
+      && typeof item === "object"
+      && typeof item.model === "string"
+    ))
+  );
+
+  const patchedModelArray = (models, allowEmpty = false) => {
+    if (!catalog.loaded || !modelArrayLooksPatchable(models, allowEmpty)) return null;
+    const existing = new Map(models.map((item) => [modelKey(item.model), item]));
+    const nextModels = catalog.models.map((modelName) => (
+      modelDescriptor(modelName, existing.get(modelKey(modelName)))
+    ));
+    if (nativeSelectionOnly) {
+      return models.length === nextModels.length
+        && models.every((model, index) => model === nextModels[index])
+        ? null : nextModels;
+    }
+    const unchanged = (
+      models.length === nextModels.length
+      && models.every((model, index) => (
+        model?.model === nextModels[index]?.model
+        && model?.name === nextModels[index]?.name
+        && model?.displayName === nextModels[index]?.displayName
+        && model?.routeName === nextModels[index]?.routeName
+        && model?.providerName === nextModels[index]?.providerName
+        && model?.providerId === nextModels[index]?.providerId
+        && model?.sourceModel === nextModels[index]?.sourceModel
+        && model?.codeyRouteName === nextModels[index]?.codeyRouteName
+        && model?.codeyModelName === nextModels[index]?.codeyModelName
+        && model?.hidden === false
+        && model?.isDefault === nextModels[index]?.isDefault
+        && model?.defaultReasoningEffort === nextModels[index]?.defaultReasoningEffort
+        && model?.contextWindow === nextModels[index]?.contextWindow
+        && model?.maxContextWindow === nextModels[index]?.maxContextWindow
+        && model?.effectiveContextWindowPercent === nextModels[index]?.effectiveContextWindowPercent
+        && model?.autoCompactTokenLimit === nextModels[index]?.autoCompactTokenLimit
+        && model?.contextSource === nextModels[index]?.contextSource
+        && sameReasoningEfforts(
+          model?.supportedReasoningEfforts,
+          nextModels[index]?.supportedReasoningEfforts,
+        )
+        && model?.serviceTiers === nextModels[index]?.serviceTiers
+        && model?.additionalSpeedTiers === nextModels[index]?.additionalSpeedTiers
+        && model?.defaultServiceTier === nextModels[index]?.defaultServiceTier
+      ))
+    );
+    return unchanged ? null : nextModels;
+  };
+
+  const patchedModelPayload = (value) => {
+    if (!catalog.loaded || !value || typeof value !== "object") {
+      return { changed: false, recognized: false, value };
+    }
+    if (Array.isArray(value)) {
+      const recognized = modelArrayLooksPatchable(value, true);
+      const models = patchedModelArray(value, true);
+      return models
+        ? { changed: true, recognized, value: models }
+        : { changed: false, recognized, value };
+    }
+
+    let changed = false;
+    let recognized = false;
+    const next = { ...value };
+    for (const key of ["data", "models"]) {
+      const allowEmpty = key === "data"
+        ? ("nextCursor" in value || "next_cursor" in value)
+        : (
+          "defaultModel" in value
+          || "default_model" in value
+          || "hasModelSupportingMaxReasoningEffort" in value
+        );
+      recognized ||= modelArrayLooksPatchable(value[key], allowEmpty);
+      const models = patchedModelArray(value[key], allowEmpty);
+      if (!models) continue;
+      next[key] = models;
+      changed = true;
+    }
+    for (const key of ["result", "message"]) {
+      if (!value[key] || typeof value[key] !== "object") continue;
+      const nested = patchedModelPayload(value[key]);
+      recognized ||= nested.recognized;
+      if (!nested.changed) continue;
+      next[key] = nested.value;
+      changed = true;
+    }
+    if (
+      Array.isArray(value.availableModels)
+      && !sameModelNames(value.availableModels, catalog.models)
+    ) {
+      next.availableModels = [...catalog.models];
+      changed = true;
+    }
+    if (
+      Array.isArray(value.available_models)
+      && !sameModelNames(value.available_models, catalog.models)
+    ) {
+      next.available_models = [...catalog.models];
+      changed = true;
+    }
+    if (!nativeSelectionOnly && "defaultModel" in value && catalog.defaultModel) {
+      if (typeof value.defaultModel === "string" && value.defaultModel !== catalog.defaultModel) {
+        next.defaultModel = catalog.defaultModel;
+        changed = true;
+      } else if (
+        value.defaultModel
+        && typeof value.defaultModel === "object"
+        && value.defaultModel.model !== catalog.defaultModel
+      ) {
+        const models = next.models || value.models;
+        next.defaultModel = Array.isArray(models)
+          ? models.find((model) => model?.model === catalog.defaultModel)
+            || modelDescriptor(catalog.defaultModel)
+          : modelDescriptor(catalog.defaultModel);
+        changed = true;
+      }
+    }
+    return { changed, recognized, value: changed ? next : value };
+  };
+
+  const patchedModelConfig = (config) => {
+    if (
+      !catalog.loaded
+      || !config
+      || typeof config !== "object"
+      || !config.value
+      || typeof config.value !== "object"
+    ) {
+      return config;
+    }
+    const value = config.value;
+    if (
+      sameModelNames(value.available_models, catalog.models)
+      && (nativeSelectionOnly || value.default_model === catalog.defaultModel)
+    ) {
+      return config;
+    }
+    const nextConfig = {
+      ...config,
+      value: {
+        ...value,
+        available_models: [...catalog.models],
+        ...(nativeSelectionOnly ? {} : { default_model: catalog.defaultModel }),
+      },
+    };
+    try {
+      config.value = nextConfig.value;
+      if (config.value === nextConfig.value) return config;
+    } catch {
+      // Frozen Statsig results are returned as a shallow copy by the wrapper.
+    }
+    return nextConfig;
+  };
+
+  const addConfigReference = (references, parent, key) => {
+    if (!parent || typeof parent !== "object" || !(key in parent)) return;
+    references.push({ parent, key });
+  };
+
+  const statsigModelConfigReferences = (client) => {
+    const references = [];
+    const memoCache = client?._memoCache;
+    if (memoCache && typeof memoCache === "object") {
+      Object.keys(memoCache)
+        .filter((key) => key.includes(modelConfigId))
+        .forEach((key) => addConfigReference(references, memoCache, key));
+    }
+    [
+      client?._store?._valuesForExternalUse?.dynamic_configs,
+      client?._store?._values?._values?.dynamic_configs,
+      client?._store?._values?.dynamic_configs,
+    ].forEach((configs) => addConfigReference(references, configs, modelConfigId));
+    return references;
+  };
+
+  const patchStatsigClient = (client) => {
+    if (!client || typeof client !== "object") return false;
+    let changed = false;
+    const memoCache = client._memoCache;
+    if (memoCache instanceof Map) {
+      for (const [key, current] of memoCache.entries()) {
+        if (!String(key).includes(modelConfigId)) continue;
+        const alreadyPatched = (
+          sameModelNames(current?.value?.available_models, catalog.models)
+          && (nativeSelectionOnly || current?.value?.default_model === catalog.defaultModel)
+        );
+        const next = patchedModelConfig(current);
+        if (next !== current) {
+          try {
+            memoCache.set(key, next);
+          } catch {
+            // The getDynamicConfig wrapper still fixes immutable cache entries.
+          }
+        }
+        if (!alreadyPatched) changed = true;
+      }
+    }
+    for (const { parent, key } of statsigModelConfigReferences(client)) {
+      const current = parent[key];
+      const alreadyPatched = (
+        sameModelNames(current?.value?.available_models, catalog.models)
+        && (nativeSelectionOnly || current?.value?.default_model === catalog.defaultModel)
+      );
+      const next = patchedModelConfig(current);
+      if (next !== current) {
+        try {
+          parent[key] = next;
+        } catch {
+          // The getDynamicConfig wrapper still fixes immutable cache entries.
+        }
+      }
+      if (!alreadyPatched) changed = true;
+    }
+
+    const currentGetter = client.getDynamicConfig;
+    if (
+      typeof currentGetter === "function"
+      && currentGetter.__codeyModelWhitelistPatchVersion !== patchVersion
+    ) {
+      const originalGetter = currentGetter.bind(client);
+      const wrappedGetter = (name, options) => {
+        const result = originalGetter(name, options);
+        return String(name) === modelConfigId ? patchedModelConfig(result) : result;
+      };
+      Object.defineProperty(wrappedGetter, "__codeyModelWhitelistPatchVersion", {
+        value: patchVersion,
+      });
+      try {
+        client.getDynamicConfig = wrappedGetter;
+        changed = client.getDynamicConfig === wrappedGetter || changed;
+      } catch {
+        // A later refresh retries if Statsig temporarily exposes a readonly API.
+      }
+    }
+    return changed;
+  };
+
+  const statsigClients = window.__codeySharedRuntime.statsigClients;
+
+  const notifyStatsigClients = () => {
+    let notified = 0;
+    for (const client of statsigClients()) {
+      if (typeof client.$emt !== "function") continue;
+      try {
+        client.$emt({ name: "values_updated" });
+        notified += 1;
+      } catch {
+        // A later refresh retries transient Statsig subscription failures.
+      }
+    }
+    return notified;
+  };
+
+  const applyModelWhitelist = () => {
+    if (!catalog.loaded || disposed) return false;
+    let changed = false;
+    statsigClients().forEach((client) => {
+      if (patchStatsigClient(client)) changed = true;
+    });
+    return changed;
+  };
+
+  const ensureGroupedMenuStyles = () => {
+    if (
+      document.getElementById?.(groupedMenuStyleId)
+      || typeof document.createElement !== "function"
+    ) return;
+    const style = document.createElement("style");
+    if (!style) return;
+    style.id = groupedMenuStyleId;
+    style.textContent = `
+      .codey-model-route-heading {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin: 8px 8px 4px;
+        padding: 0 2px;
+        color: #8b949e;
+        font-size: 11px;
+        font-weight: 600;
+        line-height: 16px;
+        pointer-events: none;
+        user-select: none;
+      }
+      .codey-model-route-heading::after {
+        content: "";
+        flex: 1 1 auto;
+        border-top: 1px solid rgba(139, 148, 158, 0.24);
+      }
+    `;
+    (document.head || document.documentElement || document.body)?.appendChild?.(style);
+  };
+
+  const replaceTextOnce = (element, from, to) => {
+    const source = cleanText(from);
+    const target = cleanText(to);
+    if (!source || !target || source === target) return false;
+    if (typeof document.createTreeWalker === "function") {
+      const walker = document.createTreeWalker(element, 4);
+      let node = walker.nextNode();
+      while (node) {
+        const text = node.nodeValue || "";
+        if (text.includes(source)) {
+          node.nodeValue = text.replace(source, target);
+          return true;
+        }
+        node = walker.nextNode();
+      }
+    }
+    if (cleanText(element.textContent) === source) {
+      element.textContent = target;
+      return true;
+    }
+    return false;
+  };
+
+  const createRouteHeading = (routeName) => {
+    if (typeof document.createElement !== "function") return null;
+    const heading = document.createElement("div");
+    heading.className = "codey-model-route-heading";
+    heading.textContent = routeName;
+    heading.setAttribute("role", "presentation");
+    heading.setAttribute("aria-hidden", "true");
+    heading.dataset.codeyRouteHeading = routeName;
+    return heading;
+  };
+
+  const directRouteHeadings = (parent) => Array.from(parent?.children || [])
+    .filter((child) => Boolean(child?.dataset?.codeyRouteHeading));
+
+  const restoreSupersededModelMenuItem = (item) => {
+    if (!item?.dataset?.codeySupersededModel) return;
+    item.removeAttribute?.("hidden");
+    delete item.dataset.codeySupersededModel;
+    delete item.dataset.codeySupersededLabel;
+  };
+
+  const hideSupersededModelMenuItem = (item, modelName, itemText) => {
+    item.dataset.codeySupersededModel = modelName;
+    item.dataset.codeySupersededLabel = itemText;
+    item.setAttribute?.("hidden", "");
+  };
+
+  const reconcileRouteHeadings = (parent, items) => {
+    const routeStarts = [];
+    let previousRoute = "";
+    for (const { item, routeName } of items) {
+      if (routeName === previousRoute) continue;
+      routeStarts.push({ item, routeName });
+      previousRoute = routeName;
+    }
+    const headings = directRouteHeadings(parent);
+    const children = Array.from(parent?.children || []);
+    const alreadyGrouped = headings.length === routeStarts.length
+      && routeStarts.every(({ item, routeName }) => {
+        const itemIndex = children.indexOf(item);
+        return itemIndex > 0
+          && children[itemIndex - 1]?.dataset?.codeyRouteHeading === routeName;
+      });
+    if (alreadyGrouped) return false;
+    headings.forEach((heading) => heading.remove?.());
+    for (const { item, routeName } of routeStarts) {
+      const heading = createRouteHeading(routeName);
+      if (heading) parent.insertBefore?.(heading, item);
+    }
+    return true;
+  };
+
+  const enhanceGroupedModelMenus = () => {
+    if (nativeSelectionOnly) return;
+    if (!catalog.loaded || disposed || typeof document.querySelectorAll !== "function") return;
+    ensureGroupedMenuStyles();
+    const byMenuLabel = new Map();
+    for (const modelName of catalog.models) {
+      const presentation = modelPresentation(modelName);
+      const displayName = cleanText(presentation.displayName);
+      if (!displayName || !presentation.routeLabel || !presentation.modelName) continue;
+      for (const menuLabel of [displayName, cleanText(modelName)]) {
+        if (menuLabel) byMenuLabel.set(menuLabel, { modelName, presentation, menuLabel });
+      }
+    }
+    const containers = Array.from(document.querySelectorAll(groupedMenuSelector) || []);
+    for (const container of containers) {
+      const items = Array.from(container.querySelectorAll?.(groupedMenuItemSelector) || []);
+      const enhancedItems = [];
+      const existingHeadings = directRouteHeadings(container);
+      const looksLikeModelMenu = existingHeadings.length > 0 || items.some((item) => (
+        Boolean(item.dataset?.codeyRouteModel)
+        || Boolean(item.dataset?.codeySupersededModel)
+        || byMenuLabel.has(cleanText(item.textContent))
+      ));
+      if (!looksLikeModelMenu) continue;
+      const itemParents = new Set(existingHeadings.length > 0 ? [container] : []);
+      for (const item of items) {
+        const itemText = cleanText(item.textContent);
+        const supersededLabel = cleanText(item.dataset?.codeySupersededLabel);
+        if (supersededLabel && supersededLabel !== itemText) {
+          restoreSupersededModelMenuItem(item);
+          delete item.dataset.codeyRouteModel;
+          delete item.dataset.codeyRouteName;
+          item.classList?.remove?.("codey-model-route-item");
+          item.removeAttribute?.("aria-label");
+        }
+        const existingModel = item.dataset?.codeyRouteModel || "";
+        const existingPresentation = existingModel ? modelPresentation(existingModel) : null;
+        const existingPresentationStillMatches = existingPresentation?.routeLabel
+          && catalog.modelNamesByKey.has(modelKey(existingModel))
+          && [existingPresentation.displayName, existingPresentation.modelName]
+            .map(cleanText)
+            .includes(itemText);
+        const matched = existingPresentationStillMatches
+          ? { modelName: existingModel, presentation: existingPresentation, menuLabel: itemText }
+          : byMenuLabel.get(itemText);
+        if (!matched?.presentation?.routeLabel || !matched.presentation.modelName) {
+          const supersededModel = (
+            existingModel && !catalog.modelNamesByKey.has(modelKey(existingModel))
+              ? existingModel
+              : supersededModelMenuLabels.get(itemText)
+          );
+          if (supersededModel) {
+            hideSupersededModelMenuItem(item, supersededModel, itemText);
+            itemParents.add(item.parentElement || container);
+          } else {
+            restoreSupersededModelMenuItem(item);
+          }
+          continue;
+        }
+        restoreSupersededModelMenuItem(item);
+        item.dataset.codeyRouteModel = matched.modelName;
+        item.dataset.codeyRouteName = matched.presentation.routeName;
+        item.classList?.add?.("codey-model-route-item");
+        item.setAttribute?.(
+          "aria-label",
+          `${matched.presentation.routeName || matched.presentation.routeLabel} / ${matched.presentation.modelName}`,
+        );
+        replaceTextOnce(
+          item,
+          matched.menuLabel,
+          matched.presentation.modelName,
+        );
+        enhancedItems.push({ item, routeName: matched.presentation.routeLabel });
+        itemParents.add(item.parentElement || container);
+      }
+      const itemsByParent = new Map();
+      for (const entry of enhancedItems) {
+        const { item } = entry;
+        const parent = item.parentElement || container;
+        const siblings = itemsByParent.get(parent) || [];
+        siblings.push(entry);
+        itemsByParent.set(parent, siblings);
+      }
+      for (const parent of itemParents) {
+        reconcileRouteHeadings(parent, itemsByParent.get(parent) || []);
+      }
+    }
+  };
+
+  const scheduleGroupedModelMenuEnhancement = () => {
+    if (nativeSelectionOnly) return;
+    if (disposed || groupedMenuTimer || !catalog.loaded) return;
+    groupedMenuTimer = window.setTimeout(() => {
+      groupedMenuTimer = 0;
+      enhanceGroupedModelMenus();
+    }, 0);
+  };
+
+  const groupedMenuElement = (node) => {
+    if (node && typeof node.matches === "function") return node;
+    const parent = node?.parentElement;
+    return parent && typeof parent.matches === "function" ? parent : null;
+  };
+
+  // This header is already mounted when CLI fallback injects the renderer.
+  // Update its label here instead of rewriting a lazily loaded native bundle.
+  const isSubagentModelLabel = (element) => (
+    element?.tagName === "SPAN"
+    && element.matches?.(subagentModelLabelSelector)
+    && element.closest?.("[class*='h-toolbar-pane']")
+    && !element.closest?.("[data-turn-key]")
+    && element.parentElement?.querySelector?.("button[aria-label]")
+  );
+
+  const writeSubagentModelLabel = (element, text) => {
+    // Preserve the text node owned by React whenever it is still present.
+    if (element.childNodes?.length === 1 && element.firstChild?.nodeType === 3) {
+      element.firstChild.nodeValue = text;
+    } else {
+      element.textContent = text;
+    }
+  };
+
+  const updateSubagentModelLabel = (element) => {
+    const state = subagentModelLabels.get(element);
+    if (!state || disposed || !catalog.loaded || element.isConnected === false) return;
+    const text = element.textContent || "";
+    if (text !== state.renderedText) {
+      const parts = text.match(/^(.*?)(\s+·\s+[^·]+)?$/);
+      if (!parts) return;
+      const label = parts[1].trim();
+      const suffix = parts[2] || "";
+      // React may replace only the effort while retaining our model label.
+      if (label !== state.displayName) state.model = label;
+      state.suffix = suffix;
+      state.nativeText = `${state.model}${suffix}`;
+    }
+    state.displayName = modelPresentation(state.model).displayName;
+    state.renderedText = `${state.displayName}${state.suffix}`;
+    if (text !== state.renderedText) writeSubagentModelLabel(element, state.renderedText);
+  };
+
+  const stopSubagentModelLabel = (element) => {
+    const state = subagentModelLabels.get(element);
+    if (!state) return;
+    state.observer?.disconnect?.();
+    if (element.textContent === state.renderedText) {
+      writeSubagentModelLabel(element, state.nativeText);
+    }
+    subagentModelLabels.delete(element);
+  };
+
+  const observeSubagentModelLabel = (element) => {
+    if (disposed || !isSubagentModelLabel(element)) return;
+    if (!subagentModelLabels.has(element)) {
+      const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
+      const observer = typeof MutationObserver === "function"
+        ? new MutationObserver(() => updateSubagentModelLabel(element))
+        : null;
+      subagentModelLabels.set(element, { observer });
+      // CharacterData stays confined to the title, never conversation text.
+      observer?.observe(element, { childList: true, characterData: true, subtree: true });
+    }
+    updateSubagentModelLabel(element);
+  };
+
+  const discoverSubagentModelLabels = (node) => {
+    const element = groupedMenuElement(node);
+    if (!element || element.closest?.("[data-turn-key]")) return;
+    observeSubagentModelLabel(element);
+    for (const label of element.querySelectorAll?.(subagentModelLabelSelector) || []) {
+      observeSubagentModelLabel(label);
+    }
+  };
+
+  const refreshSubagentModelLabels = () => {
+    for (const element of subagentModelLabels.keys()) {
+      if (element.isConnected === false) stopSubagentModelLabel(element);
+      else updateSubagentModelLabel(element);
+    }
+  };
+
+  const pickerTextNodes = (element) => {
+    const nodes = [];
+    const visit = (node) => {
+      if (node.nodeType === 3) nodes.push(node);
+      else if (node.tagName !== "SVG" && node.tagName !== "svg") {
+        for (const child of node.childNodes || []) visit(child);
+      }
+    };
+    visit(element);
+    return nodes;
+  };
+
+  const pickerModelText = (text) => {
+    const parts = text.match(/^(\s*)([^\s·]+)([\s\S]*)$/);
+    if (!parts || !parts[2].includes("/")) return null;
+    const model = parts[2];
+    if (!catalog.modelNamesByKey.has(modelKey(model))
+      && !routeQualifiedDisplayName(catalog, model)) return null;
+    return { model, prefix: parts[1], suffix: parts[3], nativeText: text };
+  };
+
+  const restorePickerText = (node, state) => {
+    if (node.nodeValue === state.renderedText) node.nodeValue = state.nativeText;
+  };
+
+  const updateModelPickerTrigger = (element) => {
+    const state = modelPickerTriggers.get(element);
+    if (!state || disposed || !catalog.loaded || element.isConnected === false) return;
+    const nodes = new Set(pickerTextNodes(element));
+    for (const [node, textState] of state.nodes) {
+      if (nodes.has(node)) continue;
+      restorePickerText(node, textState);
+      state.nodes.delete(node);
+    }
+    for (const node of nodes) {
+      const text = node.nodeValue || "";
+      let textState = state.nodes.get(node);
+      if (!textState || text !== textState.renderedText) {
+        // Match the complete route alias, never an upstream name shared by
+        // several routes. CSS ellipsis does not truncate this text node.
+        const previousLabel = textState && `${textState.prefix}${textState.displayName}`;
+        const retainedLabel = previousLabel && text.startsWith(previousLabel)
+          && /^(?:\s|·|$)/.test(text.slice(previousLabel.length));
+        textState = retainedLabel
+          ? { ...textState, suffix: text.slice(previousLabel.length),
+            nativeText: `${textState.prefix}${textState.model}${text.slice(previousLabel.length)}` }
+          : pickerModelText(text);
+        if (!textState) {
+          state.nodes.delete(node);
+          continue;
+        }
+        state.nodes.set(node, textState);
+      }
+      textState.displayName = modelPresentation(textState.model).displayName;
+      textState.renderedText = `${textState.prefix}${textState.displayName}${textState.suffix}`;
+      // Keep React's nodes, icons, event handlers and effort label intact.
+      if (text !== textState.renderedText) node.nodeValue = textState.renderedText;
+    }
+  };
+
+  const stopModelPickerTrigger = (element) => {
+    const state = modelPickerTriggers.get(element);
+    if (!state) return;
+    state.observer?.disconnect?.();
+    for (const [node, textState] of state.nodes) restorePickerText(node, textState);
+    modelPickerTriggers.delete(element);
+  };
+
+  const observeModelPickerTrigger = (element) => {
+    if (disposed || !element?.matches?.(modelPickerTriggerSelector)
+      || element.closest?.("[data-turn-key]")) return;
+    if (!modelPickerTriggers.has(element)) {
+      let fiber = reactFiberKeys(element).map((key) => element[key]).find(Boolean);
+      let isPicker = false;
+      for (let hops = 0; fiber && hops < 80; fiber = fiber.return, hops += 1) {
+        const props = fiber.memoizedProps;
+        if (typeof props?.model === "string" && Array.isArray(props.models)
+          && (Object.hasOwn(props, "onSelectModel") || Object.hasOwn(props, "onSelectServiceTier"))) {
+          isPicker = true;
+          break;
+        }
+        if (props && Object.hasOwn(props, "conversationId") && Object.hasOwn(props, "hideLabel")) break;
+      }
+      if (!isPicker && !pickerTextNodes(element).some((node) => pickerModelText(node.nodeValue || ""))) return;
+      const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
+      const observer = typeof MutationObserver === "function"
+        ? new MutationObserver(() => updateModelPickerTrigger(element))
+        : null;
+      modelPickerTriggers.set(element, { observer, nodes: new Map() });
+      observer?.observe(element, { childList: true, characterData: true, subtree: true });
+    }
+    updateModelPickerTrigger(element);
+  };
+
+  const discoverModelPickerTriggers = (node) => {
+    const element = groupedMenuElement(node);
+    if (!element || element.closest?.("[data-turn-key]")) return;
+    observeModelPickerTrigger(element);
+    for (const trigger of element.querySelectorAll?.(modelPickerTriggerSelector) || []) {
+      observeModelPickerTrigger(trigger);
+    }
+  };
+
+  const refreshModelPickerTriggers = () => {
+    for (const element of modelPickerTriggers.keys()) {
+      if (element.isConnected === false) stopModelPickerTrigger(element);
+      else updateModelPickerTrigger(element);
+    }
+    discoverModelPickerTriggers(document.body);
+  };
+
+  const groupedMenuContainer = (node) => {
+    const element = groupedMenuElement(node);
+    if (!element) return null;
+    if (element.matches?.(groupedMenuSelector)) return element;
+    return element.closest?.(groupedMenuSelector) || null;
+  };
+
+  const menusWithin = (node) => {
+    const element = groupedMenuElement(node);
+    if (!element) return [];
+    const menus = [];
+    if (element.matches?.(groupedMenuSelector)) menus.push(element);
+    if (typeof element.querySelectorAll === "function") {
+      menus.push(...element.querySelectorAll(groupedMenuSelector));
+    }
+    return menus;
+  };
+
+  const stopGroupedMenuTextObserver = (container) => {
+    const observer = groupedMenuTextObservers.get(container);
+    if (!observer) return;
+    observer.disconnect?.();
+    groupedMenuTextObservers.delete(container);
+  };
+
+  const observeGroupedMenuText = (container) => {
+    if (!container || disposed || groupedMenuTextObservers.has(container)) return;
+    const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
+    if (typeof MutationObserver !== "function") return;
+    const observer = new MutationObserver(scheduleGroupedModelMenuEnhancement);
+    // Route saves can rewrite only a menu row's text node. CharacterData has
+    // to stay on the open picker, otherwise the short-name label stays
+    // ungrouped until the menu is reopened.
+    observer.observe(container, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    groupedMenuTextObservers.set(container, observer);
+  };
+
+  const syncGroupedMenuTextObservers = (roots = []) => {
+    if (disposed || nativeSelectionOnly) return;
+    const menus = roots.length > 0
+      ? roots.flatMap(menusWithin)
+      : Array.from(document.querySelectorAll?.(groupedMenuSelector) || []);
+    for (const menu of menus) observeGroupedMenuText(menu);
+  };
+
+  // Lightweight observer telemetry: per-handler call count, mutation count and
+  // wall time, exposed on window.__codeyObserverStats for performance triage.
+  // No behavior change; timing falls back to Date.now() where performance is
+  // unavailable (test sandboxes).
+  const codeyTimed = (name, count, run) => {
+    const now = () =>
+      typeof performance === "object" && typeof performance.now === "function"
+        ? performance.now()
+        : Date.now();
+    const stats = (window.__codeyObserverStats ||= {});
+    const entry = (stats[name] ||= { calls: 0, items: 0, totalMs: 0, maxMs: 0 });
+    const startedAt = now();
+    try {
+      return run();
+    } finally {
+      const elapsed = now() - startedAt;
+      entry.calls += 1;
+      entry.items += count;
+      entry.totalMs += elapsed;
+      if (elapsed > entry.maxMs) entry.maxMs = elapsed;
+    }
+  };
+  const handleGroupedMenuMutations = (mutations) =>
+    codeyTimed("model-whitelist.groupedMenuMutations", mutations?.length ?? 0, () => handleGroupedMenuMutationsImpl(mutations));
+  const handleGroupedMenuMutationsImpl = (mutations) => {
+    if (disposed) return;
+    const discoveredMenus = [];
+    let relevant = false;
+    for (const mutation of mutations) {
+      const label = groupedMenuElement(mutation.target)?.closest?.(subagentModelLabelSelector);
+      if (label) observeSubagentModelLabel(label);
+      const trigger = groupedMenuElement(mutation.target)?.closest?.(modelPickerTriggerSelector);
+      if (trigger) observeModelPickerTrigger(trigger);
+      const targetMenu = nativeSelectionOnly ? null : groupedMenuContainer(mutation.target);
+      if (targetMenu) {
+        relevant = true;
+        discoveredMenus.push(targetMenu);
+      }
+      if (mutation.type === "characterData") continue;
+      for (const node of mutation.addedNodes || []) {
+        discoverSubagentModelLabels(node);
+        discoverModelPickerTriggers(node);
+        const menus = nativeSelectionOnly ? [] : menusWithin(node);
+        if (menus.length === 0) continue;
+        relevant = true;
+        discoveredMenus.push(...menus);
+      }
+      for (const node of mutation.removedNodes || []) {
+        for (const menu of menusWithin(node)) {
+          stopGroupedMenuTextObserver(menu);
+        }
+      }
+    }
+    if (discoveredMenus.length) syncGroupedMenuTextObservers(discoveredMenus);
+    for (const container of [...groupedMenuTextObservers.keys()]) {
+      if (container.isConnected === false) stopGroupedMenuTextObserver(container);
+    }
+    if (relevant) scheduleGroupedModelMenuEnhancement();
+    for (const element of subagentModelLabels.keys()) {
+      if (element.isConnected === false) stopSubagentModelLabel(element);
+    }
+    for (const element of modelPickerTriggers.keys()) {
+      if (element.isConnected === false) stopModelPickerTrigger(element);
+    }
+  };
+
+  const installGroupedModelMenuObserver = () => {
+    if (groupedMenuObserver || !document.body) return;
+    discoverSubagentModelLabels(document.body);
+    discoverModelPickerTriggers(document.body);
+    const dispatcher = window.__codeyMutationDispatcher;
+    if (typeof dispatcher?.subscribe === "function") {
+      const unsubscribe = dispatcher.subscribe(handleGroupedMenuMutations, {
+        childList: true,
+      });
+      if (dispatcher.snapshot?.().observerInstalled) {
+        groupedMenuObserver = { disconnect: unsubscribe };
+        syncGroupedMenuTextObservers();
+        return;
+      }
+      unsubscribe?.();
+    }
+    const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
+    if (typeof MutationObserver !== "function") return;
+    groupedMenuObserver = new MutationObserver(handleGroupedMenuMutations);
+    groupedMenuObserver.observe(document.body, {
+      childList: true,
+      subtree: true,
+    });
+    syncGroupedMenuTextObservers();
+  };
+
+  const reactFiberKeys = (element) =>
+    window.__codeySharedRuntime.reactInternalKeys(element, { includeContainer: true });
+
+  const restoreNativeFastPermissions = () => {
+    for (const [permission, allowed] of nativeFastPermissions) {
+      try { permission.isServiceTierAllowed = allowed; } catch {}
+    }
+    nativeFastPermissions.clear();
+  };
+
+  const repairNativeFastControls = (target) => {
+    if (!catalog.loaded || disposed) return;
+    let fiber;
+    for (let node = target, hops = 0; node && !fiber && hops < 8; node = node.parentElement, hops += 1) {
+      fiber = reactFiberKeys(node).map((key) => node[key]).find(Boolean);
+    }
+    let picker;
+    const permissions = new Set();
+    for (let hops = 0; fiber && hops < 80; fiber = fiber.return, hops += 1) {
+      const props = fiber.memoizedProps;
+      if (!picker && typeof props?.model === "string"
+        && Array.isArray(props.models) && Object.hasOwn(props, "onSelectServiceTier")) {
+        picker = props;
+      }
+      if (!picker) continue;
+      for (const node of [fiber, fiber.alternate]) {
+        for (const cells of node?.updateQueue?.memoCache?.data || []) {
+          if (!Array.isArray(cells)) continue;
+          for (const value of cells) {
+            if (value && typeof value.isServiceTierAllowed === "boolean"
+              && typeof value.isLoading === "boolean") permissions.add(value);
+          }
+        }
+      }
+      if (props && Object.hasOwn(props, "conversationId") && Object.hasOwn(props, "hideLabel")) break;
+    }
+    if (!picker) return;
+    // Windows builds can disable the main-process Inspector. Repair only the
+    // native picker's cached permission results, before its own opening/selection
+    // event renders again. Both the UI and its serviceTierForRequest resolver then
+    // consume the same permission for every route and model. Keep loading state.
+    restoreNativeFastPermissions();
+    for (const permission of permissions) {
+      if (permission.isServiceTierAllowed || nativeFastPermissions.size >= 64) continue;
+      try {
+        permission.isServiceTierAllowed = true;
+        if (permission.isServiceTierAllowed) nativeFastPermissions.set(permission, false);
+      } catch {
+        // An incompatible immutable renderer result must not break the menu.
+      }
+    }
+  };
+
+  const reactModelStateNodes = (forceScan = false) => {
+    const nodes = [
+      document.body,
+      document.documentElement,
+      document.getElementById?.("root"),
+      ...Array.from(document.querySelectorAll?.(
+        "[role='menu'], [role='dialog'], [role='listbox'], [data-radix-popper-content-wrapper]",
+      ) || []),
+    ].filter(Boolean);
+    if (forceScan) {
+      nodes.push(...Array.from(document.querySelectorAll?.("*") || []).slice(0, 600));
+    }
+    return nodes.filter((node, index, all) => all.indexOf(node) === index);
+  };
+
+  const scanReactObjectGraph = (forceScan = false, discover = false) =>
+    codeyTimed(
+      forceScan ? "model-whitelist.scanReactObjectGraph.force" : "model-whitelist.scanReactObjectGraph",
+      1,
+      () => scanReactObjectGraphImpl(forceScan, discover),
+    );
+  const scanReactObjectGraphImpl = (forceScan = false, discover = false) => {
+    if (!forceScan && !discover && knownModelQueryClients.size > 0) {
+      return {
+        queryClients: [...knownModelQueryClients],
+        reactContainers: 0,
+      };
+    }
+    const queryClients = new Set(knownModelQueryClients);
+    const visited = new WeakSet();
+    let visitedCount = 0;
+
+    const visit = (value, depth = 0) => {
+      if (
+        !value
+        || (typeof value !== "object" && typeof value !== "function")
+        || visited.has(value)
+        || visitedCount >= 30_000
+        // Current renderer builds wrap the query client in deep provider
+        // stacks; the visited cap above keeps the wider hop budget bounded.
+        || depth > 12
+      ) return;
+      visited.add(value);
+      visitedCount += 1;
+
+      try {
+        if (
+          typeof value.getQueriesData === "function"
+          && typeof value.setQueryData === "function"
+          && typeof value.invalidateQueries === "function"
+        ) {
+          queryClients.add(value);
+          rememberBounded(
+            knownModelQueryClients,
+            value,
+            maxKnownModelQueryClients,
+          );
+        }
+      } catch {
+        // Ignore proxy-backed values that reject capability probes.
+      }
+
+      // All model queries must update through QueryClient so mounted pickers
+      // are notified. Mutating shared React results here makes the cache pass
+      // look unchanged and leaves the displayed model list stale.
+
+      let keys = [];
+      try {
+        keys = Object.keys(value).slice(0, 120);
+      } catch {
+        return;
+      }
+      for (const key of keys) {
+        if (
+          key === "ownerDocument"
+          || key === "parentElement"
+          || key === "parentNode"
+          || key === "children"
+          || key === "childNodes"
+        ) continue;
+        let child;
+        try {
+          child = value[key];
+        } catch {
+          continue;
+        }
+        visit(child, depth + 1);
+      }
+    };
+
+    for (const node of reactModelStateNodes(forceScan)) {
+      for (const key of reactFiberKeys(node)) {
+        let root;
+        try {
+          root = node[key];
+        } catch {
+          continue;
+        }
+        visit(root);
+      }
+    }
+    return { queryClients: [...queryClients], reactContainers: 0 };
+  };
+
+  const scanReactObjectGraphWhenDue = (forceScan = false, discover = false) => {
+    const now = Date.now();
+    const runFullScan = forceScan || now >= nextFullReactDiscoveryAt;
+    if (!runFullScan && knownModelQueryClients.size === 0 && !discover) {
+      return { queryClients: [], reactContainers: 0 };
+    }
+    if (runFullScan) {
+      nextFullReactDiscoveryAt = now + fullReactDiscoveryIntervalMs;
+    }
+    return scanReactObjectGraph(runFullScan, discover);
+  };
+
+  const currentDelivery = (revision) => !disposed && revision === catalogRevision;
+
+  const readModelQueryEntries = (client) => {
+    const entries = client.getQueriesData({ queryKey: modelQueryKey, exact: false });
+    if (!entries || typeof entries[Symbol.iterator] !== "function") return null;
+    return Array.from(entries).filter((entry) => (
+      Array.isArray(entry)
+      && entry.length >= 2
+      && Array.isArray(entry[0])
+      && modelQueryKey.every((part, index) => entry[0][index] === part)
+    ));
+  };
+
+  const patchModelQueryClients = async ({
+    forceScan = false,
+    discover = false,
+    invalidate = false,
+  } = {}) => {
+    const revision = catalogRevision;
+    const scan = scanReactObjectGraphWhenDue(forceScan, discover);
+    let queryEntries = 0;
+    let pendingQueryEntries = 0;
+    let changedEntries = 0;
+    const invalidations = [];
+
+    for (const client of scan.queryClients) {
+      if (!currentDelivery(revision)) break;
+      let entries;
+      try {
+        entries = readModelQueryEntries(client);
+      } catch {
+        entries = null;
+      }
+      if (!entries) {
+        knownModelQueryClients.delete(client);
+        continue;
+      }
+      for (const [queryKey, current] of entries) {
+        if (!currentDelivery(revision)) break;
+        const patched = patchedModelPayload(current);
+        if (!patched.changed) continue;
+        try {
+          client.setQueryData(queryKey, patched.value);
+          changedEntries += 1;
+        } catch {}
+      }
+      try {
+        const verified = readModelQueryEntries(client);
+        if (!verified) throw new Error("Model query cache is unavailable");
+        for (const [, current] of verified) {
+          if (current == null) continue;
+          const patched = patchedModelPayload(current);
+          if (patched.recognized && !patched.changed) queryEntries += 1;
+          else pendingQueryEntries += 1;
+        }
+      } catch {
+        pendingQueryEntries += entries.filter(([, current]) => current != null).length;
+      }
+      if (invalidate && currentDelivery(revision)) {
+        try {
+          invalidations.push(Promise.resolve(client.invalidateQueries({
+            queryKey: modelQueryKey,
+            exact: false,
+            refetchType: "active",
+          })));
+        } catch {}
+      }
+    }
+    if (invalidations.length > 0) {
+      void Promise.allSettled(invalidations).then(async () => {
+        if (!currentDelivery(revision)) return;
+        const settledPass = await patchModelQueryClients({ invalidate: false });
+        if (!currentDelivery(revision)) return;
+        const notifiedClients = notifyStatsigClients();
+        updateDeliveryState({
+          ...settledPass,
+          statsigClients: statsigClients().length,
+          notifiedClients,
+        }, revision);
+      }).catch((error) => console.warn("[Codey] model query refresh failed", error));
+    }
+    return {
+      queryClients: scan.queryClients.length,
+      queryEntries,
+      pendingQueryEntries,
+      changedEntries,
+      reactContainers: scan.reactContainers,
+    };
+  };
+
+  const updateDeliveryState = (report, revision) => {
+    if (!currentDelivery(revision)) return;
+    if (deliveryState.revision !== revision) {
+      deliveryState = {
+        revision,
+        statsigClients: 0,
+        notifiedClients: 0,
+        queryClients: 0,
+        queryEntries: 0,
+        pendingQueryEntries: 0,
+        reactContainers: 0,
+        responsePatchInstalled: true,
+      };
+    }
+    deliveryState.statsigClients = report.statsigClients;
+    deliveryState.notifiedClients = Math.max(deliveryState.notifiedClients, report.notifiedClients);
+    deliveryState.queryClients = report.queryClients;
+    deliveryState.queryEntries = report.queryEntries;
+    deliveryState.pendingQueryEntries = report.pendingQueryEntries;
+    deliveryState.reactContainers = report.reactContainers;
+  };
+
+  const deliverModelCatalog = async ({
+    discoverQueryClients = false,
+    invalidate = true,
+  } = {}) => {
+    if (!catalog.loaded || disposed) return false;
+    const revision = catalogRevision;
+    const statsigChanged = applyModelWhitelist();
+    const firstPass = await patchModelQueryClients({
+      forceScan: invalidate,
+      discover: discoverQueryClients,
+      invalidate,
+    });
+    if (!currentDelivery(revision)) return false;
+    const shouldNotify = (
+      invalidate
+      || statsigChanged
+      || deliveryState.notifiedClients === 0
+      || firstPass.changedEntries > 0
+      || firstPass.reactContainers > 0
+    );
+    const notifiedClients = shouldNotify ? notifyStatsigClients() : 0;
+    const finalPass = invalidate
+      ? await patchModelQueryClients({ invalidate: false })
+      : firstPass;
+    if (!currentDelivery(revision)) return false;
+    updateDeliveryState({
+      ...finalPass,
+      statsigClients: statsigClients().length,
+      notifiedClients,
+    }, revision);
+    scheduleGroupedModelMenuEnhancement();
+    refreshSubagentModelLabels();
+    refreshModelPickerTriggers();
+    return true;
+  };
+
+  const scheduleRefresh = (durationMs = 5000) => {
+    if (disposed) return;
+    refreshUntil = Math.max(refreshUntil, Date.now() + durationMs);
+    if (refreshTimer) return;
+    refreshRetryDelay = 120;
+    const tick = () => {
+      // Keep the fired handle truthy while the tick body runs: the
+      // bridge-missing path inside loadModelCatalog calls scheduleRefresh
+      // synchronously, and a cleared handle here would let it start a second
+      // timer chain that can never be cancelled.
+      if (disposed) {
+        refreshTimer = 0;
+        return;
+      }
+      if (catalog.loaded) {
+        if (!refreshDeliveryInFlight) {
+          refreshDeliveryInFlight = true;
+          void deliverModelCatalog({ invalidate: false }).then(
+            () => {
+              refreshDeliveryInFlight = false;
+            },
+            (error) => {
+              refreshDeliveryInFlight = false;
+              console.warn("[Codey] scheduled model delivery failed", error);
+            },
+          );
+        }
+      } else {
+        void loadModelCatalog();
+      }
+      if (Date.now() < refreshUntil) {
+        const nextDelay = refreshRetryDelay;
+        refreshRetryDelay = Math.min(
+          refreshRetryDelay * 2,
+          catalog.loaded ? 1000 : 2000,
+        );
+        refreshTimer = window.setTimeout(tick, nextDelay);
+      } else {
+        refreshTimer = 0;
+      }
+    };
+    refreshTimer = window.setTimeout(tick, 0);
+  };
+
+  const applyModelCatalog = async (nextCatalog) => {
+    if (disposed) return false;
+    const changed = !sameCatalog(catalog, nextCatalog);
+    if (changed) {
+      rememberSupersededModelMenuItems(catalog, nextCatalog);
+      rememberSupersededDefaultRoute(catalog, nextCatalog);
+      catalogRevision += 1;
+      catalog = nextCatalog;
+    }
+    const revision = catalogRevision;
+    try {
+      return await deliverModelCatalog({
+        discoverQueryClients: !changed,
+        invalidate: changed,
+      });
+    } finally {
+      if (currentDelivery(revision)) scheduleRefresh(changed ? 5000 : 1000);
+    }
+  };
+
+  const loadModelCatalog = () => {
+    if (disposed) return Promise.resolve(false);
+    if (catalogLoadRequest?.generation === catalogRequestGeneration) {
+      return catalogLoadRequest.promise;
+    }
+    const request = { generation: catalogRequestGeneration, promise: null };
+    catalogLoadRequest = request;
+    request.promise = (async () => {
+      if (typeof window.__codexSessionDeleteBridge !== "function") {
+        scheduleRefresh();
+        return false;
+      }
+      try {
+        const result = await window.__codexSessionDeleteBridge(modelCatalogPath, {});
+        if (disposed || request.generation !== catalogRequestGeneration) return false;
+        const nextCatalog = normalizedCatalog(result);
+        if (!nextCatalog) {
+          if (!catalog.loaded) scheduleRefresh();
+          return false;
+        }
+        return await applyModelCatalog(nextCatalog);
+      } catch (error) {
+        if (disposed || request.generation !== catalogRequestGeneration) return false;
+        console.warn("[Codey] model whitelist refresh failed", error);
+        scheduleRefresh();
+        return false;
+      }
+    })().finally(() => {
+      if (catalogLoadRequest === request) catalogLoadRequest = null;
+    });
+    return request.promise;
+  };
+
+  const setModelCatalog = (value) => {
+    if (disposed) return false;
+    const nextCatalog = normalizedCatalog(value);
+    if (!nextCatalog) return false;
+    catalogRequestGeneration += 1;
+    return applyModelCatalog(nextCatalog);
+  };
+
+  const routeForModel = (modelName) => {
+    const key = modelKey(modelName);
+    const canonicalModel = catalog.modelNamesByKey.get(key) || modelName;
+    const route = catalog.routeBySelectorKey.get(key)
+      || catalog.routeMetadata[canonicalModel];
+    if (route) return route;
+    const metadata = catalog.modelMetadata[canonicalModel];
+    const providerId = typeof metadata?.provider_id === "string"
+      ? metadata.provider_id.trim()
+      : "";
+    const sourceModel = typeof metadata?.source_model === "string"
+      ? metadata.source_model.trim()
+      : "";
+    const routeProviderId = typeof metadata?.route_provider_id === "string"
+      ? metadata.route_provider_id.trim()
+      : "";
+    return providerId && routeProviderId && sourceModel
+      ? {
+          selectorModel: canonicalModel,
+          providerId,
+          routeProviderId,
+          sourceModel,
+          officialAccount: metadataBoolean(metadata, "official_account"),
+        }
+      : null;
+  };
+
+  const rememberSupersededModelMenuItems = (previousCatalog, nextCatalog) => {
+    if (!previousCatalog?.loaded) return;
+    const nextModelKeys = new Set(nextCatalog.models.map(modelKey));
+    for (const modelName of previousCatalog.models) {
+      if (nextModelKeys.has(modelKey(modelName))) continue;
+      const displayName = cleanText(
+        modelPresentationFromCatalog(previousCatalog, modelName).displayName,
+      );
+      if (!displayName) continue;
+      supersededModelMenuLabels.delete(displayName);
+      supersededModelMenuLabels.set(displayName, modelName);
+    }
+    for (const modelName of nextCatalog.models) {
+      const displayName = cleanText(
+        modelPresentationFromCatalog(nextCatalog, modelName).displayName,
+      );
+      if (displayName) supersededModelMenuLabels.delete(displayName);
+    }
+    while (supersededModelMenuLabels.size > maxSupersededModelMenuLabels) {
+      supersededModelMenuLabels.delete(supersededModelMenuLabels.keys().next().value);
+    }
+  };
+
+  const defaultRouteRecord = (sourceCatalog) => {
+    if (!sourceCatalog?.loaded || !sourceCatalog.defaultModel) return null;
+    const route = sourceCatalog.routeMetadata?.[sourceCatalog.defaultModel];
+    return {
+      selectorModel: sourceCatalog.defaultModel,
+      routeProviderId: requestProviderId(route?.routeProviderId),
+      sourceModel: typeof route?.sourceModel === "string" && route.sourceModel.trim()
+        ? route.sourceModel.trim()
+        : sourceCatalog.defaultModel,
+    };
+  };
+
+  const normalizedDefaultRouteRecord = (value) => {
+    const selectorModel = typeof value?.selectorModel === "string"
+      ? value.selectorModel.trim()
+      : "";
+    if (!selectorModel) return null;
+    return {
+      selectorModel,
+      routeProviderId: requestProviderId(value?.routeProviderId),
+      sourceModel: typeof value?.sourceModel === "string" && value.sourceModel.trim()
+        ? value.sourceModel.trim()
+        : selectorModel,
+    };
+  };
+
+  const sameDefaultRouteRecord = (left, right) => (
+    Boolean(left) === Boolean(right)
+    && (!left || (
+      modelKey(left.selectorModel) === modelKey(right.selectorModel)
+      && modelKey(left.routeProviderId) === modelKey(right.routeProviderId)
+      && modelKey(left.sourceModel) === modelKey(right.sourceModel)
+    ))
+  );
+
+  const persistDefaultModelHistory = () => {
+    try {
+      window.localStorage?.setItem(
+        persistedDefaultModelHistoryKey,
+        JSON.stringify({
+          lastDefault: lastDeliveredDefaultRoute,
+          superseded: supersededDefaultRoutes,
+        }),
+      );
+    } catch {
+      // The in-memory history still covers this launch when storage is unavailable.
+    }
+  };
+
+  const addSupersededDefaultRoute = (record) => {
+    const key = modelKey(record.selectorModel);
+    const duplicate = supersededDefaultRoutes.findIndex(
+      (candidate) => modelKey(candidate.selectorModel) === key,
+    );
+    if (duplicate >= 0) supersededDefaultRoutes.splice(duplicate, 1);
+    supersededDefaultRoutes.push(record);
+    while (supersededDefaultRoutes.length > maxSupersededDefaultRoutes) {
+      supersededDefaultRoutes.shift();
+    }
+  };
+
+  const restoreDefaultModelHistory = () => {
+    // Native selection leaves the default to Codex itself.
+    if (nativeSelectionOnly) return;
+    try {
+      const history = JSON.parse(
+        window.localStorage?.getItem(persistedDefaultModelHistoryKey) || "null",
+      );
+      lastDeliveredDefaultRoute = normalizedDefaultRouteRecord(history?.lastDefault);
+      const superseded = Array.isArray(history?.superseded) ? history.superseded : [];
+      for (const entry of superseded.slice(-maxSupersededDefaultRoutes)) {
+        const record = normalizedDefaultRouteRecord(entry);
+        if (record) addSupersededDefaultRoute(record);
+      }
+    } catch {
+      // Ignore stale or user-cleared renderer storage.
+    }
+  };
+
+  const rememberSupersededDefaultRoute = (previousCatalog, nextCatalog) => {
+    if (nativeSelectionOnly) return;
+    const next = defaultRouteRecord(nextCatalog);
+    if (!next) return;
+    // A live catalog swap knows the previous default directly. On a cold
+    // renderer the persisted record stands in for it, so a default that
+    // changed between launches still supersedes Codex's saved preference.
+    const previous = defaultRouteRecord(previousCatalog) || lastDeliveredDefaultRoute;
+    let changed = false;
+    if (previous && modelKey(previous.selectorModel) !== modelKey(next.selectorModel)) {
+      addSupersededDefaultRoute(previous);
+      changed = true;
+    }
+    const current = supersededDefaultRoutes.findIndex(
+      (candidate) => modelKey(candidate.selectorModel) === modelKey(next.selectorModel),
+    );
+    if (current >= 0) {
+      supersededDefaultRoutes.splice(current, 1);
+      changed = true;
+    }
+    if (!sameDefaultRouteRecord(lastDeliveredDefaultRoute, next)) {
+      lastDeliveredDefaultRoute = next;
+      changed = true;
+    }
+    if (changed) persistDefaultModelHistory();
+  };
+
+  const requestUsesSupersededDefault = (requestedModel) => {
+    const requestedKey = modelKey(requestedModel);
+    if (!requestedKey || requestedKey === modelKey(catalog.defaultModel)) return false;
+    return supersededDefaultRoutes.some((record) => (
+      requestedKey === modelKey(record.selectorModel)
+      || (
+        requestedKey === modelKey(record.sourceModel)
+        && modelKey(record.sourceModel) !== modelKey(routeForModel(catalog.defaultModel)?.sourceModel)
+      )
+    ));
+  };
+
+  const historicalSourceModel = (modelName) => {
+    const key = modelKey(modelName);
+    // A configured raw id such as codey/vendor/model always keeps its meaning.
+    if (catalog.modelNamesByKey.has(key) || catalog.routesBySourceKey.has(key)) return "";
+    return catalog.legacyAliases.get(key)
+      || (key.startsWith("codey/") ? String(modelName).trim().slice(6).trim() : "");
+  };
+  const routeForProviderAlias = (modelName) => {
+    const model = typeof modelName === "string" ? modelName.trim() : "";
+    const separator = model.indexOf("/");
+    if (separator <= 0) return null;
+    let providerId = model.slice(0, separator).trim();
+    try { providerId = decodeURIComponent(providerId); } catch { return null; }
+    const sourceModel = model.slice(separator + 1).trim();
+    if (!providerId || !sourceModel) return null;
+    const catalogAlias = catalog.modelNamesByKey.get(modelKey(model)) || "";
+    if (catalogAlias) {
+      const catalogRoute = routeForModel(catalogAlias);
+      if (catalogRoute) return catalogRoute;
+      const catalogSeparator = catalogAlias.indexOf("/");
+      if (catalogSeparator > 0) {
+        return {
+          selectorModel: catalogAlias,
+          providerId: localRouterProviderId,
+          routeProviderId: catalogAlias.slice(0, catalogSeparator).trim(),
+          sourceModel: catalogAlias.slice(catalogSeparator + 1).replace(/#\d+$/, "").trim(),
+        };
+      }
+    }
+    return routeFromNestedIndex(
+      catalog.routeByAnyProviderSource,
+      providerId,
+      sourceModel,
+    ) || uniqueRouteForRawModel(historicalSourceModel(model));
+  };
+
+  const routeMatchesModel = (route, model) => (
+    modelKey(route?.selectorModel) === modelKey(model)
+    || modelKey(route?.sourceModel) === modelKey(model)
+  );
+  const routeForThread = (threadId) => {
+    const binding = threadRoutes.get(threadId);
+    if (!binding) return null;
+    const route = routeFromNestedIndex(
+      catalog.routeByRouteProviderSource,
+      binding.routeProviderId,
+      binding.sourceModel,
+    ) || uniqueRouteForRawModel(binding.sourceModel);
+    if (route) rememberBoundedThreadRoute(threadId, route);
+    // Keep unresolved history until the user chooses a replacement; dropping
+    // it would make the next model-less resume silently use the global default.
+    return route;
+  };
+  const routeForThreadModel = (threadId, model) => {
+    const route = routeForThread(threadId);
+    return route && (routeMatchesModel(route, model)
+      || modelKey(route.sourceModel) === modelKey(historicalSourceModel(model))) ? route : null;
+  };
+  const uniqueRouteForRawModel = (model) => {
+    const matches = catalog.routesBySourceKey.get(modelKey(model)) || [];
+    return matches.length === 1 ? matches[0] : null;
+  };
+  const uniqueRouteForProviderModel = (providerId, model) => {
+    const providerKey = modelKey(providerId);
+    const sourceKey = modelKey(model);
+    if (!providerKey || !sourceKey) return null;
+    const matches = catalog.routes.filter((route) => (
+      modelKey(route?.sourceModel) === sourceKey
+      && (
+        modelKey(route?.routeProviderId) === providerKey
+        || modelKey(route?.providerId) === providerKey
+      )
+    ));
+    const uniqueMatches = new Map(
+      matches.map((route) => [modelKey(route.selectorModel), route]),
+    );
+    return uniqueMatches.size === 1 ? uniqueMatches.values().next().value : null;
+  };
+  const routeForHintedRawModel = (routeProviderId, model) => routeFromNestedIndex(
+    catalog.routeByRouteProviderSource,
+    routeProviderId,
+    model,
+  );
+  const routeForThreadDisplayModel = (thread) => {
+    if (!catalog.loaded || !thread || typeof thread !== "object") return null;
+    const model = typeof thread.model === "string" ? thread.model.trim() : "";
+    if (!model) return null;
+    const threadId = typeof thread.id === "string" ? thread.id.trim() : "";
+    const providerId = providerFromThread(thread);
+    const routeHint = requestProviderId(thread[routeMetadataParam]?.[routeMetadataKey]);
+    if (routeHint) {
+      const hintedRoute = routeForHintedRawModel(routeHint, model);
+      if (hintedRoute?.selectorModel) return hintedRoute;
+    }
+    const threadRoute = routeForThreadModel(threadId, model);
+    if (threadRoute?.selectorModel) return threadRoute;
+    // A third-party raw id can also be an official catalog entry. Resolve
+    // its known route before treating the model as an existing selector.
+    if (catalog.modelNamesByKey.has(modelKey(model))) return null;
+    const providerModel = (() => {
+      if (!providerId || !model) return model;
+      const prefix = `${providerId}/`;
+      return model.toLowerCase().startsWith(prefix.toLowerCase())
+        ? model.slice(prefix.length).trim()
+        : model;
+    })();
+    const providerRoute = providerId && !routerProviderIds.has(modelKey(providerId))
+      ? uniqueRouteForProviderModel(providerId, providerModel)
+      : null;
+    if (providerRoute?.selectorModel) return providerRoute;
+    const aliasRoute = routeForProviderAlias(model);
+    if (aliasRoute?.selectorModel) return aliasRoute;
+    const rawRoute = uniqueRouteForRawModel(model);
+    return rawRoute?.selectorModel ? rawRoute : null;
+  };
+  const patchedThreadDisplayModel = (thread) => {
+    const route = routeForThreadDisplayModel(thread);
+    const selectorModel = typeof route?.selectorModel === "string"
+      ? route.selectorModel.trim()
+      : "";
+    if (
+      !selectorModel
+      || !thread
+      || typeof thread !== "object"
+      || modelKey(thread.model) === modelKey(selectorModel)
+    ) return thread;
+    return { ...thread, model: selectorModel };
+  };
+  const dataLooksLikeThreadList = (value) => (
+    Array.isArray(value)
+    && value.length > 0
+    && value.every((item) => (
+      item
+      && typeof item === "object"
+      && typeof item.id === "string"
+    ))
+    && value.some((item) => typeof item.model === "string")
+    && !value.some((item) => (
+      item
+      && typeof item === "object"
+      && (
+        Array.isArray(item.supportedReasoningEfforts)
+        || Array.isArray(item.serviceTiers)
+        || Object.hasOwn(item, "displayName")
+      )
+    ))
+  );
+  const patchedThreadDisplayPayload = (value) => {
+    if (!catalog.loaded || !value || typeof value !== "object") {
+      return { changed: false, value };
+    }
+    let changed = false;
+    const next = { ...value };
+    if (value.thread && typeof value.thread === "object") {
+      const thread = patchedThreadDisplayModel(value.thread);
+      if (thread !== value.thread) {
+        next.thread = thread;
+        changed = true;
+      }
+    }
+    if (dataLooksLikeThreadList(value.data)) {
+      const data = value.data.map((thread) => patchedThreadDisplayModel(thread));
+      if (data.some((thread, index) => thread !== value.data[index])) {
+        next.data = data;
+        changed = true;
+      }
+    }
+    return { changed, value: changed ? next : value };
+  };
+  const applyThreadDisplayPatch = (value) => {
+    const patched = patchedThreadDisplayPayload(value);
+    if (!patched.changed || patched.value === value) return false;
+    let applied = false;
+    for (const key of ["thread", "data"]) {
+      if (!(key in patched.value) || patched.value[key] === value[key]) continue;
+      try {
+        value[key] = patched.value[key];
+        applied = true;
+      } catch {
+        // Immutable bridge payloads remain unchanged; later requests still route safely.
+      }
+    }
+    return applied;
+  };
+  const replaceThreadDisplayPayload = (parent, key) => {
+    const value = parent?.[key];
+    const patched = patchedThreadDisplayPayload(value);
+    if (!patched.changed || patched.value === value) return false;
+    try {
+      parent[key] = patched.value;
+      if (parent[key] === patched.value) return true;
+    } catch {
+      // A mutable nested payload can still be repaired in place below.
+    }
+    return applyThreadDisplayPatch(value);
+  };
+
+  const rememberMenuRouteIntent = (event) => {
+    if (!routeSelectionEvents.has(event?.type) || !catalog.loaded) return;
+    const item = event?.target?.closest?.(groupedMenuItemSelector);
+    const selectorModel = typeof item?.dataset?.codeyRouteModel === "string"
+      ? item.dataset.codeyRouteModel.trim()
+      : "";
+    const route = selectorModel ? routeForModel(selectorModel) : null;
+    if (!route) return;
+    pendingRouteIntent = {
+      selectorModel,
+      routeProviderId: route.routeProviderId,
+      sourceModel: route.sourceModel,
+      selectedAt: Date.now(),
+    };
+  };
+  const pendingIntentRouteForRequest = () => {
+    const intent = pendingRouteIntent;
+    if (!intent) return null;
+    if (Date.now() - intent.selectedAt > pendingRouteIntentMaxAgeMs) {
+      pendingRouteIntent = null;
+      return null;
+    }
+    const route = routeForHintedRawModel(intent.routeProviderId, intent.sourceModel);
+    if (!route) {
+      pendingRouteIntent = null;
+      return null;
+    }
+    // The capture-phase menu event is the freshest user intent. Codex can
+    // enqueue a prewarm/settings request carrying the previous model before
+    // its React state commits, so requiring the payload to already match the
+    // clicked selector makes the first click appear to do nothing.
+    return route;
+  };
+
+  const paramsWithoutUnverifiedRouteMetadata = (source, requestedModel) => {
+    const metadata = source?.[routeMetadataParam];
+    const routeHint = requestProviderId(metadata?.[routeMetadataKey]);
+    if (!routeHint) return source;
+    const threadId = threadIdFromParams(source);
+    const binding = threadRoutes.get(threadId);
+    const matchesBinding = binding
+      && modelKey(binding.routeProviderId) === modelKey(routeHint)
+      && (
+        !requestedModel
+        || modelKey(binding.sourceModel) === modelKey(requestedModel)
+      );
+    if (matchesBinding) return source;
+    const nextMetadata = { ...metadata };
+    delete nextMetadata[routeMetadataKey];
+    const next = { ...source };
+    if (Object.keys(nextMetadata).length > 0) next[routeMetadataParam] = nextMetadata;
+    else delete next[routeMetadataParam];
+    return next;
+  };
+
+  const patchedRequestParams = (method, params) => {
+    if (!modelBoundRequestMethods.has(method)) return params;
+    let source = params && typeof params === "object" ? params : {};
+    const hasModelOverride = Object.hasOwn(source, "model")
+      && (method === "thread/settings/update" || source.model != null);
+    const restoredBinding = !hasModelOverride && (method === "thread/resume" || method === "thread/fork" || method === "turn/start")
+      ? threadRoutes.get(threadIdFromParams(source)) : null;
+    if (restoredBinding) source = { ...source, model: restoredBinding.sourceModel };
+    const requestedModel = typeof source.model === "string"
+      ? source.model.trim()
+      : "";
+    if (method === "thread/settings/update") {
+      if (!hasModelOverride) return params;
+      if (source.model === null) {
+        const threadId = threadIdFromParams(source);
+        if (threadId && threadRoutes.delete(threadId)) persistThreadRoutes();
+        clearRequestedThreadRoute(threadId);
+        pendingRouteIntent = null;
+        return params;
+      }
+      // Preserve an explicit invalid value so app-server can report it instead
+      // of silently replacing it with a route default.
+      if (!requestedModel) return params;
+    }
+    const requestedProvider = paramsProviderId(source);
+    if (!catalog.loaded) {
+      // Before the catalog arrives there is no safe way to distinguish a
+      // legacy route alias from a legitimate upstream model containing `/`.
+      // Preserve the model byte-for-byte, but keep every new, forked, or resumed
+      // thread on Codey's carrier so a route alias cannot reach the old provider.
+      const safeSource = method === "turn/start"
+        ? paramsWithoutUnverifiedRouteMetadata(source, requestedModel)
+        : source;
+      return routedRequestParams(method, safeSource, requestedModel, null);
+    }
+    const requestedModelForProvider = (() => {
+      if (!requestedProvider || !requestedModel) return requestedModel;
+      const prefix = `${requestedProvider}/`;
+      return requestedModel.toLowerCase().startsWith(prefix.toLowerCase())
+        ? requestedModel.slice(prefix.length).trim()
+        : requestedModel;
+    })();
+    const canonicalRequestedModel = catalog.modelNamesByKey.get(modelKey(requestedModel)) || "";
+    const canonicalRoute = canonicalRequestedModel
+      ? routeForModel(canonicalRequestedModel)
+      : null;
+    const metadataRouteProviderId = requestProviderId(
+      source[routeMetadataParam]?.[routeMetadataKey],
+    );
+    const metadataRoute = metadataRouteProviderId
+      ? routeForHintedRawModel(metadataRouteProviderId, historicalSourceModel(requestedModel) || requestedModel)
+      : null;
+    const previouslyPatchedRoute = source[patchedRouteKey]
+      && routeMatchesModel(source[patchedRouteKey], requestedModel)
+      ? routeForHintedRawModel(
+          source[patchedRouteKey].routeProviderId,
+          requestedModel,
+        )
+      : null;
+    const threadId = threadIdFromParams(source);
+    const userIntentRoute = pendingIntentRouteForRequest();
+    const requestedBinding = threadRequestedRoutes.get(threadId);
+    const requestedThreadRoute = requestedBinding && method !== "thread/start" && method !== "thread/fork"
+      ? routeForHintedRawModel(requestedBinding.routeProviderId, requestedBinding.sourceModel) : null;
+    const threadRoute = requestedModel
+      ? routeForThreadModel(threadId, requestedModel)
+      : null;
+    const stickyThreadRoute = (
+      (method === "turn/start" || method === "thread/resume" || method === "thread/fork")
+      && !hasModelOverride
+    ) ? routeForThread(threadId) : null;
+    const existingRoute = requestedProvider
+      && !isGatewayProviderId(requestedProvider)
+      && requestedModel
+      ? routeFromNestedIndex(
+          catalog.routeByAnyProviderSource,
+          requestedProvider,
+          requestedModelForProvider,
+        )
+      : null;
+    const aliasRoute = routeForProviderAlias(requestedModel);
+    const uniqueRawRoute = requestedModel
+      ? uniqueRouteForRawModel(requestedModel)
+      : null;
+    const defaultRoute = routeForModel(catalog.defaultModel);
+    const matchingDefaultRoute = (
+      requestedModel
+      && !restoredBinding
+      && threadProviderRequestMethods.has(method)
+      && routeMatchesModel(defaultRoute, requestedModel)
+    ) ? defaultRoute : null;
+    const refreshedDefaultRoute = (
+      method === "thread/start"
+      && !userIntentRoute
+      && requestUsesSupersededDefault(requestedModel)
+    ) ? defaultRoute : null;
+    const staleExplicitAliasRoute = (() => {
+      if (!requestedProvider || isGatewayProviderId(requestedProvider)) return null;
+      const prefix = `${requestedProvider}/`;
+      if (!requestedModel.toLowerCase().startsWith(prefix.toLowerCase())) return null;
+      return {
+        selectorModel: requestedModel,
+        providerId: localRouterProviderId,
+        routeProviderId: requestedProvider,
+        sourceModel: requestedModel,
+        routeName: requestedProvider,
+      };
+    })();
+    const route = userIntentRoute
+      || (method !== "thread/settings/update" ? requestedThreadRoute : null)
+      || refreshedDefaultRoute
+      || metadataRoute
+      || previouslyPatchedRoute
+      || aliasRoute
+      // `thread/settings/update` is the model picker's explicit new sticky
+      // choice. Its selector must replace the previous thread binding. Later
+      // raw `turn/start` requests can then reuse that stored route safely.
+      || (method === "thread/settings/update" ? canonicalRoute : threadRoute)
+      || (method === "thread/settings/update" ? threadRoute : canonicalRoute)
+      || existingRoute
+      || uniqueRawRoute
+      || stickyThreadRoute
+      || matchingDefaultRoute
+      || staleExplicitAliasRoute;
+    if (route) {
+      const routed = routedRequestParams(
+        method,
+        source,
+        route.selectorModel || route.sourceModel,
+        route,
+      );
+      if (userIntentRoute) pendingRouteIntent = null;
+      return routed;
+    }
+    if (canonicalRequestedModel) {
+      return routedRequestParams(
+        method,
+        source,
+        canonicalRequestedModel,
+        null,
+      );
+    }
+    // Any task can be resumed through the
+    // HTTP-only Codey carrier without rewriting its rollout. Preserve an
+    // unknown model exactly so the gateway can report it rather than falling
+    // back to an unrelated default.
+    if (method === "thread/resume" || method === "thread/fork") {
+      return routedRequestParams(method, source, requestedModel, null);
+    }
+    // An explicit unknown or deleted model must never be silently replaced by
+    // an unrelated default. Preserve it so the caller can surface the exact
+    // invalid selection instead of sending a different model than the user chose.
+    if (requestedModel || !catalog.defaultModel) {
+      return routedRequestParams(method, source, requestedModel, null);
+    }
+    return routedRequestParams(
+      method,
+      source,
+      defaultRoute?.selectorModel || catalog.defaultModel,
+      defaultRoute,
+    );
+  };
+
+  const outgoingRequestParts = (request) => {
+    const wrappedMethod = request?.method === "send-cli-request-for-host"
+      && typeof request.params?.method === "string"
+      ? request.params.method
+      : "";
+    return {
+      wrappedMethod,
+      method: wrappedMethod || String(request?.method || ""),
+      params: wrappedMethod ? request.params?.params : request?.params,
+    };
+  };
+
+  const requestIdKey = (request) => (
+    request?.id == null ? "" : String(request.id)
+  );
+  const rememberOutgoingThreadRequest = (detail) => {
+    const request = detail?.request;
+    const requestId = requestIdKey(request);
+    if (!requestId) return;
+    const { method, params } = outgoingRequestParts(request);
+    const nativeModelUpdate = nativeSelectionOnly && method === "thread/settings/update"
+      && params && Object.hasOwn(params, "model");
+    if (!nativeModelUpdate && !["thread/start", "thread/resume", "thread/fork", "thread/read"].includes(method)) {
+      return;
+    }
+    rememberBoundedMap(
+      pendingThreadRequests,
+      requestId,
+      {
+        method,
+        threadId: threadIdFromParams(params),
+        providerId: paramsProviderId(params),
+        route: params?.[patchedRouteKey] || null,
+        nativeModelUpdate,
+      },
+      maxPendingThreadRequests,
+    );
+  };
+
+  const providerFromThread = (thread) => requestProviderId(
+    thread?.modelProvider || thread?.model_provider,
+  );
+  const rememberThreadPersistedProvider = (thread, fallbackProvider = "") => {
+    const threadId = typeof thread?.id === "string" ? thread.id.trim() : "";
+    const fallback = requestProviderId(fallbackProvider);
+    const providerId = providerFromThread(thread)
+      || fallback;
+    if (!threadId || !providerId) return;
+    rememberBoundedThreadPersistedProvider(threadId, providerId);
+  };
+  const rememberThreadRuntimeProvider = (thread, providerId) => {
+    const threadId = typeof thread === "string"
+      ? thread.trim()
+      : typeof thread?.id === "string"
+        ? thread.id.trim()
+        : "";
+    const provider = requestProviderId(providerId);
+    if (!threadId || !provider) return;
+    rememberBoundedThreadRuntimeProvider(threadId, provider);
+    if (nativeSelectionOnly && modelKey(provider) === modelKey(catalog.nativeProviderId)
+      && threadRoutes.delete(threadId)) persistThreadRoutes();
+  };
+  const rememberThreadRoute = (thread, fallbackRoute = null) => {
+    const threadId = typeof thread?.id === "string" ? thread.id.trim() : "";
+    if (!threadId) return;
+    const model = typeof thread?.model === "string" ? thread.model.trim() : "";
+    if (nativeSelectionOnly) {
+      if (catalog.nativeProviderId
+        && modelKey(threadRuntimeProviders.get(threadId)) === modelKey(catalog.nativeProviderId)) return;
+      const sourceModel = historicalSourceModel(model);
+      if (sourceModel) rememberBoundedThreadRoute(threadId, {
+        routeProviderId: providerFromThread(thread) || localRouterProviderId,
+        sourceModel,
+      });
+      return;
+    }
+    const route = fallbackRoute
+      || (model ? routeForThreadModel(threadId, model) : null)
+      || (model ? routeForProviderAlias(model) : null)
+      || (model ? uniqueRouteForProviderModel(providerFromThread(thread), model) : null)
+      || (model ? uniqueRouteForRawModel(model) : null);
+    rememberBoundedThreadRoute(threadId, route);
+  };
+  const rememberThreadProvidersFromResponse = (data, message) => {
+    if (!message || typeof message !== "object") return;
+    const notificationThread = message?.params?.thread;
+    if (message.method === "thread/started") {
+      rememberThreadPersistedProvider(notificationThread);
+      rememberThreadRuntimeProvider(notificationThread, providerFromThread(notificationThread));
+      rememberThreadRoute(notificationThread);
+    }
+    const requestId = message.id == null ? "" : String(message.id);
+    const pending = requestId ? pendingThreadRequests.get(requestId) : null;
+    if (requestId) pendingThreadRequests.delete(requestId);
+    if (message.error) return;
+    if (pending?.nativeModelUpdate && threadRoutes.delete(pending.threadId)) persistThreadRoutes();
+    const result = message.result;
+    const resultThread = result?.thread;
+    const fallbackProvider = threadPersistedProviders.get(resultThread?.id || pending?.threadId);
+    const resultProvider = requestProviderId(result?.modelProvider) || fallbackProvider;
+    // Top-level modelProvider reports the live carrier; thread.modelProvider
+    // can still describe the persisted rollout after a successful resume.
+    const reportedRuntimeProvider = requestProviderId(result?.modelProvider);
+    const resultThreadId = resultThread?.id || pending?.threadId;
+    if (reportedRuntimeProvider) unconfirmedThreadProviders.delete(resultThreadId);
+    else if (resultThreadId && threadProviderRequestMethods.has(pending?.method)) {
+      rememberBounded(unconfirmedThreadProviders, resultThreadId, maxTrackedThreadProviders);
+    }
+    const runtimeProvider = reportedRuntimeProvider
+      || threadRuntimeProviders.get(resultThread?.id || pending?.threadId);
+    rememberThreadPersistedProvider(resultThread, resultProvider);
+    rememberThreadRuntimeProvider(resultThread || pending?.threadId, runtimeProvider);
+    const routeProvider = threadProviderRequestMethods.has(pending?.method)
+      ? reportedRuntimeProvider : runtimeProvider;
+    const confirmedRoute = pending?.route && routeProvider && modelKey(routeProvider) === modelKey(
+      pending.providerId || pending.route.providerId,
+    ) ? pending.route : null;
+    if (pending?.method === "thread/resume" && pending.route && !confirmedRoute) {
+      rememberBoundedThreadRoute(resultThread?.id || pending.threadId,
+        pending.route, threadRequestedRoutes, persistedRequestedRoutesKey);
+    }
+    if (confirmedRoute) clearRequestedThreadRoute(resultThread?.id || pending?.threadId);
+    if (!pending?.route || confirmedRoute) rememberThreadRoute(resultThread, confirmedRoute);
+    for (const thread of Array.isArray(result?.data) ? result.data : []) {
+      rememberThreadPersistedProvider(thread);
+      rememberThreadRoute(thread);
+    }
+    const directThread = data?.thread;
+    rememberThreadPersistedProvider(directThread, resultProvider);
+    rememberThreadRuntimeProvider(directThread || pending?.threadId, runtimeProvider);
+    if (!pending?.route || confirmedRoute) rememberThreadRoute(directThread, confirmedRoute);
+  };
+
+  const rememberOutgoingModelListRequest = (detail) => {
+    const request = detail?.request;
+    if (
+      !request
+      || typeof request !== "object"
+      || request.id == null
+    ) return;
+    const { method } = outgoingRequestParts(request);
+    if (method !== "model/list") return;
+    rememberBounded(
+      modelListRequestIds,
+      String(request.id),
+      maxTrackedModelListRequests,
+    );
+  };
+
+  const patchedNativeRequestParams = (method, params) => {
+    if (!modelBoundRequestMethods.has(method) || !params || typeof params !== "object") return params;
+    if (method === "thread/settings/update" && params.model === null) return params;
+    if (catalog.loaded && catalog.models.length === 0) {
+      return markBlockedProviderRequest({ ...params }, {
+        reason: "provider_disabled",
+        message: "当前线路已禁用，请先在 Codey 中启用线路或切换到可用线路后重试。",
+      });
+    }
+    const threadId = threadIdFromParams(params);
+    const model = typeof params.model === "string" ? params.model.trim() : "";
+    const binding = !Object.hasOwn(params, "model") ? threadRoutes.get(threadId) : null;
+    const historicalSource = historicalSourceModel(model);
+    const currentProvider = knownThreadProvider(params);
+    const oldCarrier = routerProviderIds.has(modelKey(currentProvider))
+      || (modelKey(currentProvider) === "codey" && modelKey(catalog.nativeProviderId) !== "codey");
+    if (!historicalSource && !binding && !oldCarrier) return params;
+    const sourceModel = historicalSource || binding?.sourceModel || model;
+    const canonical = catalog.modelNamesByKey.get(modelKey(sourceModel));
+    const targetProvider = catalog.nativeProviderId;
+    const next = { ...params };
+    const needsResume = method === "turn/start" && currentProvider && targetProvider
+      && modelKey(currentProvider) !== modelKey(targetProvider);
+    if (!catalog.loaded || !targetProvider || (sourceModel && !canonical) || needsResume) {
+      return markBlockedProviderRequest(next, {
+        reason: "historical_route_unavailable",
+        message: needsResume
+          ? "该任务仍使用旧线路，请重新打开任务，恢复到当前线路后重试。"
+          : !catalog.loaded
+            ? "模型目录尚未加载，请稍后重试。"
+            : !targetProvider
+              ? "无法确认当前原生线路，请刷新设置后重试。"
+            : `历史线路已不可用，当前线路未确认支持模型 ${sourceModel || model}，请重新选择可用模型。`,
+      });
+    }
+    if (canonical) next.model = canonical;
+    delete next.model_provider;
+    if (threadProviderRequestMethods.has(method)) next.modelProvider = targetProvider;
+    else delete next.modelProvider;
+    const metadata = params[routeMetadataParam];
+    if (metadata && typeof metadata === "object") {
+      const cleanMetadata = { ...metadata };
+      delete cleanMetadata[routeMetadataKey];
+      if (Object.keys(cleanMetadata).length) next[routeMetadataParam] = cleanMetadata;
+      else delete next[routeMetadataParam];
+    }
+    return next;
+  };
+
+  const rewrittenOutgoingMessage = (detail) => {
+    const request = detail?.request;
+    rememberOutgoingModelListRequest(detail);
+    if (
+      !routableOutgoingMessageTypes.has(detail?.type)
+      || !request
+      || typeof request !== "object"
+    ) return detail;
+    const { wrappedMethod, method, params } = outgoingRequestParts(request);
+    const nextParams = nativeSelectionOnly
+      ? patchedNativeRequestParams(method, params)
+      : patchedRequestParams(method, params);
+    if (nextParams === params) {
+      rememberOutgoingThreadRequest(detail);
+      return detail;
+    }
+    const nextRequest = { ...request };
+    if (wrappedMethod) {
+      nextRequest.params = {
+        ...(request.params || {}),
+        params: nextParams,
+      };
+    } else {
+      nextRequest.params = nextParams;
+    }
+    const rewritten = { ...detail, request: nextRequest };
+    rememberOutgoingThreadRequest(rewritten);
+    return rewritten;
+  };
+
+  const blockedProviderRequest = (detail) => {
+    const request = detail?.request;
+    if (!request || typeof request !== "object") return null;
+    const { params } = outgoingRequestParts(request);
+    return params?.[blockedProviderRequestKey] || null;
+  };
+
+  const showBlockedProviderNotice = (detail) => {
+    const blocked = blockedProviderRequest(detail);
+    if (!blocked) return false;
+    const target = blocked.routeName || "所选线路";
+    const message = blocked.message || `暂时无法确认此任务的线路配置。请重启 Codex 后恢复任务，或用 ${target} 新建任务。`;
+    console.warn("[Codey] provider migration required before routed turn", blocked);
+    try {
+      const noticeId = "codey-provider-mismatch-notice";
+      let notice = document.getElementById?.(noticeId);
+      if (!notice && document.createElement && document.body?.appendChild) {
+        notice = document.createElement("div");
+        notice.id = noticeId;
+        notice.setAttribute("role", "alert");
+        Object.assign(notice.style, {
+          position: "fixed",
+          left: "50%",
+          bottom: "88px",
+          transform: "translateX(-50%)",
+          zIndex: "2147483647",
+          maxWidth: "min(680px, calc(100vw - 32px))",
+          padding: "12px 16px",
+          border: "1px solid rgba(245, 158, 11, 0.45)",
+          borderRadius: "12px",
+          background: "rgba(24, 24, 27, 0.96)",
+          color: "#fafafa",
+          boxShadow: "0 12px 36px rgba(0, 0, 0, 0.28)",
+          fontSize: "13px",
+          lineHeight: "1.55",
+        });
+        document.body.appendChild(notice);
+      }
+      if (notice) notice.textContent = message;
+      window.clearTimeout(providerMismatchNoticeTimer);
+      providerMismatchNoticeTimer = window.setTimeout(() => notice?.remove?.(), 9000);
+    } catch {
+      // Console warning remains available if the renderer DOM is unavailable.
+    }
+    return true;
+  };
+
+  const patchOutgoingModelRequest = (detail) => {
+    const rewritten = rewrittenOutgoingMessage(detail);
+    if (rewritten === detail) return false;
+    try {
+      detail.request = rewritten.request;
+    } catch {
+      // The startup renderer gate uses the returned clone when the event detail
+      // is immutable; the later CustomEvent remains observational only.
+    }
+    return true;
+  };
+
+  const handleModelRequest = (event) => {
+    patchOutgoingModelRequest(event?.detail);
+  };
+
+  const installModelRequestDispatchPatch = () => {
+    if (typeof window.dispatchEvent !== "function") return;
+    if (window.dispatchEvent.__codeyModelRequestPatchVersion === patchVersion) return;
+    originalDispatchEvent = window.dispatchEvent;
+    patchedDispatchEvent = function codeyModelRequestDispatchEvent(event) {
+      try {
+        if (event?.type === modelRequestEvent) {
+          patchOutgoingModelRequest(event.detail);
+        }
+      } catch (error) {
+        console.warn("[Codey] model request repair failed", error);
+      }
+      return originalDispatchEvent.call(this, event);
+    };
+    Object.defineProperty(patchedDispatchEvent, "__codeyModelRequestPatchVersion", {
+      value: patchVersion,
+    });
+    window.dispatchEvent = patchedDispatchEvent;
+  };
+
+  const handleModelResponse = (event) => {
+    const data = event?.data;
+    if (data?.type !== "mcp-response") return;
+    const message = data.message || data.response;
+    rememberThreadProvidersFromResponse(data, message);
+    const requestId = message?.id == null ? "" : String(message.id);
+    const isModelListResponse = (
+      modelListRequestIds.has(requestId)
+      || data.requestMethod === "model/list"
+      || message?.requestMethod === "model/list"
+    );
+    if (!isModelListResponse) {
+      if (nativeSelectionOnly) return;
+      replaceThreadDisplayPayload(message, "result");
+      applyThreadDisplayPatch(data);
+      return;
+    }
+    modelListRequestIds.delete(requestId);
+    const patched = patchedModelPayload(message?.result);
+    if (!patched.changed) return;
+    try {
+      message.result = patched.value;
+    } catch {
+      // Immutable bridge messages fall back to cached-query patching.
+    }
+    scheduleRefresh(1000);
+  };
+
+  // The wrapped getDynamicConfig already patches results on read, so the
+  // interaction-driven re-apply is only a safety net for clients created
+  // between events. Rescanning every Statsig memo cache on every pointerdown
+  // and focusin is far more often than that safety net needs.
+  let lastInteractionApply = 0;
+  const interactionApplyIntervalMs = 2_000;
+  const handleInteraction = (event) => {
+    const pickerInteraction = Boolean(
+      event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`),
+    );
+    if (event?.type === "keydown"
+      && (!pickerInteraction || !["Enter", " ", "ArrowDown"].includes(event.key))) return;
+    if (pickerInteraction) {
+      repairNativeFastControls(event.target);
+      observeModelPickerTrigger(event.target.closest?.(modelPickerTriggerSelector));
+    }
+    installGroupedModelMenuObserver();
+    if (nativeSelectionOnly && !pickerInteraction) return;
+    if (!nativeSelectionOnly) {
+      rememberMenuRouteIntent(event);
+    }
+    scheduleGroupedModelMenuEnhancement();
+    const now = Date.now();
+    if (!pickerInteraction && now - lastInteractionApply < interactionApplyIntervalMs) return;
+    lastInteractionApply = now;
+    // A new or reopened task can mount a fresh QueryClient while the previous
+    // client remains callable. Probe the current React roots on picker
+    // interaction so the visible cache is repaired immediately without the
+    // expensive full-document discovery pass.
+    void deliverModelCatalog({
+      discoverQueryClients: true,
+      invalidate: false,
+    });
+  };
+  const handleFocus = () => {
+    void loadModelCatalog();
+  };
+  interactionEvents.forEach((eventName) => {
+    document.addEventListener(eventName, handleInteraction, true);
+  });
+  installGroupedModelMenuObserver();
+  restoreThreadRoutes();
+  if (!nativeSelectionOnly) restoreThreadRoutes(threadRequestedRoutes, persistedRequestedRoutesKey);
+  restoreDefaultModelHistory();
+  window.addEventListener?.("focus", handleFocus);
+  if (!nativeSelectionOnly) installModelRequestDispatchPatch();
+  if (typeof window.addEventListener === "function") {
+    window.addEventListener(modelRequestEvent, handleModelRequest, true);
+    window.addEventListener(modelResponseEvent, handleModelResponse, true);
+    deliveryState.responsePatchInstalled = true;
+  }
+
+  let requestGatePending = null;
+  const requestGateRestorers = [];
+  const installRequestClientGate = (client) => {
+    if (disposed) throw new Error("模型请求校验已重新加载");
+    if (!client || client.hostId !== "local") throw new Error("未找到本机模型请求入口");
+    const prototype = Object.getPrototypeOf(client);
+    const methods = ["enqueueRequest", "createRequest", "onResult"];
+    const descriptors = methods.map((name) => Object.getOwnPropertyDescriptor(prototype, name));
+    if (descriptors.some((descriptor) => !descriptor?.writable || typeof descriptor.value !== "function")) {
+      throw new Error("当前客户端的模型请求入口不可校验");
+    }
+    const [enqueue, create, result] = descriptors.map((descriptor) => descriptor.value);
+    // Electron may already have the synchronous source gate. Its identity and
+    // response events remain authoritative; avoid wrapping it a second time.
+    if (Function.prototype.toString.call(enqueue).includes("__codeyModelWhitelistPatch")) return true;
+    const replacements = [
+      function (method, params, ...args) {
+        if (this.hostId !== "local" || disposed) return enqueue.call(this, method, params, ...args);
+        (window.__codeyAppServerRequestClients ||= new Map()).set(this.hostId, this);
+        const routed = rewrittenOutgoingMessage({ type: "mcp-request", request: { method, params } });
+        if (blockedProviderRequest(routed)) {
+          showBlockedProviderNotice(routed);
+          return Promise.reject(new Error("Codey blocked provider migration"));
+        }
+        return enqueue.call(this, routed.request.method, routed.request.params, ...args);
+      },
+      function (...args) {
+        const created = create.apply(this, args);
+        if (this.hostId === "local" && !disposed && created?.request) {
+          rememberOutgoingThreadRequest({ type: "mcp-request", request: created.request });
+          rememberOutgoingModelListRequest({ type: "mcp-request", request: created.request });
+        }
+        return created;
+      },
+      function (id, value, ...args) {
+        if (this.hostId === "local" && !disposed) {
+          const method = this.requestPromises?.get(id)?.method;
+          rememberThreadProvidersFromResponse(null, { id, result: value });
+          if (method === "model/list") value = patchedModelPayload(value).value;
+        }
+        return result.call(this, id, value, ...args);
+      },
+    ];
+    methods.forEach((name, index) => {
+      Object.defineProperty(prototype, name, { ...descriptors[index], value: replacements[index] });
+      requestGateRestorers.push(() => {
+        if (prototype[name] === replacements[index]) Object.defineProperty(prototype, name, descriptors[index]);
+      });
+    });
+    (window.__codeyAppServerRequestClients ||= new Map()).set(client.hostId, client);
+    return true;
+  };
+  const ensureRequestGate = () => {
+    if (disposed) return Promise.reject(new Error("模型请求校验已重新加载"));
+    if (nativeSelectionOnly || window.__codeyModelRequestSourceGateInstalled === true) return Promise.resolve(true);
+    if (requestGateRestorers.length) return Promise.resolve(true);
+    if (requestGatePending) return requestGatePending;
+    requestGatePending = Promise.resolve().then(async () => {
+      const knownClient = window.__codeyAppServerRequestClients?.get?.("local");
+      if (knownClient) return installRequestClientGate(knownClient);
+      if (typeof window.__codeyLoadCodexRequestClient !== "function"
+        && typeof window.__codexSessionDeleteBridge === "function") {
+        await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });
+      }
+      if (typeof window.__codeyLoadCodexRequestClient !== "function") throw new Error("模型请求校验尚未就绪");
+      const client = await window.__codeyLoadCodexRequestClient();
+      if (disposed) throw new Error("模型请求校验已重新加载");
+      return installRequestClientGate(client);
+    }).finally(() => { requestGatePending = null; });
+    return requestGatePending;
+  };
+
+  const api = {
+    version: patchVersion,
+    nativeSelectionOnly,
+    apply: applyModelWhitelist,
+    refresh: loadModelCatalog,
+    setCatalog: setModelCatalog,
+    ensureRequestGate,
+    // The Codex renderer calls electronBridge before emitting its diagnostic
+    // CustomEvent. The startup source gate invokes this synchronous hook at the
+    // real transport boundary so thread/start receives modelProvider in time.
+    rewriteOutgoingMessage: rewrittenOutgoingMessage,
+    rewriteIncomingResult: (method, result) => (
+      method === "model/list" ? patchedModelPayload(result).value : result
+    ),
+    trackOutgoingMessage: (detail) => {
+      // AppServerRequestClient runs rewriteOutgoingMessage before createRequest
+      // assigns an id. Track the concrete request too, otherwise a later native
+      // model/list reply can bypass the response patch and replace Codey's hot
+      // catalog after a completed turn.
+      rememberOutgoingModelListRequest(detail);
+      rememberOutgoingThreadRequest(detail);
+      return detail;
+    },
+    isBlockedOutgoingMessage: (detail) => Boolean(blockedProviderRequest(detail)),
+    notifyBlockedOutgoingMessage: showBlockedProviderNotice,
+    enhanceModelMenus: enhanceGroupedModelMenus,
+    presentModel: (modelName, current) => modelPresentation(modelName, current),
+    delivery: () => ({ ...deliveryState }),
+    snapshot: () => ({
+      loaded: catalog.loaded,
+      models: [...catalog.models],
+      defaultModel: catalog.defaultModel,
+    }),
+    dispose() {
+      disposed = true;
+      requestGateRestorers.reverse().forEach((restore) => restore());
+      requestGateRestorers.length = 0;
+      restoreNativeFastPermissions();
+      window.clearTimeout(refreshTimer);
+      refreshTimer = 0;
+      window.clearTimeout(groupedMenuTimer);
+      groupedMenuTimer = 0;
+      window.clearTimeout(providerMismatchNoticeTimer);
+      providerMismatchNoticeTimer = 0;
+      document.getElementById?.("codey-provider-mismatch-notice")?.remove?.();
+      groupedMenuObserver?.disconnect?.();
+      groupedMenuObserver = null;
+      for (const observer of groupedMenuTextObservers.values()) {
+        observer.disconnect?.();
+      }
+      groupedMenuTextObservers.clear();
+      for (const element of subagentModelLabels.keys()) {
+        stopSubagentModelLabel(element);
+      }
+      for (const element of modelPickerTriggers.keys()) {
+        stopModelPickerTrigger(element);
+      }
+      interactionEvents.forEach((eventName) => {
+        document.removeEventListener(eventName, handleInteraction, true);
+      });
+      window.removeEventListener?.("focus", handleFocus);
+      window.removeEventListener?.(modelRequestEvent, handleModelRequest, true);
+      window.removeEventListener?.(modelResponseEvent, handleModelResponse, true);
+      if (patchedDispatchEvent && window.dispatchEvent === patchedDispatchEvent) {
+        window.dispatchEvent = originalDispatchEvent;
+      }
+      originalDispatchEvent = null;
+      patchedDispatchEvent = null;
+      knownModelQueryClients.clear();
+      modelListRequestIds.clear();
+      pendingThreadRequests.clear();
+      threadPersistedProviders.clear();
+      threadRuntimeProviders.clear();
+      unconfirmedThreadProviders.clear();
+      threadRoutes.clear();
+      threadRequestedRoutes.clear();
+      pendingRouteIntent = null;
+    },
+  };
+  window.__codeyModelWhitelistPatch = api;
+  void loadModelCatalog();
+})();

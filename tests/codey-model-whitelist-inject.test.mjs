@@ -1,0 +1,5265 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+import { FakeElementCore } from "./helpers/fake-element.mjs";
+
+const MODEL_CONFIG_ID = "107580212";
+
+const mixedCompactionCatalog = {
+  status: "ok", models: ["local/shared", "remote/shared", "gpt-6-astra"],
+  default_model: "local/shared",
+  model_metadata: [
+    { model: "local/shared", source_model: "shared", route_provider_id: "local", provider_id: "codey_router", supports_remote_compaction: false },
+    { model: "remote/shared", source_model: "shared", route_provider_id: "remote", provider_id: "codey_router_remote", supports_remote_compaction: true },
+    { model: "gpt-6-astra", source_model: "gpt-6-astra", route_provider_id: "openai", provider_id: "codey_router_remote", supports_remote_compaction: true, official_account: true },
+  ],
+};
+const compactionRequest = (method, params, id = method) => ({ type: "mcp-request", request: { id, method, params } });
+const compactionReply = (runtime, id, result) => runtime.dispatchWindowEvent("message", {
+  data: { type: "mcp-response", message: { id, result } },
+});
+
+test("all routes use the single router for new and forked threads, including legacy metadata", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  for (const method of ["thread/start", "thread/fork"]) {
+    for (const model of ["local/shared", "remote/shared", "gpt-6-astra", "unknown/shared"]) {
+      const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, { model }));
+      assert.equal(routed.request.params.modelProvider, "codey_router");
+    }
+  }
+  runtime.patch.dispose();
+});
+
+test("an explicit false capability overrides a stale remote provider hint", async () => {
+  const catalog = { ...mixedCompactionCatalog, model_metadata: mixedCompactionCatalog.model_metadata.map((entry) => (
+    entry.route_provider_id === "remote" ? { ...entry, supports_remote_compaction: false } : entry
+  )) };
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+    const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, { model: "remote/shared" }));
+    assert.equal(routed.request.params.modelProvider, "codey_router");
+  }
+  runtime.patch.dispose();
+});
+
+test("the native request client sends route changes through its frozen bridge", async () => {
+  const sends = [];
+  const bridge = Object.freeze({ sendMessageFromView: (request) => sends.push(request) });
+  class NativeClient {
+    constructor(hostId = "local") { this.hostId = hostId; this.requestPromises = new Map(); }
+    enqueueRequest(method, params, ...options) {
+      const created = this.createRequest(method, params, options);
+      bridge.sendMessageFromView(created.request);
+      return created.promise;
+    }
+    createRequest(method, params, options) {
+      const id = String(sends.length + 1);
+      const promise = new Promise((resolve) => this.requestPromises.set(id, { method, resolve }));
+      return { request: { id, method, params, options }, promise };
+    }
+    onResult(id, result) { this.requestPromises.get(id)?.resolve(result); this.requestPromises.delete(id); }
+  }
+  const originals = [NativeClient.prototype.enqueueRequest, NativeClient.prototype.createRequest, NativeClient.prototype.onResult];
+  const client = new NativeClient();
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { requestClient: client });
+  assert.equal(await runtime.patch.ensureRequestGate(), true);
+  assert.equal(await runtime.patch.ensureRequestGate(), true);
+  const started = client.enqueueRequest("thread/start", { model: "remote/shared" }, "widget", 7);
+  assert.equal(sends[0].params.modelProvider, "codey_router");
+  assert.deepEqual(sends[0].options, ["widget", 7]);
+  // No renderer response event: the native resolver must confirm the carrier
+  // before consumers update React state and send another request.
+  client.onResult("1", { modelProvider: "codey_router_remote", thread: { id: "native", model: "shared" } });
+  await started;
+  for (const method of ["thread/settings/update", "turn/start", "thread/resume"]) {
+    const pending = client.enqueueRequest(method, { threadId: "native", model: "local/shared" });
+    const sent = sends.at(-1);
+    assert.equal(sent.params.modelProvider, method === "thread/resume" ? "codey_router" : undefined);
+    client.onResult(sent.id, { modelProvider: "codey_router", thread: { id: "native", model: "shared" } });
+    await pending;
+  }
+  assert.equal(sends.length, 4, "Codey route changes reach the frozen bridge");
+  const remote = new NativeClient("remote-host");
+  const bypassed = remote.enqueueRequest("thread/start", { model: "local/shared" });
+  assert.equal(sends[4].params.modelProvider, undefined);
+  remote.onResult("5", {});
+  await bypassed;
+  const listed = client.enqueueRequest("model/list", {});
+  client.onResult("6", { data: [{ model: "stale" }] });
+  const models = await listed;
+  assert.ok(models.data.some((entry) => entry.model === "remote/shared"));
+  assert.equal(models.data.some((entry) => entry.model === "stale"), false);
+  runtime.patch.dispose();
+  assert.deepEqual([NativeClient.prototype.enqueueRequest, NativeClient.prototype.createRequest, NativeClient.prototype.onResult], originals);
+});
+
+test("disposing before a cached native gate installs leaves the client unchanged", async () => {
+  class NativeClient {
+    constructor() { this.hostId = "local"; }
+    enqueueRequest() {}
+    createRequest() {}
+    onResult() {}
+  }
+  const original = NativeClient.prototype.enqueueRequest;
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { cachedRequestClient: new NativeClient() });
+  const pending = runtime.patch.ensureRequestGate();
+  runtime.patch.dispose();
+  await assert.rejects(pending, /已重新加载/);
+  assert.equal(NativeClient.prototype.enqueueRequest, original);
+});
+
+test("native request gate fails when the client cannot be verified", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], { requestClient: { hostId: "local" } });
+  await assert.rejects(runtime.patch.ensureRequestGate(), /不可校验/);
+  runtime.patch.dispose();
+});
+
+test("resume and fork retain the saved route after remote compaction is disabled", async () => {
+  const catalog = {
+    ...mixedCompactionCatalog,
+    default_model: "gpt-6-astra",
+    model_metadata: mixedCompactionCatalog.model_metadata.map((entry) => entry.route_provider_id === "remote"
+      ? { ...entry, provider_id: "codey_router", supports_remote_compaction: false } : entry),
+  };
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["saved", { routeProviderId: "remote", sourceModel: "shared" }],
+  ]));
+  const runtime = await loadPatch(catalog, [statsigClient()], { storage });
+  for (const method of ["thread/resume", "thread/fork"]) {
+    const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, {
+      threadId: "saved", modelProvider: "codey_router_remote",
+    }));
+    assert.equal(routed.request.params.model, "remote/shared");
+    assert.equal(routed.request.params.modelProvider, "codey_router");
+  }
+  runtime.patch.dispose();
+});
+
+test("unknown model-less forks do not inherit the remote default route", async () => {
+  const runtime = await loadPatch({ ...mixedCompactionCatalog, default_model: "gpt-6-astra" }, [statsigClient()]);
+  const routed = runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/fork", {
+    threadId: "unknown", modelProvider: "codey_router_remote",
+  }));
+  assert.equal(Object.hasOwn(routed.request.params, "model"), false);
+  assert.equal(routed.request.params.modelProvider, "codey_router");
+  runtime.patch.dispose();
+});
+
+test("loaded Codey threads switch both directions without a blocked provider request", async () => {
+  for (const currentProvider of ["codey_router", "codey_router_remote"]) {
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+    runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/start", { model: "local/shared" }));
+    compactionReply(runtime, "thread/start", { modelProvider: currentProvider, thread: { id: "mixed", model: "shared" } });
+    for (const model of ["remote/shared", "local/shared", "gpt-6-astra"]) {
+      for (const method of ["thread/settings/update", "thread/resume", "turn/start"]) {
+        const changed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, { threadId: "mixed", model }));
+        assert.equal(runtime.patch.isBlockedOutgoingMessage(changed), false);
+        assert.equal(Object.getOwnPropertySymbols(changed.request.params).some((key) => (
+          key.description === "codeyBlockedProviderRequest"
+        )), false);
+        assert.equal(changed.request.params.modelProvider, method === "thread/resume" ? "codey_router" : undefined);
+      }
+    }
+    runtime.patch.dispose();
+  }
+});
+
+for (const returnedProvider of [undefined, "codey_router", "codey_router_remote"]) {
+  test(`resume retains compatibility with its known Codey carrier (returned provider: ${returnedProvider})`, async () => {
+    const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+    runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/resume", { threadId: "loaded", model: "remote/shared", modelProvider: "codey_router" }));
+    compactionReply(runtime, "thread/resume", { modelProvider: returnedProvider, thread: { id: "loaded", model: "shared", modelProvider: "codey_router" } });
+    const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId: "loaded" }));
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false);
+    runtime.patch.dispose();
+  });
+}
+
+test("a resume response without any provider cannot confirm the requested carrier", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  runtime.patch.rewriteOutgoingMessage(compactionRequest("thread/resume", { threadId: "unknown", model: "remote/shared" }));
+  compactionReply(runtime, "thread/resume", { thread: { id: "unknown", model: "shared" } });
+  const turn = runtime.patch.rewriteOutgoingMessage(compactionRequest("turn/start", { threadId: "unknown", model: "remote/shared" }));
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), true);
+  runtime.patch.dispose();
+});
+
+test("non-Codey providers still require migration before route changes", async () => {
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  for (const modelProvider of ["openai", "local-official", "external-provider"]) {
+    for (const method of ["thread/settings/update", "turn/start"]) {
+      const changed = runtime.patch.rewriteOutgoingMessage(compactionRequest(method, {
+        threadId: modelProvider, model: "remote/shared", modelProvider,
+      }));
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(changed), true);
+      const blockedKey = Object.getOwnPropertySymbols(changed.request.params).find((key) => (
+        key.description === "codeyBlockedProviderRequest"
+      ));
+      assert.equal(changed.request.params[blockedKey].reason, "provider_migration_required");
+      assert.equal(changed.request.params[blockedKey].targetProviderId, "codey_router");
+    }
+  }
+  runtime.patch.dispose();
+});
+
+for (const nativeSelectionOnly of [false, true]) {
+test(`Fast stays available across routes and models (native selection: ${nativeSelectionOnly})`, async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const trigger = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const model = { model: "relay/gpt-6-astra", serviceTiers: [{ id: "priority", name: "Fast" }] };
+  const uiCache = [], requestCache = [], alternateCache = [];
+  let loading = false, selectedTier = "priority";
+  // The native compiled hook caches its return object separately from its
+  // account-derived boolean. An API-key account keeps that boolean false.
+  const nativePermission = (cache) => {
+    const allowed = false;
+    if (cache[3] !== loading || cache[4] !== allowed) {
+      cache[3] = loading;
+      cache[4] = allowed;
+      cache[5] = { isServiceTierAllowed: allowed, isLoading: loading };
+    }
+    return cache[5];
+  };
+  const nativePicker = {
+    model: model.model,
+    models: [model, { model: "openai-model", serviceTiers: model.serviceTiers }],
+    onSelectServiceTier: undefined,
+  };
+  const renderNative = () => {
+    const allowed = nativePermission(uiCache).isServiceTierAllowed;
+    nativePermission(alternateCache);
+    nativePicker.onSelectServiceTier = allowed ? (tier) => { selectedTier = tier; } : undefined;
+    return {
+      showFast: allowed && model.serviceTiers.length > 0,
+      serviceTierForRequest: nativePermission(requestCache).isServiceTierAllowed ? selectedTier : null,
+    };
+  };
+  const composer = {
+    memoizedProps: { conversationId: "thread", hideLabel: false },
+    updateQueue: { memoCache: { data: [uiCache, requestCache] } },
+    alternate: { updateQueue: { memoCache: { data: [alternateCache] } } },
+  };
+  const unrelated = { isServiceTierAllowed: false, isLoading: false };
+  composer.return = { updateQueue: { memoCache: { data: [[unrelated]] } } };
+  trigger.__reactFiber$fastTest = { memoizedProps: nativePicker, return: composer };
+  const runtime = await loadPatch({
+    status: "ok",
+    native_selection_only: nativeSelectionOnly,
+    models: [model.model, "openai-model"],
+    default_model: model.model,
+  }, [statsigClient()], { documentBody: body, nativeSelectionOnly });
+  assert.deepEqual(renderNative(), { showFast: false, serviceTierForRequest: null });
+
+  runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+  assert.deepEqual(renderNative(), { showFast: true, serviceTierForRequest: "priority" });
+  assert.equal(uiCache[4], false, "keep the native account-derived cache key unchanged");
+  assert.equal(alternateCache[5].isServiceTierAllowed, true);
+  assert.equal(unrelated.isServiceTierAllowed, false);
+  nativePicker.onSelectServiceTier(null);
+  assert.equal(renderNative().serviceTierForRequest, null);
+  nativePicker.onSelectServiceTier("priority");
+  runtime.dispatchDocumentEvent("keydown", { target: trigger, key: "Enter" });
+  assert.equal(renderNative().serviceTierForRequest, "priority");
+
+  nativePicker.model = "openai-model";
+  runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+  assert.deepEqual(renderNative(), { showFast: true, serviceTierForRequest: "priority" });
+  nativePicker.model = model.model;
+  model.serviceTiers = [];
+  runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+  assert.equal(uiCache[5].isServiceTierAllowed, true, "permission does not depend on model tiers");
+
+  model.serviceTiers = [{ id: "priority", name: "Fast" }];
+  loading = true;
+  renderNative();
+  runtime.dispatchDocumentEvent("keydown", { target: trigger, key: "ArrowDown" });
+  assert.equal(uiCache[5].isLoading, true);
+  runtime.patch.dispose();
+  assert.equal(uiCache[5].isServiceTierAllowed, false);
+  assert.equal(requestCache[5].isServiceTierAllowed, false);
+  assert.equal(alternateCache[5].isServiceTierAllowed, false);
+});
+}
+
+async function loadPatch(
+  catalogResponse,
+  clients,
+  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null } = {},
+) {
+  const [bridgeSource, source] = await Promise.all([
+    readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/model-whitelist-inject.js", import.meta.url), "utf8"),
+  ]);
+  let nextTimer = 0;
+  const timers = new Map();
+  const windowListeners = new Map();
+  const documentListeners = new Map();
+  const mutationObserverInstalls = [];
+  const dispatchedEvents = [];
+  let wildcardScanCount = 0;
+  const body = documentBody || {};
+  if (queryClient) {
+    body.__reactFiber$codeyTest = {
+      memoizedProps: {
+        queryClient,
+        reactModelState,
+      },
+    };
+  }
+  const head = documentBody ? new FakeElementCore("head") : null;
+  const documentElement = documentBody ? new FakeElementCore("html") : {};
+  const allDocumentRoots = () => [head, body, documentElement].filter(Boolean);
+  const document = {
+    body,
+    documentElement,
+    head,
+    createElement(tagName) {
+      return documentBody ? new FakeElementCore(tagName) : null;
+    },
+    getElementById() {
+      return allDocumentRoots()
+        .map((root) => root.querySelector?.("[id]"))
+        .find(Boolean) || null;
+    },
+    querySelectorAll(selector) {
+      if (selector === "*") wildcardScanCount += 1;
+      return documentBody ? body.querySelectorAll(selector) : [];
+    },
+    addEventListener(name, listener) {
+      const listeners = documentListeners.get(name) || new Set();
+      listeners.add(listener);
+      documentListeners.set(name, listeners);
+    },
+    removeEventListener(name, listener) {
+      documentListeners.get(name)?.delete(listener);
+    },
+  };
+  const bridge = async (path) => {
+    assert.equal(path, "/codex-model-catalog");
+    return typeof catalogResponse === "function"
+      ? catalogResponse()
+      : catalogResponse;
+  };
+  const window = {
+    __codeyNativeModelSelectionOnly: nativeSelectionOnly,
+    CustomEvent: class CustomEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        this.detail = init.detail;
+      }
+    },
+    __STATSIG__: {
+      firstInstance: clients[0],
+      instances: Object.fromEntries(clients.slice(1).map((client, index) => [index, client])),
+    },
+    addEventListener(name, listener) {
+      const listeners = windowListeners.get(name) || new Set();
+      listeners.add(listener);
+      windowListeners.set(name, listeners);
+    },
+    removeEventListener(name, listener) {
+      windowListeners.get(name)?.delete(listener);
+    },
+    setTimeout(callback) {
+      nextTimer += 1;
+      timers.set(nextTimer, callback);
+      return nextTimer;
+    },
+    clearTimeout(id) {
+      timers.delete(id);
+    },
+    dispatchEvent(event) {
+      dispatchedEvents.push(event);
+      for (const listener of windowListeners.get(event?.type) || []) {
+        listener(event);
+      }
+      return true;
+    },
+    MutationObserver: class MutationObserver {
+      constructor(callback) {
+        this.callback = callback;
+        this.disconnected = false;
+      }
+
+      observe(target, options) {
+        mutationObserverInstalls.push({
+          callback: this.callback,
+          observer: this,
+          options,
+          target,
+        });
+      }
+
+      disconnect() {
+        this.disconnected = true;
+      }
+    },
+  };
+  if (storage) window.localStorage = storage;
+  if (requestClient) window.__codeyLoadCodexRequestClient = async () => requestClient;
+  if (cachedRequestClient) window.__codeyAppServerRequestClients = new Map([["local", cachedRequestClient]]);
+  if (bridgeReady) window.__codexSessionDeleteBridge = bridge;
+  Function("window", "document", "globalThis", "console", bridgeSource)(
+    window,
+    document,
+    window,
+    { warn() {} },
+  );
+  const originalDispatchEvent = window.dispatchEvent;
+  Function("window", "document", "globalThis", "console", source)(
+    window,
+    document,
+    window,
+    { warn() {} },
+  );
+  const patch = window.__codeyModelWhitelistPatch;
+  if (bridgeReady) await patch.refresh();
+  return {
+    patch,
+    async reload() {
+      Function("window", "document", "globalThis", "console", source)(
+        window, document, window, { warn() {} },
+      );
+      const nextPatch = window.__codeyModelWhitelistPatch;
+      await nextPatch.refresh();
+      return nextPatch;
+    },
+    dispatchWasWrapped() { return window.dispatchEvent !== originalDispatchEvent; },
+    connectBridge() {
+      window.__codexSessionDeleteBridge = bridge;
+    },
+    dispatchWindowEvent(name, event) {
+      window.dispatchEvent({ ...event, type: name });
+    },
+    dispatchDocumentEvent(name, event = {}) {
+      for (const listener of documentListeners.get(name) || []) {
+        listener({ ...event, type: name });
+      }
+    },
+    dispatchedEvents() {
+      return [...dispatchedEvents];
+    },
+    wildcardScanCount() {
+      return wildcardScanCount;
+    },
+    mutationObserverInstalls() {
+      return mutationObserverInstalls;
+    },
+    mutationObserverOptions() {
+      return mutationObserverInstalls.map((install) => install.options);
+    },
+    dispatchObserverMutations(target, mutations) {
+      for (const install of mutationObserverInstalls) {
+        if (install.observer.disconnected || install.target !== target) continue;
+        install.callback(mutations);
+      }
+    },
+    async runNextTimer() {
+      const next = timers.entries().next().value;
+      assert.ok(next, "a retry timer should be pending");
+      const [id, callback] = next;
+      timers.delete(id);
+      callback();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    },
+  };
+}
+
+function modelConfig(models, defaultModel) {
+  return {
+    value: {
+      available_models: models,
+      default_model: defaultModel,
+      untouched: true,
+    },
+  };
+}
+
+function memoryStorage() {
+  const values = new Map();
+  let writes = 0;
+  return {
+    getItem(key) {
+      return values.has(key) ? values.get(key) : null;
+    },
+    setItem(key, value) {
+      writes += 1;
+      values.set(key, String(value));
+    },
+    writeCount() {
+      return writes;
+    },
+  };
+}
+
+function statsigClient(initialModels = ["gpt-5.6-sol", "gpt-5.3-codex"]) {
+  const memo = modelConfig(initialModels, "gpt-5.4");
+  const external = modelConfig(initialModels, "gpt-5.4");
+  const internal = modelConfig(initialModels, "gpt-5.4");
+  const events = [];
+  return {
+    memo,
+    external,
+    internal,
+    events,
+    _memoCache: {
+      [`c|${MODEL_CONFIG_ID}`]: memo,
+    },
+    _store: {
+      _valuesForExternalUse: {
+        dynamic_configs: {
+          [MODEL_CONFIG_ID]: external,
+        },
+      },
+      _values: {
+        _values: {
+          dynamic_configs: {
+            [MODEL_CONFIG_ID]: internal,
+          },
+        },
+      },
+    },
+    getDynamicConfig(name) {
+      return name === MODEL_CONFIG_ID
+        ? modelConfig(initialModels, "gpt-5.4")
+        : { value: { available_models: ["unrelated-model"] } };
+    },
+    $emt(event) {
+      events.push(event);
+    },
+  };
+}
+
+function modelDescriptor(model, isDefault = false) {
+  return {
+    model,
+    id: model,
+    displayName: model,
+    hidden: false,
+    isDefault,
+    defaultReasoningEffort: "medium",
+    supportedReasoningEfforts: [{
+      reasoningEffort: "medium",
+      description: "medium effort",
+    }],
+  };
+}
+
+function activeModelQueryClient(initialModels) {
+  const queryKey = ["models", "list", "local", "apikey", 100];
+  const entries = new Map([[
+    JSON.stringify(queryKey),
+    {
+      queryKey,
+      data: {
+        data: initialModels.map((model, index) => modelDescriptor(model, index === 0)),
+        nextCursor: null,
+      },
+    },
+  ]]);
+  let invalidations = 0;
+  const listeners = new Set();
+  return {
+    get invalidations() {
+      return invalidations;
+    },
+    getQueriesData({ queryKey: prefix }) {
+      return [...entries.values()]
+        .filter((entry) => prefix.every((value, index) => entry.queryKey[index] === value))
+        .map((entry) => [entry.queryKey, entry.data]);
+    },
+    setQueryData(queryKeyValue, value) {
+      const entry = entries.get(JSON.stringify(queryKeyValue));
+      assert.ok(entry, "the active model query should exist");
+      entry.data = typeof value === "function" ? value(entry.data) : value;
+      for (const listener of listeners) listener(entry.data);
+    },
+    async invalidateQueries({ queryKey: prefix }) {
+      assert.deepEqual(prefix, ["models", "list"]);
+      invalidations += 1;
+    },
+    models() {
+      return entries.get(JSON.stringify(queryKey)).data.data.map((model) => model.model);
+    },
+    result() {
+      return entries.get(JSON.stringify(queryKey)).data;
+    },
+    subscribe(listener) {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    model(modelName) {
+      return entries
+        .get(JSON.stringify(queryKey))
+        .data
+        .data
+        .find((model) => model.model === modelName);
+    },
+  };
+}
+
+test("native third-party selection notifies mounted pickers without mutating shared React query results", async () => {
+  const upstreamModels = [
+    "MiniMax-M2.7-highspeed", "claude-haiku-4-5", "claude-haiku-4-5-20251001",
+    "claude-opus-4-6", "claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+    "claude-sonnet-4-5", "claude-sonnet-4-6", "gpt-5.3-codex", "gpt-5.3-codex-spark",
+    "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "kimi-k2.5", "kimi-k2.6",
+  ];
+  const selectedModels = ["claude-opus-4-8", "claude-opus-5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5"];
+  const queryClient = activeModelQueryClient(upstreamModels);
+  const sharedReactResult = queryClient.result();
+  let renderedModels = sharedReactResult.data.map(model => model.model);
+  let notifications = 0;
+  queryClient.subscribe(result => {
+    notifications++;
+    renderedModels = result.data.map(model => model.model);
+  });
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true,
+    models: selectedModels, default_model: "gpt-5.5",
+  }, [statsigClient()], {
+    queryClient, reactModelState: sharedReactResult, nativeSelectionOnly: true,
+  });
+  assert.equal(notifications, 1, "the mounted picker must receive a cache update notification");
+  assert.deepEqual(renderedModels, selectedModels);
+  assert.deepEqual(sharedReactResult.data.map(model => model.model), upstreamModels);
+  assert.notEqual(queryClient.result(), sharedReactResult);
+  assert.equal(runtime.patch.delivery().reactContainers, 0);
+  runtime.patch.dispose();
+});
+
+test("adding GPT-6 on routed models notifies the mounted picker without mutating shared results", async () => {
+  const originalModels = ["gpt-5.6-sol"];
+  const queryClient = activeModelQueryClient(originalModels);
+  const sharedReactResult = queryClient.result();
+  const runtime = await loadPatch({
+    status: "ok", models: originalModels, default_model: originalModels[0],
+  }, [statsigClient()], { queryClient, reactModelState: sharedReactResult });
+  let renderedModels = queryClient.models();
+  let notifications = 0;
+  queryClient.subscribe(result => {
+    notifications++;
+    renderedModels = result.data.map(model => model.model);
+  });
+
+  const selectedModels = ["gpt-6-astra", "gpt-5.6-sol"];
+  await runtime.patch.setCatalog({
+    status: "ok", models: selectedModels, default_model: "gpt-6-astra",
+  });
+
+  assert.equal(notifications, 1, "the mounted picker must receive the newly selected model");
+  assert.deepEqual(renderedModels, selectedModels);
+  assert.deepEqual(sharedReactResult.data.map(model => model.model), originalModels);
+  runtime.patch.dispose();
+});
+
+test("native selection filters seven models to the five checked without changing requests or native settings", async () => {
+  const originalModels = ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark"];
+  const selectedModels = originalModels.filter(model => !["gpt-5.4", "gpt-5.3-codex-spark"].includes(model));
+  const client = statsigClient(originalModels);
+  const queryClient = activeModelQueryClient(originalModels);
+  const originalDescriptor = queryClient.model("gpt-5.6-sol");
+  originalDescriptor.serviceTiers = ["default"];
+  let storageAccesses = 0;
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true,
+    models: selectedModels, default_model: "gpt-5.5",
+  }, [client], {
+    queryClient, nativeSelectionOnly: true,
+    storage: { getItem() { storageAccesses++; return null; }, setItem() { storageAccesses++; } },
+  });
+  assert.deepEqual(queryClient.models(), selectedModels);
+  assert.deepEqual(client.external.value.available_models, selectedModels);
+  assert.equal(client.external.value.default_model, "gpt-5.4");
+  assert.notEqual(queryClient.model("gpt-5.6-sol"), originalDescriptor);
+  assert.deepEqual(originalDescriptor.serviceTiers, ["default"]);
+  for (const name of selectedModels) {
+    assert.ok(queryClient.model(name).serviceTiers.some(tier => tier.id === "priority"));
+    assert.ok(queryClient.model(name).additionalSpeedTiers.includes("fast"));
+  }
+  assert.equal(runtime.dispatchWasWrapped(), false);
+  for (const method of ["thread/start", "thread/resume", "thread/fork", "thread/settings/update", "turn/start"]) {
+    const request = { type: "mcp-request", request: { method, params: { model: "gpt-5.4", modelProvider: "openai", threadId: "native-thread" } } };
+    const before = structuredClone(request);
+    assert.equal(runtime.patch.rewriteOutgoingMessage(request), request);
+    runtime.patch.trackOutgoingMessage(request);
+    runtime.dispatchWindowEvent("codex-message-from-view", { detail: request });
+    assert.deepEqual(request, before);
+  }
+  assert.equal(storageAccesses, 1, "read historical route bindings once without writing native selections");
+  runtime.patch.dispose();
+});
+
+test("native selection hot updates and filters later model replies while preserving raw slash model IDs", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol", "gpt-5.5", "org/model-a"]);
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true,
+    models: ["gpt-5.6-sol", "gpt-5.5"], default_model: "gpt-5.6-sol",
+  }, [client], { queryClient, nativeSelectionOnly: true });
+  assert.equal(await runtime.patch.setCatalog({
+    status: "ok", native_selection_only: true,
+    models: ["gpt-5.5", "org/model-a"], default_model: "gpt-5.5",
+  }), true);
+  assert.deepEqual(queryClient.models(), ["gpt-5.5", "org/model-a"]);
+  assert.equal(queryClient.model("org/model-a").providerId, undefined);
+  const modelRequest = { type: "mcp-request", request: { id: "native-model-list", method: "model/list", params: {} } };
+  runtime.patch.trackOutgoingMessage(modelRequest);
+  const reply = { type: "mcp-response", message: { id: "native-model-list", result: {
+    data: [modelDescriptor("gpt-5.6-sol"), modelDescriptor("gpt-5.5"), modelDescriptor("org/model-a")], nextCursor: null,
+  } } };
+  runtime.dispatchWindowEvent("message", { data: reply });
+  assert.deepEqual(reply.message.result.data.map(model => model.model), ["gpt-5.5", "org/model-a"]);
+  const turn = { type: "mcp-request", request: { method: "turn/start", params: { model: "org/model-a", modelProvider: "my-native-provider" } } };
+  const before = structuredClone(turn);
+  assert.equal(runtime.patch.rewriteOutgoingMessage(turn), turn);
+  assert.deepEqual(turn, before);
+  runtime.patch.dispose();
+});
+
+test("native selection leaves Codex unchanged until a usable native catalog is available", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol", "gpt-5.5"]);
+  const runtime = await loadPatch({
+    status: "not_configured", native_selection_only: true, models: [], default_model: "",
+  }, [client], { queryClient, nativeSelectionOnly: true });
+  assert.equal(runtime.patch.snapshot().loaded, false);
+  assert.deepEqual(queryClient.models(), ["gpt-5.6-sol", "gpt-5.5"]);
+  assert.equal(await runtime.patch.setCatalog({ status: "ok", models: ["route/model"], default_model: "route/model" }), false);
+  assert.deepEqual(queryClient.models(), ["gpt-5.6-sol", "gpt-5.5"]);
+  runtime.patch.dispose();
+});
+
+test("native selection clears mounted model lists only when explicitly requested", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol", "gpt-5.5"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    native_selection_only: true,
+    clear_models: true,
+    models: [],
+    default_model: "",
+  }, [client], { queryClient, nativeSelectionOnly: true });
+
+  assert.deepEqual(runtime.patch.snapshot(), {
+    loaded: true,
+    models: [],
+    defaultModel: "",
+  });
+  assert.deepEqual(queryClient.models(), []);
+  assert.deepEqual(client.external.value.available_models, []);
+  runtime.patch.dispose();
+});
+
+test("native selection blocks model requests while the current provider is disabled", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    native_selection_only: true,
+    native_model_provider: "disabled-provider",
+    clear_models: true,
+    models: [],
+    default_model: "",
+  }, [statsigClient()], { nativeSelectionOnly: true });
+
+  for (const method of [
+    "thread/start",
+    "thread/resume",
+    "thread/fork",
+    "thread/settings/update",
+    "turn/start",
+  ]) {
+    const request = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request",
+      request: {
+        method,
+        params: { threadId: "disabled-thread", model: "stale-model" },
+      },
+    });
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(request), true, method);
+    assert.equal(request.request.params.model, "stale-model");
+  }
+  const clearSelection = {
+    type: "mcp-request",
+    request: {
+      method: "thread/settings/update",
+      params: { threadId: "disabled-thread", model: null },
+    },
+  };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(clearSelection), clearSelection);
+  runtime.patch.dispose();
+});
+
+test("runtime whitelist keeps Spark and removes unsupported channel models", async () => {
+  const firstClient = statsigClient();
+  const secondClient = statsigClient(["gpt-5.6-terra"]);
+  const expected = [
+    "gpt-5.6-sol",
+    "gpt-5.4",
+    "gpt-5.3-codex-spark",
+    "provider-fast-coder",
+  ];
+  const { patch } = await loadPatch({
+    status: "ok",
+    models: expected,
+    default_model: "gpt-5.3-codex-spark",
+  }, [firstClient, secondClient]);
+
+  assert.deepEqual(patch.snapshot(), {
+    loaded: true,
+    models: expected,
+    defaultModel: "gpt-5.3-codex-spark",
+  });
+  for (const client of [firstClient, secondClient]) {
+    assert.deepEqual(client.memo.value.available_models, expected);
+    assert.deepEqual(client.external.value.available_models, expected);
+    assert.deepEqual(client.internal.value.available_models, expected);
+    assert.equal(client.external.value.default_model, "gpt-5.3-codex-spark");
+
+    const futureConfig = client.getDynamicConfig(MODEL_CONFIG_ID);
+    assert.deepEqual(futureConfig.value.available_models, expected);
+    assert.equal(futureConfig.value.default_model, "gpt-5.3-codex-spark");
+    assert.equal(futureConfig.value.untouched, true);
+    assert.deepEqual(
+      client.getDynamicConfig("another-config"),
+      { value: { available_models: ["unrelated-model"] } },
+    );
+  }
+  assert.equal(expected.includes("gpt-5.3-codex"), false);
+  assert.equal(expected.includes("gpt-5.6-terra"), false);
+  patch.dispose();
+});
+
+test("context capability changes update existing model descriptors", async () => {
+  const queryClient = activeModelQueryClient(["route/model"]);
+  const catalog = { status: "ok", models: ["route/model"], default_model: "route/model", model_metadata: [{ model: "route/model", context_window: 1_000_000, max_context_window: 1_000_000 }] };
+  const { patch } = await loadPatch(catalog, [statsigClient()], { queryClient });
+  assert.equal(Object.hasOwn(queryClient.model("route/model"), "supports1MContext"), false);
+  assert.equal(queryClient.model("route/model").contextWindow, 1_000_000);
+  assert.equal(queryClient.model("route/model").maxContextWindow, 1_000_000);
+  const customMetadata = { model: "route/model", context_window: 100000, max_context_window: 100000, effective_context_window_percent: 87, auto_compact_token_limit: 80000, codey_context_source: "user_declared" };
+  await patch.setCatalog({ ...catalog, model_metadata: [customMetadata] });
+  assert.equal(queryClient.model("route/model").contextWindow, 100000);
+  assert.equal(queryClient.model("route/model").effectiveContextWindowPercent, 87);
+  assert.equal(queryClient.model("route/model").autoCompactTokenLimit, 80000);
+  assert.equal(queryClient.model("route/model").contextSource, "user_declared");
+  await patch.setCatalog({ ...catalog, model_metadata: [{ ...customMetadata, auto_compact_token_limit: 70000 }] });
+  assert.equal(queryClient.model("route/model").autoCompactTokenLimit, 70000);
+  await patch.setCatalog({ ...catalog, model_metadata: [{ model: "route/model", context_window: null, max_context_window: null }] });
+  assert.equal(queryClient.model("route/model").contextWindow, null);
+  assert.equal(queryClient.model("route/model").maxContextWindow, null);
+  patch.dispose();
+});
+
+test("an explicit refresh hot updates the native model list and default", async () => {
+  const client = statsigClient();
+  const catalogResponse = {
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  };
+  const { patch } = await loadPatch(catalogResponse, [client]);
+
+  catalogResponse.models = ["gpt-5.6-sol", "provider-hot-added"];
+  catalogResponse.default_model = "provider-hot-added";
+  await patch.refresh();
+
+  assert.deepEqual(patch.snapshot(), {
+    loaded: true,
+    models: ["gpt-5.6-sol", "provider-hot-added"],
+    defaultModel: "provider-hot-added",
+  });
+  assert.deepEqual(client.external.value.available_models, [
+    "gpt-5.6-sol",
+    "provider-hot-added",
+  ]);
+  assert.equal(client.external.value.default_model, "provider-hot-added");
+  patch.dispose();
+});
+
+test("a backend-pushed catalog updates immediately without a nested bridge request", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  }, [client], { queryClient });
+  const { patch } = runtime;
+  const eventsBeforePush = client.events.length;
+
+  assert.equal(patch.version, "66");
+  assert.equal(await patch.setCatalog({
+    status: "ok",
+    models: ["gpt-5.6-sol", "provider-hot-pushed"],
+    default_model: "provider-hot-pushed",
+  }), true);
+  assert.deepEqual(patch.snapshot(), {
+    loaded: true,
+    models: ["gpt-5.6-sol", "provider-hot-pushed"],
+    defaultModel: "provider-hot-pushed",
+  });
+  assert.deepEqual(client.external.value.available_models, [
+    "gpt-5.6-sol",
+    "provider-hot-pushed",
+  ]);
+  assert.equal(client.external.value.default_model, "provider-hot-pushed");
+  assert.ok(client.events.length > eventsBeforePush);
+  assert.equal(client.events.at(-1).name, "values_updated");
+  assert.deepEqual(queryClient.models(), [
+    "gpt-5.6-sol",
+    "provider-hot-pushed",
+  ]);
+  assert.ok(queryClient.invalidations > 0);
+  assert.deepEqual(patch.delivery(), {
+    revision: 2,
+    statsigClients: 1,
+    notifiedClients: 1,
+    queryClients: 1,
+    queryEntries: 1,
+    pendingQueryEntries: 0,
+    reactContainers: 0,
+    responsePatchInstalled: true,
+  });
+
+  runtime.dispatchWindowEvent("codex-message-from-view", {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: 41,
+        method: "model/list",
+        params: {},
+      },
+    },
+  });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: 41,
+        result: {
+          data: [modelDescriptor("provider-stale")],
+          nextCursor: null,
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("message", response);
+  assert.deepEqual(
+    response.data.message.result.data.map((model) => model.model),
+    ["gpt-5.6-sol", "provider-hot-pushed"],
+  );
+  patch.dispose();
+});
+
+test("an app-server model refresh after a turn keeps newly added route models", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "new-route/GLM-5.3-Flash"],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()]);
+
+  const preflight = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: { method: "model/list", params: { limit: 100 } },
+  });
+  assert.equal(preflight.request.id, undefined);
+
+  runtime.patch.trackOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "model-list-after-turn",
+      method: preflight.request.method,
+      params: preflight.request.params,
+    },
+  });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "model-list-after-turn",
+        result: {
+          data: [modelDescriptor("gpt-5.6-sol")],
+          nextCursor: null,
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.deepEqual(
+    response.data.message.result.data.map((model) => model.model),
+    ["gpt-5.6-sol", "new-route/GLM-5.3-Flash"],
+  );
+  runtime.patch.dispose();
+});
+
+test("model list results are patched before the renderer query caches them", async () => {
+  const routeModel = "route-mtjqj5wv-t53bc9/glm-5.3-flash";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", routeModel],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()]);
+  const upstream = {
+    data: [modelDescriptor("gpt-5.6-sol")],
+    nextCursor: null,
+  };
+
+  const patched = runtime.patch.rewriteIncomingResult("model/list", upstream);
+
+  assert.deepEqual(
+    patched.data.map((model) => model.model),
+    ["gpt-5.6-sol", routeModel],
+  );
+  assert.equal(runtime.patch.rewriteIncomingResult("thread/list", upstream), upstream);
+  runtime.patch.dispose();
+});
+
+test("model list tracking survives a renderer request envelope type change", async () => {
+  const routeModel = "tokenrouter/z-ai/glm-5.3-free";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", routeModel],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()]);
+
+  runtime.patch.trackOutgoingMessage({
+    type: "app-server-request",
+    request: {
+      id: "model-list-new-envelope",
+      method: "model/list",
+      params: { limit: 100 },
+    },
+  });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "model-list-new-envelope",
+        result: {
+          data: [modelDescriptor("gpt-5.6-sol")],
+          nextCursor: null,
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.deepEqual(
+    response.data.message.result.data.map((model) => model.model),
+    ["gpt-5.6-sol", routeModel],
+  );
+  runtime.patch.dispose();
+});
+
+test("explicit unknown thread and turn models are never replaced by a default", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "gpt-5.6-terra"],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()]);
+
+  for (const method of ["thread/start", "thread/resume", "turn/start"]) {
+    const event = {
+      detail: {
+        type: "mcp-request",
+        request: {
+          id: method,
+          method,
+          params: {
+            threadId: "stale-thread",
+            model: "claude-opus-4-8",
+          },
+        },
+      },
+    };
+    runtime.dispatchWindowEvent("codex-message-from-view", event);
+    assert.equal(event.detail.request.params.model, "claude-opus-4-8");
+  }
+  runtime.patch.dispose();
+});
+
+test("route aliases display clearly and dispatch to the selected provider", async () => {
+  const queryClient = activeModelQueryClient(["stale-model"]);
+  const routeCatalog = {
+    status: "ok",
+    models: ["route-a/shared-model", "route-b/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [
+      {
+        model: "route-a/shared-model",
+        display_name: "主线路 / shared-model",
+        route_name: "主线路",
+        provider_id: "codey_router",
+        source_model: "route-a/shared-model",
+        route_provider_id: "route-a",
+        upstream_model: "shared-model",
+        model_display_name: "shared-model",
+      },
+      {
+        model: "route-b/shared-model",
+        display_name: "备用线路 / shared-model",
+        route_name: "备用线路",
+        provider_id: "codey_router",
+        source_model: "route-b/shared-model",
+        route_provider_id: "route-b",
+        upstream_model: "shared-model",
+        model_display_name: "shared-model",
+      },
+    ],
+  };
+  const runtime = await loadPatch(routeCatalog, [statsigClient()], { queryClient });
+
+  assert.equal(
+    queryClient.model("route-a/shared-model").displayName,
+    "主线路 / shared-model",
+  );
+  assert.equal(queryClient.model("route-a/shared-model").routeName, "主线路");
+  assert.equal(queryClient.model("route-a/shared-model").codeyModelName, "shared-model");
+  assert.equal(
+    queryClient.model("route-b/shared-model").displayName,
+    "备用线路 / shared-model",
+  );
+
+  const direct = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "route-direct",
+        method: "turn/start",
+        params: {
+          model: "route-b/shared-model",
+          responsesapiClientMetadata: { trace: "preserved", codey_route: "stale" },
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", direct);
+  assert.deepEqual(direct.detail.request.params, {
+    model: "shared-model",
+    responsesapiClientMetadata: { trace: "preserved", codey_route: "route-b" },
+  });
+
+  const wrapped = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "route-wrapped",
+        method: "send-cli-request-for-host",
+        params: {
+          method: "thread/start",
+          params: { model: "route-a/shared-model" },
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", wrapped);
+  assert.deepEqual(wrapped.detail.request.params.params, {
+    model: "route-a/shared-model",
+    modelProvider: "codey_router",
+  });
+
+  const resumed = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "route-resumed",
+        method: "thread/resume",
+        params: { model: "route-b/shared-model", model_provider: "codey_router" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", resumed);
+  assert.deepEqual(resumed.detail.request.params, {
+    model: "route-b/shared-model",
+    modelProvider: "codey_router",
+  });
+
+  await runtime.patch.setCatalog({
+    ...routeCatalog,
+    model_metadata: routeCatalog.model_metadata.map((metadata) =>
+      metadata.route_provider_id === "route-b"
+        ? { ...metadata, display_name: "灾备线路 / shared-model" }
+        : metadata,
+    ),
+  });
+  assert.equal(
+    queryClient.model("route-b/shared-model").displayName,
+    "灾备线路 / shared-model",
+  );
+
+  await runtime.patch.setCatalog({
+    status: "ok",
+    models: ["route-a/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [routeCatalog.model_metadata[0]],
+  });
+  const deletedRouteRequest = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "deleted-route",
+        method: "turn/start",
+        params: {
+          model: "route-b/shared-model",
+          model_provider: "route-b",
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", deletedRouteRequest);
+  assert.deepEqual(deletedRouteRequest.detail.request.params, {
+    model: "shared-model",
+    responsesapiClientMetadata: { codey_route: "route-a" },
+  });
+  assert.equal(
+    runtime.patch.isBlockedOutgoingMessage(deletedRouteRequest.detail),
+    false,
+    "a recorded alias migrates to the only remaining route serving the same model",
+  );
+  runtime.patch.dispose();
+});
+
+test("a raw model keeps its persisted thread route when multiple routes share the id", async () => {
+  const storage = memoryStorage();
+  const catalog = {
+    status: "ok",
+    models: ["route-a/shared-model", "route-b/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [
+      {
+        model: "route-a/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-a",
+      },
+      {
+        model: "route-b/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-b",
+      },
+    ],
+  };
+  const firstRuntime = await loadPatch(catalog, [statsigClient()], { storage });
+  const unboundRawTurn = firstRuntime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "ambiguous-unbound-turn",
+      method: "turn/start",
+      params: { threadId: "unknown-thread", model: "shared-model" },
+    },
+  });
+  assert.deepEqual(unboundRawTurn.request.params, {
+    threadId: "unknown-thread",
+    model: "shared-model",
+  }, "an ambiguous raw id must reach the gateway without a guessed route");
+  const started = firstRuntime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "persisted-route-start",
+      method: "thread/start",
+      params: { model: "route-b/shared-model" },
+    },
+  });
+  assert.deepEqual(started.request.params, {
+    model: "route-b/shared-model",
+    modelProvider: "codey_router",
+  });
+  firstRuntime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "persisted-route-start",
+        result: { modelProvider: "codey_router", thread: { id: "persisted-thread", model: "shared-model" } },
+      },
+    },
+  });
+  firstRuntime.patch.dispose();
+
+  const restoredRuntime = await loadPatch(catalog, [statsigClient()], { storage });
+  const resumedTurn = restoredRuntime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "persisted-route-turn",
+      method: "turn/start",
+      params: { threadId: "persisted-thread", model: "shared-model" },
+    },
+  });
+  assert.deepEqual(resumedTurn.request.params, {
+    threadId: "persisted-thread",
+    model: "shared-model",
+    responsesapiClientMetadata: { codey_route: "route-b" },
+  });
+  restoredRuntime.patch.dispose();
+});
+
+test("thread responses expose the selector alias for unique raw route models", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.5"],
+    default_model: "relay/gpt-5.5",
+    model_metadata: [{
+      model: "relay/gpt-5.5",
+      provider_id: "codey_router",
+      source_model: "gpt-5.5",
+      route_provider_id: "relay",
+    }],
+  }, [statsigClient()]);
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "read-thread-with-raw-model",
+        result: {
+          thread: {
+            id: "raw-route-thread",
+            model: "gpt-5.5",
+            modelProvider: "codey_router",
+          },
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(
+    response.data.message.result.thread.model,
+    "relay/gpt-5.5",
+  );
+  runtime.patch.dispose();
+});
+
+test("legacy custom-provider thread responses display the matching route alias", async () => {
+  const alias = "aihub/gpt-5.6-sol";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      route_name: "AIHub",
+      provider_id: "custom",
+      source_model: "gpt-5.6-sol",
+      route_provider_id: "aihub",
+      upstream_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()]);
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "legacy-custom-thread-list",
+        result: {
+          data: [{
+            id: "legacy-custom-thread",
+            model: "gpt-5.6-sol",
+            modelProvider: "custom",
+          }],
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(response.data.message.result.data[0].model, alias);
+  runtime.patch.dispose();
+});
+
+test("legacy custom-provider thread responses do not guess between shared routes", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/shared-model", "route-b/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [
+      {
+        model: "route-a/shared-model",
+        provider_id: "custom",
+        source_model: "shared-model",
+        route_provider_id: "route-a",
+      },
+      {
+        model: "route-b/shared-model",
+        provider_id: "custom",
+        source_model: "shared-model",
+        route_provider_id: "route-b",
+      },
+    ],
+  }, [statsigClient()]);
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "ambiguous-legacy-custom-thread",
+        result: {
+          thread: {
+            id: "ambiguous-custom-thread",
+            model: "shared-model",
+            modelProvider: "custom",
+          },
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(response.data.message.result.thread.model, "shared-model");
+  runtime.patch.dispose();
+});
+
+test("thread display aliases replace immutable result payloads", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.5"],
+    default_model: "relay/gpt-5.5",
+    model_metadata: [{
+      model: "relay/gpt-5.5",
+      provider_id: "codey_router",
+      source_model: "gpt-5.5",
+      route_provider_id: "relay",
+    }],
+  }, [statsigClient()]);
+  const originalResult = Object.freeze({
+    thread: Object.freeze({
+      id: "immutable-thread",
+      model: "gpt-5.5",
+      modelProvider: "codey_router",
+    }),
+  });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "immutable-thread-read",
+        result: originalResult,
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.notEqual(response.data.message.result, originalResult);
+  assert.equal(response.data.message.result.thread.model, "relay/gpt-5.5");
+  runtime.patch.dispose();
+});
+
+test("thread responses use stored routes to disambiguate shared raw models", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["persisted-thread", {
+      routeProviderId: "route-b",
+      sourceModel: "shared-model",
+    }],
+  ]));
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/shared-model", "route-b/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [
+      {
+        model: "route-a/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-a",
+      },
+      {
+        model: "route-b/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-b",
+      },
+    ],
+  }, [statsigClient()], { storage });
+  const response = {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "list-threads-with-raw-models",
+        result: {
+          data: [
+            {
+              id: "persisted-thread",
+              model: "shared-model",
+              modelProvider: "codey_router",
+            },
+            {
+              id: "unbound-thread",
+              model: "shared-model",
+              modelProvider: "codey_router",
+            },
+          ],
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("message", response);
+
+  assert.equal(response.data.message.result.data[0].model, "route-b/shared-model");
+  assert.equal(response.data.message.result.data[1].model, "shared-model");
+  runtime.patch.dispose();
+});
+
+test("unchanged thread routes do not rewrite the full persisted binding table", async () => {
+  const storage = memoryStorage();
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/shared-model", "route-b/shared-model"],
+    default_model: "route-a/shared-model",
+    model_metadata: [
+      {
+        model: "route-a/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-a",
+      },
+      {
+        model: "route-b/shared-model",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "route-b",
+      },
+    ],
+  }, [statsigClient()], { storage });
+
+  runtime.dispatchWindowEvent("message", { data: {
+    type: "mcp-response",
+    message: { method: "thread/started", params: {
+      thread: { id: "stable-route-thread", modelProvider: "codey_router" },
+    } },
+  } });
+  const rewriteTurn = (model) => runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: `persist-${model}`,
+      method: "turn/start",
+      params: { threadId: "stable-route-thread", model },
+    },
+  });
+
+  rewriteTurn("route-a/shared-model");
+  const writesAfterFirstBinding = storage.writeCount();
+  assert.ok(writesAfterFirstBinding > 0);
+  for (let index = 0; index < 20; index += 1) {
+    rewriteTurn("route-a/shared-model");
+  }
+  assert.equal(storage.writeCount(), writesAfterFirstBinding);
+
+  rewriteTurn("route-b/shared-model");
+  assert.equal(storage.writeCount(), writesAfterFirstBinding + 1);
+  runtime.patch.dispose();
+});
+
+test("a persisted thread route migrates when only another route exposes the same model", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["stale-route-thread", {
+      routeProviderId: "route-b",
+      sourceModel: "gpt-5.6-sol",
+    }],
+  ]));
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["openai/gpt-5.6-sol", "route-b/claude-opus-5"],
+    default_model: "route-b/claude-opus-5",
+    model_metadata: [
+      {
+        model: "openai/gpt-5.6-sol",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "openai",
+      },
+      {
+        model: "route-b/claude-opus-5",
+        provider_id: "codey_router",
+        source_model: "claude-opus-5",
+        route_provider_id: "route-b",
+      },
+    ],
+  }, [statsigClient()], { storage });
+
+  const nextTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "turn-after-route-model-removal",
+      method: "turn/start",
+      params: {
+        threadId: "stale-route-thread",
+        model: "gpt-5.6-sol",
+      },
+    },
+  });
+  assert.deepEqual(nextTurn.request.params, {
+    threadId: "stale-route-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  assert.deepEqual(
+    JSON.parse(storage.getItem("codey.thread-route-bindings.v1")),
+    [["stale-route-thread", {
+      routeProviderId: "openai",
+      sourceModel: "gpt-5.6-sol",
+    }]],
+  );
+  runtime.patch.dispose();
+});
+
+test("thread settings model changes replace the old route before the next turn", async () => {
+  const catalog = {
+    status: "ok",
+    models: ["gpt-5.6-sol", "route-b/claude-opus-5"],
+    default_model: "route-b/claude-opus-5",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "openai",
+        route_name: "OpenAI 官方直登",
+      },
+      {
+        model: "route-b/claude-opus-5",
+        provider_id: "codey_router",
+        source_model: "claude-opus-5",
+        route_provider_id: "route-b",
+        route_name: "新线路 2",
+      },
+    ],
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "thread-list",
+        result: {
+          data: [{ id: "settings-route-thread", modelProvider: "codey_router" }],
+        },
+      },
+    },
+  });
+
+  const relaySelection = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "select-relay-model",
+      method: "thread/settings/update",
+      params: {
+        threadId: "settings-route-thread",
+        model: "route-b/claude-opus-5",
+      },
+    },
+  });
+  assert.deepEqual(relaySelection.request.params, {
+    threadId: "settings-route-thread",
+    model: "route-b/claude-opus-5",
+  });
+
+  const officialSelection = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "select-official-model",
+      method: "thread/settings/update",
+      params: {
+        threadId: "settings-route-thread",
+        model: "gpt-5.6-sol",
+      },
+    },
+  });
+  assert.deepEqual(officialSelection.request.params, {
+    threadId: "settings-route-thread",
+    model: "gpt-5.6-sol",
+  });
+
+  const nextTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "turn-after-official-selection",
+      method: "turn/start",
+      params: {
+        threadId: "settings-route-thread",
+        input: [{ type: "text", text: "hello" }],
+      },
+    },
+  });
+  assert.deepEqual(nextTurn.request.params, {
+    threadId: "settings-route-thread",
+    input: [{ type: "text", text: "hello" }],
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.patch.dispose();
+});
+
+test("qualified official selectors survive composer state requests", async () => {
+  const alias = "route-b/gpt-5.6-sol";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/gpt-5.6-sol", alias],
+    default_model: alias,
+    model_metadata: ["route-a", "route-b"].map((routeProviderId) => ({
+      model: `${routeProviderId}/gpt-5.6-sol`,
+      display_name: `[官] gpt-5.6-sol`,
+      route_name: `官方线路 ${routeProviderId}`,
+      provider_id: "codey_router",
+      source_model: "gpt-5.6-sol",
+      route_provider_id: routeProviderId,
+      official_account: true,
+    })),
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "qualified-official-thread-list",
+        result: {
+          data: [{ id: "qualified-official-thread", modelProvider: "codey_router" }],
+        },
+      },
+    },
+  });
+
+  const start = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "qualified-official-start",
+      method: "thread/start",
+      params: { model: alias, modelProvider: "codey_router" },
+    },
+  });
+  assert.deepEqual(start.request.params, {
+    model: alias,
+    modelProvider: "codey_router",
+  });
+
+  const resumed = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "qualified-official-resume",
+      method: "thread/resume",
+      params: { threadId: "qualified-official-thread", model: alias },
+    },
+  });
+  assert.deepEqual(resumed.request.params, {
+    threadId: "qualified-official-thread",
+    model: alias,
+    modelProvider: "codey_router",
+  });
+
+  const selected = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "qualified-official-settings",
+      method: "thread/settings/update",
+      params: { threadId: "qualified-official-thread", model: alias },
+    },
+  });
+  assert.deepEqual(selected.request.params, {
+    threadId: "qualified-official-thread",
+    model: alias,
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(selected), false);
+
+  const nextTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "qualified-official-turn",
+      method: "turn/start",
+      params: { threadId: "qualified-official-thread" },
+    },
+  });
+  assert.deepEqual(nextTurn.request.params, {
+    threadId: "qualified-official-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "route-b" },
+  });
+  runtime.patch.dispose();
+});
+
+test("an explicit official settings choice beats an old same-id relay route", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "relay/gpt-5.6-sol"],
+    default_model: "relay/gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "openai",
+      },
+      {
+        model: "relay/gpt-5.6-sol",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "relay",
+      },
+    ],
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "same-id-thread-list",
+        result: {
+          data: [{ id: "same-id-thread", modelProvider: "codey_router" }],
+        },
+      },
+    },
+  });
+
+  runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "same-id-select-relay",
+      method: "thread/settings/update",
+      params: { threadId: "same-id-thread", model: "relay/gpt-5.6-sol" },
+    },
+  });
+  const officialSelection = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "same-id-select-official",
+      method: "thread/settings/update",
+      params: { threadId: "same-id-thread", model: "gpt-5.6-sol" },
+    },
+  });
+  assert.deepEqual(officialSelection.request.params, {
+    threadId: "same-id-thread",
+    model: "gpt-5.6-sol",
+  });
+
+  const nextTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "same-id-next-turn",
+      method: "turn/start",
+      params: { threadId: "same-id-thread", model: "gpt-5.6-sol" },
+    },
+  });
+  assert.deepEqual(nextTurn.request.params, {
+    threadId: "same-id-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+
+  const cleared = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "same-id-clear-model",
+      method: "thread/settings/update",
+      params: { threadId: "same-id-thread", model: null },
+    },
+  });
+  assert.deepEqual(cleared.request.params, {
+    threadId: "same-id-thread",
+    model: null,
+  });
+  const turnAfterClear = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "same-id-turn-after-clear",
+      method: "turn/start",
+      params: { threadId: "same-id-thread" },
+    },
+  });
+  assert.deepEqual(turnAfterClear.request.params, {
+    threadId: "same-id-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "relay" },
+  });
+  runtime.patch.dispose();
+});
+
+test("raw turns retain their route across repeated transport rewrites and thread replies", async () => {
+  const model = "gpt-5.6-sol";
+  const routes = ["openai", "route-a", "route-b"];
+  const selectors = [model, `route-a/${model}`, `route-b/${model}`];
+  const runtime = await loadPatch({
+    status: "ok",
+    models: selectors,
+    default_model: model,
+    model_metadata: routes.map((route, index) => ({
+      model: selectors[index],
+      provider_id: "codey_router",
+      source_model: model,
+      route_provider_id: route,
+    })),
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", { data: {
+    type: "mcp-response",
+    message: { result: { thread: { id: "raw-turn-thread", modelProvider: "codey_router" } } },
+  } });
+
+  for (const index of [1, 2, 0]) {
+    const params = Object.freeze({ threadId: "raw-turn-thread", model: selectors[index] });
+    const selection = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request",
+      request: { method: "thread/settings/update", params },
+    });
+    assert.deepEqual(selection.request.params, params, "keep the sticky model selector");
+    const turn = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request",
+      request: { method: "turn/start", params },
+    });
+    const expected = {
+      threadId: "raw-turn-thread",
+      model,
+      responsesapiClientMetadata: { codey_route: routes[index] },
+    };
+    assert.deepEqual(turn.request.params, expected);
+    assert.equal(params.model, selectors[index], "leave the original selector untouched");
+    const wrapped = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request",
+      request: { method: "send-cli-request-for-host", params: JSON.parse(JSON.stringify(turn.request)) },
+    });
+    assert.deepEqual(wrapped.request.params.params, expected,
+      "serialized raw models must keep the route through another transport pass");
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(wrapped), false);
+
+    const response = { data: { type: "mcp-response", message: { result: { data: [
+      { id: "raw-turn-thread", model, modelProvider: "codey_router" },
+      { id: "unbound-thread", model, modelProvider: "codey_router" },
+    ] } } } };
+    runtime.dispatchWindowEvent("message", response);
+    assert.equal(response.data.message.result.data[0].model, selectors[index]);
+    assert.equal(response.data.message.result.data[1].model, model);
+  }
+  runtime.patch.dispose();
+});
+
+test("a slash-containing model uses the local router before the catalog finishes loading", async () => {
+  const runtime = await loadPatch({ status: "failed" }, [statsigClient()]);
+  const message = {
+    type: "mcp-request",
+    request: {
+      id: "catalog-bootstrap-route",
+      method: "thread/start",
+      params: {
+        model: "route-mte98opq-fo43xj/gpt-5.6-sol",
+        model_provider: "aihub",
+      },
+    },
+  };
+
+  const rewritten = runtime.patch.rewriteOutgoingMessage(message);
+  assert.deepEqual(rewritten.request.params, {
+    model: "route-mte98opq-fo43xj/gpt-5.6-sol",
+    modelProvider: "codey_router",
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), false);
+  runtime.patch.dispose();
+});
+
+test("unloaded catalogs and unknown models cannot bypass the runtime provider check", async () => {
+  for (const catalog of [{ status: "failed" }, { status: "ok", models: ["known"], default_model: "known" }]) {
+    const runtime = await loadPatch(catalog, [statsigClient()]);
+    for (const provider of [undefined, "openai", "yescode", "codey_router"]) {
+      const turn = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request", request: { method: "turn/start", params: {
+          threadId: "late-task", model: "route-aizz/unknown-model", modelProvider: provider,
+        } },
+      });
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), provider !== "codey_router");
+      assert.equal(turn.request.params.model, "route-aizz/unknown-model");
+    }
+    for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+      const config = {
+        model_provider: "yescode",
+        model_providers: { codey_router: { base_url: "https://wrong.example/v1" } },
+        "model_providers.codey_router.base_url": "https://wrong.example/v1",
+        "model_reasoning_effort": "high",
+      };
+      const request = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request", request: { method, params: {
+          model: "route-aizz/unknown-model", modelProvider: "yescode", config,
+        } },
+      });
+      assert.equal(request.request.params.modelProvider, "codey_router");
+      assert.deepEqual(request.request.params.config, { model_reasoning_effort: "high" });
+      assert.equal(config.model_provider, "yescode", "the caller's saved config stays unchanged");
+    }
+    runtime.patch.dispose();
+  }
+});
+
+test("stale turn route metadata is removed before the catalog finishes loading", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["early-catalog-thread", {
+      routeProviderId: "route-b",
+      sourceModel: "claude-opus-5",
+    }],
+  ]));
+  const runtime = await loadPatch({ status: "failed" }, [statsigClient()], { storage });
+  const rewritten = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "early-catalog-model-switch",
+      method: "turn/start",
+      params: {
+        threadId: "early-catalog-thread",
+        model: "gpt-5.6-sol",
+        responsesapiClientMetadata: {
+          codey_route: "route-b",
+          workspace_kind: "project",
+        },
+      },
+    },
+  });
+  assert.deepEqual(rewritten.request.params, {
+    threadId: "early-catalog-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { workspace_kind: "project" },
+  });
+
+  const matchingRoute = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "early-catalog-same-model",
+      method: "turn/start",
+      params: {
+        threadId: "early-catalog-thread",
+        model: "claude-opus-5",
+        responsesapiClientMetadata: { codey_route: "route-b" },
+      },
+    },
+  });
+  assert.deepEqual(matchingRoute.request.params, {
+    threadId: "early-catalog-thread",
+    model: "claude-opus-5",
+    responsesapiClientMetadata: { codey_route: "route-b" },
+  });
+  runtime.patch.dispose();
+});
+
+test("a legacy OpenAI task resumes on the HTTP router even before catalog load", async () => {
+  const runtime = await loadPatch({ status: "failed" }, [statsigClient()]);
+  const rewritten = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "early-openai-resume",
+      method: "thread/resume",
+      params: {
+        threadId: "legacy-official-thread",
+        model_provider: "openai",
+      },
+    },
+  });
+
+  assert.deepEqual(rewritten.request.params, {
+    threadId: "legacy-official-thread",
+    modelProvider: "codey_router",
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), false);
+  runtime.patch.dispose();
+});
+
+test("an external-provider task resumes on the HTTP router before catalog load", async () => {
+  const runtime = await loadPatch({ status: "failed" }, [statsigClient()]);
+  const rewritten = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "early-external-resume",
+      method: "thread/resume",
+      params: {
+        threadId: "external-thread-before-catalog",
+        model: "vendor/model-with-a-slash",
+        model_provider: "external_live",
+      },
+    },
+  });
+
+  assert.deepEqual(rewritten.request.params, {
+    threadId: "external-thread-before-catalog",
+    model: "vendor/model-with-a-slash",
+    modelProvider: "codey_router",
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), false);
+  runtime.patch.dispose();
+});
+
+test("an explicit runtime provider response takes precedence over the requested router migration", async () => {
+  const alias = "route-aizz/gpt-5.6-luna";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      route_name: "aizz",
+      provider_id: "codey_router",
+      source_model: "gpt-5.6-luna",
+      route_provider_id: "route-aizz",
+    }],
+  }, [statsigClient()]);
+
+  for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
+    const threadId = `provider-check-${method}`;
+    const migrate = (modelProvider) => {
+      const request = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request",
+        request: {
+          id: `request-${method}`,
+          method,
+          params: { threadId, model: alias, modelProvider: "yescode" },
+        },
+      });
+      assert.equal(request.request.params.modelProvider, "codey_router");
+      runtime.patch.trackOutgoingMessage(request);
+      runtime.dispatchWindowEvent("message", { data: {
+        type: "mcp-response",
+        message: {
+          id: request.request.id,
+          result: { thread: { id: threadId, modelProvider: "yescode" }, modelProvider },
+        },
+      } });
+    };
+    const turn = () => runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request",
+      request: { method: "turn/start", params: { threadId, model: alias } },
+    });
+
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), true,
+      "a late-loaded renderer must not guess the existing task's runtime provider");
+    migrate("yescode");
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn()), true,
+      `${method} must not send the second route's model through the first provider`);
+    migrate("codey_router");
+    const routedTurn = turn();
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(routedTurn), false);
+    assert.equal(routedTurn.request.params.model, "gpt-5.6-luna");
+    assert.equal(routedTurn.request.params.responsesapiClientMetadata.codey_route, "route-aizz");
+  }
+  runtime.patch.dispose();
+});
+
+test("a legacy official task resumes through the local router carrier", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "relay/shared-model"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        display_name: "官方线路 / gpt-5.6-sol",
+        route_name: "官方线路",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "openai",
+      },
+      {
+        model: "relay/shared-model",
+        display_name: "中转线路 / shared-model",
+        route_name: "中转线路",
+        provider_id: "codey_router",
+        source_model: "relay/shared-model",
+        route_provider_id: "relay",
+        upstream_model: "shared-model",
+      },
+    ],
+  }, [statsigClient()]);
+
+  const resumed = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "resume-official-through-router",
+        method: "thread/resume",
+        params: {
+          threadId: "official-thread",
+          model: "gpt-5.6-sol",
+          model_provider: "openai",
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", resumed);
+  assert.deepEqual(resumed.detail.request.params, {
+    threadId: "official-thread",
+    model: "gpt-5.6-sol",
+    modelProvider: "codey_router",
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(resumed.detail), false);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "resume-official-through-router",
+        result: {
+          thread: { id: "official-thread", modelProvider: "openai" },
+          modelProvider: "codey_router",
+        },
+      },
+    },
+  });
+
+  // The rollout still reports `openai` after a successful runtime migration.
+  // A later list refresh must not downgrade the live carrier back to `openai`.
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "official-thread-list-after-resume",
+        result: {
+          data: [{ id: "official-thread", modelProvider: "openai" }],
+        },
+      },
+    },
+  });
+
+  const selected = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "select-local-router-model",
+        method: "turn/start",
+        params: {
+          threadId: "official-thread",
+          model: "relay/shared-model",
+          model_provider: "openai",
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", selected);
+  assert.deepEqual(selected.detail.request.params, {
+    threadId: "official-thread",
+    model: "shared-model",
+    responsesapiClientMetadata: { codey_route: "relay" },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(selected.detail), false);
+  runtime.patch.dispose();
+});
+
+test("an id-less app-server resume records its router migration after request creation", async () => {
+  const alias = "relay/shared-model";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", alias],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        route_name: "OpenAI 官方直登",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "openai",
+      },
+      {
+        model: alias,
+        route_name: "中转线路",
+        provider_id: "codey_router",
+        source_model: "shared-model",
+        route_provider_id: "relay",
+      },
+    ],
+  }, [statsigClient()]);
+
+  const preflight = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      method: "thread/resume",
+      params: {
+        threadId: "id-less-resume-thread",
+        model: "gpt-5.6-sol",
+        model_provider: "openai",
+      },
+    },
+  });
+  assert.deepEqual(preflight.request.params, {
+    threadId: "id-less-resume-thread",
+    model: "gpt-5.6-sol",
+    modelProvider: "codey_router",
+  });
+
+  runtime.patch.trackOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "created-after-preflight",
+      method: preflight.request.method,
+      params: preflight.request.params,
+    },
+  });
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "created-after-preflight",
+        result: {
+          modelProvider: "codey_router",
+          thread: {
+            id: "id-less-resume-thread",
+            modelProvider: "openai",
+          },
+        },
+      },
+    },
+  });
+
+  const switched = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "turn-after-id-less-resume",
+      method: "turn/start",
+      params: {
+        threadId: "id-less-resume-thread",
+        model: alias,
+      },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(switched), false);
+  assert.deepEqual(switched.request.params, {
+    threadId: "id-less-resume-thread",
+    model: "shared-model",
+    responsesapiClientMetadata: { codey_route: "relay" },
+  });
+  runtime.patch.dispose();
+});
+
+test("a legacy custom-carrier thread resumes onto the router and continues on a third-party route", async () => {
+  const alias = "aihub/gpt-5.6-sol";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      route_name: "AIHub",
+      provider_id: "custom",
+      source_model: "gpt-5.6-sol",
+      route_provider_id: "aihub",
+      upstream_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "legacy-custom-thread-list",
+        result: {
+          data: [{ id: "legacy-custom-thread", modelProvider: "custom" }],
+        },
+      },
+    },
+  });
+
+  const resumed = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "resume-legacy-custom-thread",
+      method: "thread/resume",
+      params: {
+        threadId: "legacy-custom-thread",
+        model: alias,
+        model_provider: "custom",
+      },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(resumed), false);
+  assert.deepEqual(resumed.request.params, {
+    threadId: "legacy-custom-thread",
+    model: alias,
+    modelProvider: "codey_router",
+  });
+  runtime.patch.trackOutgoingMessage(resumed);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "resume-legacy-custom-thread",
+        result: {
+          modelProvider: "codey_router",
+          thread: {
+            id: "legacy-custom-thread",
+            model: "gpt-5.6-sol",
+            modelProvider: "custom",
+          },
+        },
+      },
+    },
+  });
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "legacy-custom-thread-list-after-resume",
+        result: {
+          data: [{ id: "legacy-custom-thread", modelProvider: "custom" }],
+        },
+      },
+    },
+  });
+
+  const continued = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "continue-legacy-custom-thread",
+      method: "turn/start",
+      params: { threadId: "legacy-custom-thread" },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(continued), false);
+  assert.deepEqual(continued.request.params, {
+    threadId: "legacy-custom-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "aihub" },
+  });
+  runtime.patch.dispose();
+});
+
+test("an external-provider thread resumes onto the router and switches to an official route", async () => {
+  const alias = "openai/gpt-5.6-sol";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      route_name: "OpenAI 官方直登",
+      provider_id: "codey_router",
+      source_model: "gpt-5.6-sol",
+      route_provider_id: "openai",
+      upstream_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "external-official-thread-list",
+        result: {
+          data: [{ id: "external-official-thread", modelProvider: "external_live" }],
+        },
+      },
+    },
+  });
+
+  const resumed = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "resume-external-official-thread",
+      method: "thread/resume",
+      params: {
+        threadId: "external-official-thread",
+        model: "legacy-vendor-model",
+        model_provider: "external_live",
+      },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(resumed), false);
+  assert.deepEqual(resumed.request.params, {
+    threadId: "external-official-thread",
+    model: "legacy-vendor-model",
+    modelProvider: "codey_router",
+  });
+  runtime.patch.trackOutgoingMessage(resumed);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "resume-external-official-thread",
+        result: {
+          modelProvider: "codey_router",
+          thread: {
+            id: "external-official-thread",
+            model: "legacy-vendor-model",
+            modelProvider: "external_live",
+          },
+        },
+      },
+    },
+  });
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "external-official-thread-list-after-resume",
+        result: {
+          data: [{ id: "external-official-thread", modelProvider: "external_live" }],
+        },
+      },
+    },
+  });
+
+  const switched = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "switch-external-thread-to-official",
+      method: "turn/start",
+      params: { threadId: "external-official-thread", model: alias },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(switched), false);
+  assert.deepEqual(switched.request.params, {
+    threadId: "external-official-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.patch.dispose();
+});
+
+test("every official route requires the local router even on a legacy OpenAI task", async () => {
+  for (const routeId of ["openai", "local-official", "chatgpt-account"]) {
+    const model = routeId + "/gpt-5.6-sol";
+    const runtime = await loadPatch({
+      status: "ok", models: [model], default_model: model,
+      model_metadata: [{
+        model, provider_id: "codey_router", source_model: "gpt-5.6-sol",
+        route_provider_id: routeId, official_account: true,
+      }],
+    }, [statsigClient()]);
+    runtime.dispatchWindowEvent("message", { data: {
+      type: "mcp-response", message: { result: {
+        data: [{ id: "official-task", modelProvider: "openai" }],
+      } },
+    } });
+    for (const method of ["thread/settings/update", "turn/start"]) {
+      const request = runtime.patch.rewriteOutgoingMessage({
+        type: "mcp-request", request: { method, params: { threadId: "official-task", model } },
+      });
+      assert.equal(runtime.patch.isBlockedOutgoingMessage(request), true);
+      const blockedKey = Object.getOwnPropertySymbols(request.request.params).find((key) => (
+        key.description === "codeyBlockedProviderRequest"
+      ));
+      assert.equal(request.request.params[blockedKey].reason, "provider_migration_required");
+    }
+    const resume = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: {
+        id: "resume-official", method: "thread/resume", params: { threadId: "official-task", model },
+      },
+    });
+    assert.equal(resume.request.params.modelProvider, "codey_router");
+    runtime.dispatchWindowEvent("message", { data: {
+      type: "mcp-response", message: { id: "resume-official", result: {
+        thread: { id: "official-task", modelProvider: "openai" }, modelProvider: "codey_router",
+      } },
+    } });
+    const turn = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: { method: "turn/start", params: { threadId: "official-task", model } },
+    });
+    assert.equal(runtime.patch.isBlockedOutgoingMessage(turn), false);
+    assert.equal(turn.request.params.model, "gpt-5.6-sol");
+    assert.equal(turn.request.params.responsesapiClientMetadata.codey_route, routeId);
+    runtime.patch.dispose();
+  }
+});
+
+test("an official thread must resume onto the router before selecting a third-party model", async () => {
+  const alias = "relay/gpt-5.5";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", alias],
+    default_model: alias,
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: alias,
+        route_name: "中转线路",
+        provider_id: "codey_router",
+        source_model: alias,
+      },
+    ],
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "thread-list",
+        result: {
+          data: [{ id: "official-thread", modelProvider: "openai" }],
+        },
+      },
+    },
+  });
+  const message = {
+    type: "mcp-request",
+    request: {
+      id: "third-party-on-official",
+      method: "turn/start",
+      params: { threadId: "official-thread", model: alias },
+    },
+  };
+
+  const rewritten = runtime.patch.rewriteOutgoingMessage(message);
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), true);
+  assert.deepEqual(rewritten.request.params, {
+    threadId: "official-thread",
+    model: "gpt-5.5",
+    responsesapiClientMetadata: { codey_route: "relay" },
+  });
+  runtime.patch.dispose();
+});
+
+test("an unresumed external-provider task cannot bypass runtime migration", async () => {
+  const alias = "relay/gpt-5.5";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      route_name: "中转线路",
+      provider_id: "openai",
+      source_model: alias,
+      route_provider_id: "relay",
+      upstream_model: "gpt-5.5",
+    }],
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "thread-list",
+        result: {
+          data: [{ id: "external-thread", modelProvider: "external_live" }],
+        },
+      },
+    },
+  });
+
+  const rewritten = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "external-to-gateway",
+      method: "turn/start",
+      params: { threadId: "external-thread", model: alias },
+    },
+  });
+
+  assert.deepEqual(rewritten.request.params, {
+    threadId: "external-thread",
+    model: "gpt-5.5",
+    responsesapiClientMetadata: { codey_route: "relay" },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(rewritten), true);
+  runtime.patch.dispose();
+});
+
+test("a local-router thread can switch among third-party and official gateway routes", async () => {
+  const routeA = "route-a/shared-model";
+  const routeB = "route-b/shared-model";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", routeA, routeB],
+    default_model: routeA,
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        route_name: "OpenAI 官方直登",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: routeA,
+        route_name: "线路 A",
+        provider_id: "codey_router",
+        source_model: routeA,
+      },
+      {
+        model: routeB,
+        route_name: "线路 B",
+        provider_id: "codey_router",
+        source_model: routeB,
+      },
+    ],
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "thread-list",
+        result: {
+          data: [{ id: "router-thread", modelProvider: "codey_router" }],
+        },
+      },
+    },
+  });
+
+  const thirdPartySwitch = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "switch-route",
+      method: "turn/start",
+      params: { threadId: "router-thread", model: routeB },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(thirdPartySwitch), false);
+  assert.deepEqual(thirdPartySwitch.request.params, {
+    threadId: "router-thread",
+    model: "shared-model",
+    responsesapiClientMetadata: { codey_route: "route-b" },
+  });
+
+  const officialSwitch = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "switch-official",
+      method: "turn/start",
+      params: { threadId: "router-thread", model: "gpt-5.6-sol" },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(officialSwitch), false);
+  assert.deepEqual(officialSwitch.request.params, {
+    threadId: "router-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.patch.dispose();
+});
+
+test("a prewarmed gateway thread switches models without an invalid turn provider override", async () => {
+  const alias = "route-a/gpt-5.5";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", alias],
+    default_model: alias,
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        route_name: "OpenAI 官方直登",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: alias,
+        route_name: "第三方线路",
+        provider_id: "codey_router",
+        source_model: alias,
+      },
+    ],
+  }, [statsigClient()]);
+  const prewarm = runtime.patch.rewriteOutgoingMessage({
+    type: "thread-prewarm-start",
+    request: {
+      id: "prewarm-router-draft",
+      method: "thread/start",
+      params: {
+        model: alias,
+        modelProvider: "openai",
+      },
+    },
+  });
+  assert.deepEqual(prewarm.request.params, {
+    model: alias,
+    modelProvider: "codey_router",
+  });
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "prewarm-router-draft",
+        result: {
+          modelProvider: "codey_router",
+          thread: { id: "draft-thread", modelProvider: "codey_router" },
+        },
+      },
+    },
+  });
+
+  const firstTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "first-official-turn",
+      method: "turn/start",
+      params: { threadId: "draft-thread", model: "gpt-5.6-sol" },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(firstTurn), false);
+  assert.deepEqual(firstTurn.request.params, {
+    threadId: "draft-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        method: "turn/started",
+        params: {
+          threadId: "draft-thread",
+          turn: { id: "turn-1" },
+        },
+      },
+    },
+  });
+
+  const laterThirdPartyTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "later-third-party-turn",
+      method: "turn/start",
+      params: { threadId: "draft-thread", model: alias },
+    },
+  });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(laterThirdPartyTurn), false);
+  assert.deepEqual(laterThirdPartyTurn.request.params, {
+    threadId: "draft-thread",
+    model: "gpt-5.5",
+    responsesapiClientMetadata: { codey_route: "route-a" },
+  });
+  runtime.patch.dispose();
+});
+
+test("the transport preflight binds a new third-party thread to the local router", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "route-mt6lv4lx-i2bfax/gpt-5.5"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: "route-mt6lv4lx-i2bfax/gpt-5.5",
+        provider_id: "codey_router",
+        source_model: "route-mt6lv4lx-i2bfax/gpt-5.5",
+        route_provider_id: "route-mt6lv4lx-i2bfax",
+        upstream_model: "gpt-5.5",
+      },
+    ],
+  }, [statsigClient()]);
+  const message = {
+    type: "mcp-request",
+    hostId: "local",
+    request: {
+      id: 91,
+      method: "thread/start",
+      params: {
+        model: "route-mt6lv4lx-i2bfax/gpt-5.5",
+        model_provider: "openai",
+      },
+    },
+  };
+
+  const rewritten = runtime.patch.rewriteOutgoingMessage(message);
+  assert.notEqual(rewritten, message);
+  assert.equal(rewritten.hostId, "local");
+  assert.deepEqual(rewritten.request.params, {
+    model: "route-mt6lv4lx-i2bfax/gpt-5.5",
+    modelProvider: "codey_router",
+  });
+  assert.deepEqual(message.request.params, {
+    model: "route-mt6lv4lx-i2bfax/gpt-5.5",
+    model_provider: "openai",
+  }, "the bridge preflight must be able to return a clone for frozen renderer envelopes");
+  runtime.patch.dispose();
+});
+
+test("thread prewarm binds third-party models to the local router before the app server starts", async () => {
+  const alias = "route-mt6lv4lx-i2bfax/gpt-5.5";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", alias],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: alias,
+        provider_id: "codey_router",
+        source_model: alias,
+        route_provider_id: "route-mt6lv4lx-i2bfax",
+        upstream_model: "gpt-5.5",
+      },
+    ],
+  }, [statsigClient()]);
+  const message = {
+    type: "thread-prewarm-start",
+    hostId: "local",
+    request: {
+      id: 93,
+      method: "thread/start",
+      params: {
+        model: alias,
+        modelProvider: "openai",
+      },
+    },
+    priority: "critical",
+    source: "thread_open",
+  };
+
+  const rewritten = runtime.patch.rewriteOutgoingMessage(message);
+  assert.notEqual(rewritten, message);
+  assert.equal(rewritten.type, "thread-prewarm-start");
+  assert.equal(rewritten.hostId, "local");
+  assert.deepEqual(rewritten.request.params, {
+    model: alias,
+    modelProvider: "codey_router",
+  });
+  assert.deepEqual(message.request.params, {
+    model: alias,
+    modelProvider: "openai",
+  });
+  runtime.patch.dispose();
+});
+
+test("a hot default-model change replaces only the stale prewarm default", async () => {
+  const oldDefault = "route-a/gpt-5.5";
+  const newDefault = "route-a/claude-opus-5";
+  const modelMetadata = [
+    {
+      model: oldDefault,
+      display_name: "线路 A / gpt-5.5",
+      route_name: "线路 A",
+      provider_id: "codey_router",
+      route_provider_id: "route-a",
+      source_model: "gpt-5.5",
+      upstream_model: "gpt-5.5",
+    },
+    {
+      model: newDefault,
+      display_name: "线路 A / claude-opus-5",
+      route_name: "线路 A",
+      provider_id: "codey_router",
+      route_provider_id: "route-a",
+      source_model: "claude-opus-5",
+      upstream_model: "claude-opus-5",
+    },
+  ];
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [oldDefault, newDefault],
+    default_model: oldDefault,
+    model_metadata: modelMetadata,
+  }, [statsigClient()]);
+  await runtime.patch.setCatalog({
+    status: "ok",
+    models: [oldDefault, newDefault],
+    default_model: newDefault,
+    model_metadata: modelMetadata,
+  });
+
+  const prewarm = runtime.patch.rewriteOutgoingMessage({
+    type: "thread-prewarm-start",
+    request: {
+      id: "stale-default-prewarm",
+      method: "thread/start",
+      params: { model: oldDefault, modelProvider: "codey_router" },
+    },
+  });
+  assert.deepEqual(prewarm.request.params, {
+    model: newDefault,
+    modelProvider: "codey_router",
+  });
+
+  const explicitExistingThreadChange = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "explicit-old-model-on-existing-thread",
+      method: "thread/settings/update",
+      params: { threadId: "existing-thread", model: oldDefault },
+    },
+  });
+  assert.deepEqual(explicitExistingThreadChange.request.params, {
+    threadId: "existing-thread",
+    model: oldDefault,
+  });
+  runtime.patch.dispose();
+});
+
+function defaultHistoryCatalog(defaultModel) {
+  const models = ["route-a/gpt-5.5", "route-a/claude-opus-5", "route-a/explicit-pick"];
+  return {
+    status: "ok",
+    models,
+    default_model: defaultModel,
+    model_metadata: models.map((model) => {
+      const sourceModel = model.slice("route-a/".length);
+      return {
+        model,
+        display_name: `线路 A / ${sourceModel}`,
+        route_name: "线路 A",
+        provider_id: "codey_router",
+        route_provider_id: "route-a",
+        source_model: sourceModel,
+        upstream_model: sourceModel,
+      };
+    }),
+  };
+}
+
+test("a default changed while the renderer was closed still replaces Codex's saved default", async () => {
+  const storage = memoryStorage();
+  const oldDefault = "route-a/gpt-5.5";
+  const newDefault = "route-a/claude-opus-5";
+  const first = await loadPatch(defaultHistoryCatalog(oldDefault), [statsigClient()], { storage });
+  assert.equal(
+    JSON.parse(storage.getItem("codey.default-model-history.v1")).lastDefault.selectorModel,
+    oldDefault,
+  );
+  first.patch.dispose();
+
+  // Codey changed the default while Codex was not running; the reopened
+  // renderer only ever sees the new catalog.
+  const reopened = await loadPatch(defaultHistoryCatalog(newDefault), [statsigClient()], { storage });
+  const prewarm = reopened.patch.rewriteOutgoingMessage({
+    type: "thread-prewarm-start",
+    request: {
+      id: "saved-default-prewarm",
+      method: "thread/start",
+      params: { model: oldDefault, modelProvider: "codey_router" },
+    },
+  });
+  assert.deepEqual(prewarm.request.params, {
+    model: newDefault,
+    modelProvider: "codey_router",
+  });
+  const rawSavedDefault = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "saved-raw-default",
+      method: "thread/start",
+      params: { model: "gpt-5.5", modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(rawSavedDefault.request.params.model, newDefault);
+
+  // A model that was never the default is an explicit choice and stays put.
+  const explicitPick = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "explicit-pick",
+      method: "thread/start",
+      params: { model: "route-a/explicit-pick", modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(explicitPick.request.params.model, "route-a/explicit-pick");
+  const existingThread = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "existing-thread-old-default",
+      method: "thread/settings/update",
+      params: { threadId: "existing-thread", model: oldDefault },
+    },
+  });
+  assert.equal(existingThread.request.params.model, oldDefault);
+  const history = JSON.parse(storage.getItem("codey.default-model-history.v1"));
+  assert.equal(history.lastDefault.selectorModel, newDefault);
+  assert.deepEqual(history.superseded.map((record) => record.selectorModel), [oldDefault]);
+  reopened.patch.dispose();
+});
+
+test("superseded defaults recorded by a hot catalog swap survive a patch reload", async () => {
+  const storage = memoryStorage();
+  const oldDefault = "route-a/gpt-5.5";
+  const newDefault = "route-a/claude-opus-5";
+  const first = await loadPatch(defaultHistoryCatalog(oldDefault), [statsigClient()], { storage });
+  await first.patch.setCatalog(defaultHistoryCatalog(newDefault));
+  first.patch.dispose();
+
+  const reopened = await loadPatch(defaultHistoryCatalog(newDefault), [statsigClient()], { storage });
+  const started = reopened.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "stale-default-after-reload",
+      method: "thread/start",
+      params: { model: oldDefault, modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(started.request.params.model, newDefault);
+  reopened.patch.dispose();
+
+  // Switching the default back retires the record so the restored default is
+  // no longer treated as stale.
+  const restored = await loadPatch(defaultHistoryCatalog(oldDefault), [statsigClient()], { storage });
+  const restoredStart = restored.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "restored-default",
+      method: "thread/start",
+      params: { model: oldDefault, modelProvider: "codey_router" },
+    },
+  });
+  assert.equal(restoredStart.request.params.model, oldDefault);
+  const history = JSON.parse(storage.getItem("codey.default-model-history.v1"));
+  assert.deepEqual(history.superseded.map((record) => record.selectorModel), [newDefault]);
+  restored.patch.dispose();
+});
+
+test("an unchanged default does not rewrite the persisted default history", async () => {
+  const storage = memoryStorage();
+  const runtime = await loadPatch(defaultHistoryCatalog("route-a/gpt-5.5"), [statsigClient()], { storage });
+  const writes = storage.writeCount();
+  await runtime.patch.setCatalog(defaultHistoryCatalog("route-a/gpt-5.5"));
+  await runtime.patch.refresh();
+  assert.equal(storage.writeCount(), writes);
+  runtime.patch.dispose();
+});
+
+test("the first model-menu click overrides a lagging prewarm payload", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const oldItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  oldItem.textContent = "线路 A / gpt-5.5";
+  const selectedItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  selectedItem.textContent = "线路 A / claude-opus-5";
+  const oldModel = "route-a/gpt-5.5";
+  const selectedModel = "route-a/claude-opus-5";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [oldModel, selectedModel],
+    default_model: oldModel,
+    model_metadata: [
+      {
+        model: oldModel,
+        display_name: "线路 A / gpt-5.5",
+        route_name: "线路 A",
+        provider_id: "codey_router",
+        route_provider_id: "route-a",
+        source_model: "gpt-5.5",
+      },
+      {
+        model: selectedModel,
+        display_name: "线路 A / claude-opus-5",
+        route_name: "线路 A",
+        provider_id: "codey_router",
+        route_provider_id: "route-a",
+        source_model: "claude-opus-5",
+      },
+    ],
+  }, [statsigClient()], { documentBody: body });
+  runtime.patch.enhanceModelMenus();
+  runtime.dispatchDocumentEvent("pointerdown", { target: selectedItem });
+
+  const prewarm = runtime.patch.rewriteOutgoingMessage({
+    type: "thread-prewarm-start",
+    request: {
+      id: "first-click-lagging-prewarm",
+      method: "thread/start",
+      params: { model: oldModel, modelProvider: "codey_router" },
+    },
+  });
+  assert.deepEqual(prewarm.request.params, {
+    model: selectedModel,
+    modelProvider: "codey_router",
+  });
+  runtime.patch.dispose();
+});
+
+test("wrapped host thread starts preserve their envelope at the transport preflight", async () => {
+  const alias = "route-mt6lv4lx-i2bfax/gpt-5.5";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [alias],
+    default_model: alias,
+    model_metadata: [{
+      model: alias,
+      provider_id: "codey_router",
+      source_model: alias,
+    }],
+  }, [statsigClient()]);
+  const message = {
+    type: "mcp-request",
+    request: {
+      id: 92,
+      method: "send-cli-request-for-host",
+      params: {
+        hostId: "local",
+        method: "thread/start",
+        params: { model: alias },
+      },
+    },
+  };
+
+  const rewritten = runtime.patch.rewriteOutgoingMessage(message);
+  assert.equal(rewritten.request.method, "send-cli-request-for-host");
+  assert.deepEqual(rewritten.request.params, {
+    hostId: "local",
+    method: "thread/start",
+    params: {
+      model: alias,
+      modelProvider: "codey_router",
+    },
+  });
+  runtime.patch.dispose();
+});
+
+test("model picker menu groups models under route headings without changing model ids", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const officialItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  officialItem.textContent = "gpt-5.6-sol";
+  const relayItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  relayItem.textContent = "relay/gpt-5.6-sol";
+
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "relay/gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        display_name: "[官] gpt-5.6-sol",
+        route_name: "官方线路",
+        route_prefix: "官",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: "relay/gpt-5.6-sol",
+        display_name: "[中转] gpt-5.6-sol",
+        route_name: "中转线路",
+        route_prefix: "中转",
+        provider_id: "relay",
+        source_model: "gpt-5.6-sol",
+      },
+    ],
+  }, [statsigClient()], { documentBody: body });
+
+  assert.equal(
+    runtime.patch.presentModel("gpt-5.6-sol").displayName,
+    "[官] gpt-5.6-sol",
+  );
+
+  runtime.patch.enhanceModelMenus();
+
+  assert.equal(menu.children[0].textContent, "[官] 官方线路");
+  assert.equal(menu.children[1], officialItem);
+  assert.equal(officialItem.textContent, "gpt-5.6-sol");
+  assert.equal(officialItem.dataset.codeyRouteModel, "gpt-5.6-sol");
+  assert.equal(officialItem.getAttribute("aria-label"), "官方线路 / gpt-5.6-sol");
+  assert.equal(menu.children[2].textContent, "[中转] 中转线路");
+  assert.equal(menu.children[3], relayItem);
+  assert.equal(relayItem.textContent, "gpt-5.6-sol");
+  assert.equal(relayItem.dataset.codeyRouteModel, "relay/gpt-5.6-sol");
+  assert.equal(relayItem.getAttribute("aria-label"), "中转线路 / gpt-5.6-sol");
+
+  const originalHeadings = [menu.children[0], menu.children[2]];
+  runtime.patch.enhanceModelMenus();
+  assert.equal(menu.children.length, 4);
+  assert.equal(menu.children[0], originalHeadings[0]);
+  assert.equal(menu.children[2], originalHeadings[1]);
+
+  const request = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "grouped-menu-selected-relay",
+        method: "turn/start",
+        params: { model: "relay/gpt-5.6-sol" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", request);
+  assert.deepEqual(request.detail.request.params, {
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "relay" },
+  });
+  runtime.patch.dispose();
+});
+
+test("model picker headings use name fallbacks and update when a short name changes", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const officialItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  officialItem.textContent = "gpt-6-luna";
+  const relayItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  relayItem.textContent = "relay/gpt-6-luna";
+  const catalog = {
+    status: "ok",
+    models: ["gpt-6-luna", "relay/gpt-6-luna"],
+    default_model: "gpt-6-luna",
+    model_metadata: [
+      {
+        model: "gpt-6-luna",
+        route_name: "Plus",
+        provider_id: "openai",
+        source_model: "gpt-6-luna",
+      },
+      {
+        model: "relay/gpt-6-luna",
+        route_name: "😀备用",
+        provider_id: "relay",
+        source_model: "gpt-6-luna",
+      },
+    ],
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()], { documentBody: body });
+  runtime.patch.enhanceModelMenus();
+  const headings = () => menu.children
+    .filter((child) => child.dataset.codeyRouteHeading)
+    .map((heading) => heading.textContent);
+  assert.deepEqual(headings(), ["[Pl] Plus", "[😀备] 😀备用"]);
+
+  await runtime.patch.setCatalog({
+    ...catalog,
+    model_metadata: catalog.model_metadata.map((metadata) => ({
+      ...metadata,
+      route_prefix: metadata.provider_id === "relay" ? "晚" : "Pl",
+    })),
+  });
+  runtime.patch.enhanceModelMenus();
+  assert.deepEqual(headings(), ["[Pl] Plus", "[晚] 😀备用"]);
+  await runtime.patch.setCatalog({
+    ...catalog,
+    model_metadata: catalog.model_metadata.map((metadata) => ({
+      ...metadata,
+      route_name: "",
+      route_prefix: metadata.provider_id === "relay" ? "晚" : "Pl",
+    })),
+  });
+  runtime.patch.enhanceModelMenus();
+  assert.deepEqual(headings(), ["Pl", "晚"]);
+  assert.equal(relayItem.dataset.codeyRouteModel, "relay/gpt-6-luna");
+  runtime.patch.dispose();
+});
+
+test("historical route aliases keep the route short name after that model leaves the catalog", async () => {
+  const provider = "codey-official-account-d3265a21-a59f-40c8-a05a-5b4e03231c22";
+  const encodedProvider = "my%20route";
+  const runtime = await loadPatch({
+    status: "ok",
+    models: [`${provider}/gpt-6-luna`, `${encodedProvider}/gpt-5.6-sol`],
+    default_model: `${provider}/gpt-6-luna`,
+    model_metadata: [
+      {
+        model: `${provider}/gpt-6-luna`,
+        display_name: "[官1] gpt-6-luna",
+        route_name: "官方账号1",
+        route_prefix: "官1",
+        provider_id: "openai",
+        route_provider_id: provider,
+        source_model: "gpt-6-luna",
+        upstream_model: "gpt-6-luna",
+        model_display_name: "gpt-6-luna",
+      },
+      {
+        model: `${encodedProvider}/gpt-5.6-sol`,
+        display_name: "[测] gpt-5.6-sol",
+        route_name: "我的线路",
+        route_prefix: "测",
+        provider_id: "openai",
+        route_provider_id: "my route",
+        source_model: "gpt-5.6-sol",
+        upstream_model: "gpt-5.6-sol",
+        model_display_name: "gpt-5.6-sol",
+      },
+    ],
+    legacy_model_aliases: {
+      "retired-route/gpt-5.5": "gpt-5.5",
+    },
+  }, [statsigClient()]);
+
+  assert.equal(
+    runtime.patch.presentModel(`${provider}/gpt-6-luna`).displayName,
+    "[官1] gpt-6-luna",
+  );
+  assert.equal(
+    runtime.patch.presentModel(`${provider}/gpt-5.6-luna`).displayName,
+    "[官1] gpt-5.6-luna",
+  );
+  assert.equal(
+    runtime.patch.presentModel(`${encodedProvider}/gpt-5.6-luna`).displayName,
+    "[测] gpt-5.6-luna",
+  );
+  assert.equal(
+    runtime.patch.presentModel("codey-official-account-missing/gpt-5.6-sol").displayName,
+    "gpt-5.6-sol",
+  );
+  assert.equal(
+    runtime.patch.presentModel("retired-route/gpt-5.5").displayName,
+    "gpt-5.5",
+  );
+  assert.equal(
+    runtime.patch.presentModel("vendor/custom-model").displayName,
+    "vendor/custom-model",
+  );
+  runtime.patch.dispose();
+});
+
+test("an open model picker hides a route row removed by a hot catalog update", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const officialItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  officialItem.textContent = "[官] gpt-5.6-sol";
+  const deletedRouteItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  deletedRouteItem.textContent = "[1] DeepSeek-V4-Flash-0731";
+
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "route-1/DeepSeek-V4-Flash-0731"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        display_name: "[官] gpt-5.6-sol",
+        route_name: "OpenAI 官方直登",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: "route-1/DeepSeek-V4-Flash-0731",
+        display_name: "[1] DeepSeek-V4-Flash-0731",
+        route_name: "待删除线路",
+        provider_id: "codey_router",
+        route_provider_id: "route-1",
+        source_model: "DeepSeek-V4-Flash-0731",
+      },
+    ],
+  }, [statsigClient()], { documentBody: body });
+  runtime.patch.enhanceModelMenus();
+  assert.equal(deletedRouteItem.hasAttribute("hidden"), false);
+
+  // Simulate the native menu retaining its already-mounted row while the
+  // backend pushes the post-deletion catalog.
+  deletedRouteItem.textContent = "[1] DeepSeek-V4-Flash-0731";
+  delete deletedRouteItem.dataset.codeyRouteModel;
+  delete deletedRouteItem.dataset.codeyRouteName;
+  await runtime.patch.setCatalog({
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [{
+      model: "gpt-5.6-sol",
+      display_name: "[官] gpt-5.6-sol",
+      route_name: "OpenAI 官方直登",
+      provider_id: "openai",
+      source_model: "gpt-5.6-sol",
+    }],
+  });
+  runtime.patch.enhanceModelMenus();
+
+  assert.equal(officialItem.hasAttribute("hidden"), false);
+  assert.equal(deletedRouteItem.hasAttribute("hidden"), true);
+  assert.equal(deletedRouteItem.dataset.codeySupersededModel, "route-1/DeepSeek-V4-Flash-0731");
+  assert.deepEqual(
+    menu.children.filter((child) => child.dataset.codeyRouteHeading)
+      .map((heading) => heading.textContent),
+    ["[官] OpenAI 官方直登"],
+  );
+
+  // A virtualized native row can be reused for a current model later. The
+  // stale marker must not leave that recycled row hidden.
+  deletedRouteItem.textContent = "[官] gpt-5.6-sol";
+  runtime.patch.enhanceModelMenus();
+  assert.equal(deletedRouteItem.hasAttribute("hidden"), false);
+  assert.equal(deletedRouteItem.dataset.codeyRouteModel, "gpt-5.6-sol");
+  runtime.patch.dispose();
+});
+
+test("model picker observes row text changes after a route rename", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.6-sol"],
+    default_model: "relay/gpt-5.6-sol",
+    model_metadata: [{
+      model: "relay/gpt-5.6-sol",
+      display_name: "[新线] gpt-5.6-sol",
+      route_name: "新线路",
+      route_prefix: "新线",
+      provider_id: "relay",
+      source_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()], { documentBody: body });
+
+  const installs = runtime.mutationObserverInstalls();
+  assert.equal(installs.length, 2);
+  assert.equal(installs[0].target, body);
+  assert.deepEqual(installs[0].options, {
+    childList: true,
+    subtree: true,
+  });
+  assert.equal(installs[1].target, menu);
+  assert.deepEqual(installs[1].options, {
+    childList: true,
+    characterData: true,
+    subtree: true,
+  });
+  runtime.patch.dispose();
+});
+
+test("model picker attaches text observers when a menu mounts later", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.6-sol"],
+    default_model: "relay/gpt-5.6-sol",
+    model_metadata: [{
+      model: "relay/gpt-5.6-sol",
+      display_name: "[新线] gpt-5.6-sol",
+      route_name: "新线路",
+      route_prefix: "新线",
+      provider_id: "relay",
+      source_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()], { documentBody: body });
+
+  assert.equal(runtime.mutationObserverInstalls().length, 1);
+  const menu = new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  });
+  body.appendChild(menu);
+  runtime.dispatchObserverMutations(body, [{
+    addedNodes: [menu],
+    removedNodes: [],
+    target: body,
+    type: "childList",
+  }]);
+  const installs = runtime.mutationObserverInstalls();
+  assert.equal(installs.length, 2);
+  assert.equal(installs[1].target, menu);
+  assert.equal(installs[1].options.characterData, true);
+  runtime.patch.dispose();
+});
+
+test("model picker ignores streaming mutations outside the picker", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const turn = body.appendChild(new FakeElementCore("div", {
+    attributes: { "data-turn-key": "t1" },
+  }));
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["relay/gpt-5.6-sol"],
+    default_model: "relay/gpt-5.6-sol",
+    model_metadata: [{
+      model: "relay/gpt-5.6-sol",
+      display_name: "[新线] gpt-5.6-sol",
+      route_name: "新线路",
+      route_prefix: "新线",
+      provider_id: "relay",
+      source_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()], { documentBody: body });
+
+  assert.equal(runtime.mutationObserverInstalls().length, 1);
+  runtime.dispatchObserverMutations(body, [{
+    addedNodes: [new FakeElementCore("span")],
+    removedNodes: [],
+    target: turn,
+    type: "childList",
+  }]);
+  assert.equal(runtime.mutationObserverInstalls().length, 1);
+  runtime.patch.dispose();
+});
+
+test("the clicked official route emits a raw ChatGPT model despite stale route metadata", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["menu-route-thread", {
+      routeProviderId: "route-b",
+      sourceModel: "gpt-5.6-sol",
+    }],
+  ]));
+  const body = new FakeElementCore("body", { connected: true });
+  const menu = body.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menu" },
+  }));
+  const officialItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  officialItem.textContent = "OpenAI 官方直登 / gpt-5.6-sol";
+  const relayItem = menu.appendChild(new FakeElementCore("div", {
+    attributes: { role: "menuitemradio" },
+  }));
+  relayItem.textContent = "新线路 2 / gpt-5.6-sol";
+
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["openai/gpt-5.6-sol", "route-b/gpt-5.6-sol"],
+    default_model: "route-b/gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "openai/gpt-5.6-sol",
+        display_name: "OpenAI 官方直登 / gpt-5.6-sol",
+        route_name: "OpenAI 官方直登",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "openai",
+      },
+      {
+        model: "route-b/gpt-5.6-sol",
+        display_name: "新线路 2 / gpt-5.6-sol",
+        route_name: "新线路 2",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "route-b",
+      },
+    ],
+  }, [statsigClient()], { documentBody: body, storage });
+  runtime.dispatchWindowEvent("message", { data: {
+    type: "mcp-response",
+    message: { method: "thread/started", params: {
+      thread: { id: "menu-route-thread", modelProvider: "codey_router" },
+    } },
+  } });
+  runtime.patch.enhanceModelMenus();
+  runtime.dispatchDocumentEvent("pointerdown", { target: officialItem });
+
+  const selectedTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "turn-after-explicit-menu-selection",
+      method: "turn/start",
+      params: {
+        threadId: "menu-route-thread",
+        responsesapiClientMetadata: { codey_route: "route-b" },
+      },
+    },
+  });
+  assert.deepEqual(selectedTurn.request.params, {
+    threadId: "menu-route-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+
+  const laterTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "turn-after-menu-intent-was-consumed",
+      method: "turn/start",
+      params: { threadId: "menu-route-thread" },
+    },
+  });
+  assert.deepEqual(laterTurn.request.params, {
+    threadId: "menu-route-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.patch.dispose();
+});
+
+test("official account route models keep raw ids and dispatch to the OpenAI provider", async () => {
+  const queryClient = activeModelQueryClient(["stale-model"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [{
+      model: "gpt-5.6-sol",
+      display_name: "[官] gpt-5.6-sol",
+      route_name: "OpenAI 官方直登",
+      route_prefix: "官",
+      provider_id: "openai",
+      source_model: "gpt-5.6-sol",
+    }],
+  }, [statsigClient()], { queryClient });
+
+  assert.equal(
+    queryClient.model("gpt-5.6-sol").displayName,
+    "[官] gpt-5.6-sol",
+  );
+  assert.equal(queryClient.model("gpt-5.6-sol").routeName, "OpenAI 官方直登");
+
+  const request = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "official-raw-model",
+        method: "turn/start",
+        params: { model: "gpt-5.6-sol" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", request);
+
+  assert.deepEqual(request.detail.request.params, {
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.patch.dispose();
+});
+
+test("official account models can run through the local router provider", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "relay/gpt-5.5"],
+    default_model: "relay/gpt-5.5",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        display_name: "OpenAI 官方直登 / gpt-5.6-sol",
+        route_name: "OpenAI 官方直登",
+        provider_id: "codey_router",
+        source_model: "gpt-5.6-sol",
+        route_provider_id: "openai",
+        upstream_model: "gpt-5.6-sol",
+      },
+      {
+        model: "relay/gpt-5.5",
+        display_name: "第三方线路 / gpt-5.5",
+        route_name: "第三方线路",
+        provider_id: "codey_router",
+        source_model: "relay/gpt-5.5",
+        route_provider_id: "relay",
+        upstream_model: "gpt-5.5",
+      },
+    ],
+  }, [statsigClient()]);
+  runtime.dispatchWindowEvent("message", {
+    data: {
+      type: "mcp-response",
+      message: {
+        id: "thread-list",
+        result: {
+          data: [{ id: "router-thread", modelProvider: "codey_router" }],
+        },
+      },
+    },
+  });
+
+  const officialTurn = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request",
+    request: {
+      id: "router-official-turn",
+      method: "turn/start",
+      params: { threadId: "router-thread", model: "gpt-5.6-sol" },
+    },
+  });
+
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(officialTurn), false);
+  assert.deepEqual(officialTurn.request.params, {
+    threadId: "router-thread",
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.patch.dispose();
+});
+
+test("official OpenAI route aliases dispatch raw model ids through the OpenAI provider from a relay default", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "relay/gpt-5.6-sol"],
+    default_model: "relay/gpt-5.6-sol",
+    model_metadata: [
+      {
+        model: "gpt-5.6-sol",
+        display_name: "官方线路 / gpt-5.6-sol",
+        provider_id: "openai",
+        source_model: "gpt-5.6-sol",
+      },
+      {
+        model: "relay/gpt-5.6-sol",
+        display_name: "中转线路 / gpt-5.6-sol",
+        provider_id: "relay",
+        source_model: "gpt-5.6-sol",
+      },
+    ],
+  }, [statsigClient()]);
+
+  const official = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "official-route",
+        method: "turn/start",
+        params: {
+          model: "openai/gpt-5.6-sol",
+          model_provider: "openai",
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", official);
+  assert.deepEqual(official.detail.request.params, {
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+
+  const currentOfficial = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "official-current",
+        method: "turn/start",
+        params: {
+          model: "gpt-5.6-sol",
+          model_provider: "openai",
+        },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", currentOfficial);
+  assert.deepEqual(currentOfficial.detail.request.params, {
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+
+  const relay = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "relay-route",
+        method: "turn/start",
+        params: { model: "relay/gpt-5.6-sol" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", relay);
+  assert.deepEqual(relay.detail.request.params, {
+    model: "gpt-5.6-sol",
+    responsesapiClientMetadata: { codey_route: "relay" },
+  });
+  runtime.patch.dispose();
+});
+
+test("official route selection does not inherit an active third party provider", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    model: "relay/gpt-5.6-sol",
+    default_model: "relay/gpt-5.6-sol",
+    model_provider: "relay",
+    models: ["gpt-5.6-terra", "relay/gpt-5.6-sol"],
+    model_metadata: [
+      {
+        model: "gpt-5.6-terra",
+        display_name: "OpenAI 官方直登 / gpt-5.6-terra",
+        route_name: "OpenAI 官方直登",
+        provider_id: "openai",
+        source_model: "gpt-5.6-terra",
+      },
+      {
+        model: "relay/gpt-5.6-sol",
+        display_name: "第三方线路 / gpt-5.6-sol",
+        route_name: "第三方线路",
+        provider_id: "relay",
+        source_model: "gpt-5.6-sol",
+      },
+    ],
+  }, [statsigClient()]);
+
+  const request = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "official-from-third-party-runtime",
+        method: "turn/start",
+        params: { model: "gpt-5.6-terra" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", request);
+
+  assert.deepEqual(request.detail.request.params, {
+    model: "gpt-5.6-terra",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+
+  const staleProviderRequest = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "official-from-stale-third-party-provider",
+        method: "turn/start",
+        params: { model: "gpt-5.6-terra", model_provider: "relay" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", staleProviderRequest);
+
+  assert.deepEqual(staleProviderRequest.detail.request.params, {
+    model: "gpt-5.6-terra",
+    responsesapiClientMetadata: { codey_route: "openai" },
+  });
+  runtime.patch.dispose();
+});
+
+test("model IDs dedupe and match without case drift", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["Provider-Coder", " provider-coder ", "Provider-Reasoner"],
+    default_model: "provider-coder",
+  }, [statsigClient()]);
+
+  assert.deepEqual(runtime.patch.snapshot(), {
+    loaded: true,
+    models: ["Provider-Coder", "Provider-Reasoner"],
+    defaultModel: "Provider-Coder",
+  });
+  const event = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        id: "case-insensitive-model",
+        method: "turn/start",
+        params: { model: "PROVIDER-REASONER" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", event);
+  assert.equal(event.detail.request.params.model, "Provider-Reasoner");
+  runtime.patch.dispose();
+});
+
+test("unchanged catalog retries and interactions do not repeat full React discovery", async () => {
+  const catalog = {
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+
+  assert.equal(runtime.wildcardScanCount(), 1);
+  runtime.dispatchDocumentEvent("pointerdown");
+  runtime.dispatchDocumentEvent("focusin");
+  await Promise.resolve();
+  assert.equal(runtime.wildcardScanCount(), 1);
+
+  await runtime.patch.setCatalog(catalog);
+  assert.equal(runtime.wildcardScanCount(), 1);
+  assert.equal(runtime.patch.delivery().revision, 1);
+
+  await runtime.runNextTimer();
+  await runtime.runNextTimer();
+  assert.equal(runtime.wildcardScanCount(), 1);
+
+  await runtime.patch.setCatalog({
+    ...catalog,
+    models: ["gpt-5.6-sol", "provider-new"],
+  });
+  assert.equal(runtime.wildcardScanCount(), 2);
+  assert.equal(runtime.patch.delivery().revision, 2);
+  runtime.patch.dispose();
+});
+
+test("query client discovery reaches deep provider stacks", async () => {
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  // Current renderer builds memoize the host fiber far below the provider
+  // stack holding the query client, so discovery must survive the hops up
+  // the return chain before reaching the client context value.
+  let fiber = { memoizedProps: { queryClient } };
+  for (let index = 0; index < 10; index += 1) {
+    fiber = { memoizedProps: {}, return: fiber };
+  }
+  const body = new FakeElementCore("body");
+  body.__reactFiber$codeyTest = fiber;
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()], { documentBody: body });
+
+  const delivery = runtime.patch.delivery();
+  assert.equal(delivery.queryClients, 1);
+  assert.equal(delivery.queryEntries, 1);
+  assert.deepEqual(queryClient.models(), ["gpt-5.6-sol"]);
+  runtime.patch.dispose();
+});
+
+test("reopening the model picker discovers each replacement QueryClient", async () => {
+  const routeModel = "tokenrouter/z-ai/glm-5.3-free";
+  const body = new FakeElementCore("body");
+  const modelButton = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const firstQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const replacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const secondReplacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", routeModel],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()], { documentBody: body, queryClient: firstQueryClient });
+
+  assert.deepEqual(firstQueryClient.models(), ["gpt-5.6-sol", routeModel]);
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: replacementQueryClient },
+  };
+
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol", routeModel]);
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: secondReplacementQueryClient },
+  };
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.deepEqual(secondReplacementQueryClient.models(), ["gpt-5.6-sol", routeModel]);
+  assert.equal(
+    runtime.wildcardScanCount(),
+    1,
+    "picker interaction should rediscover mounted roots without repeating the full document scan",
+  );
+  runtime.patch.dispose();
+});
+
+test("native selection ignores non-picker interactions before discovering QueryClients", async () => {
+  const body = new FakeElementCore("body");
+  const sendButton = body.appendChild(new FakeElementCore("button"));
+  const modelButton = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const firstQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const replacementQueryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const models = ["gpt-5.6-sol", "gpt-5.5"];
+  const runtime = await loadPatch({
+    status: "ok",
+    native_selection_only: true,
+    models,
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()], {
+    documentBody: body,
+    queryClient: firstQueryClient,
+    nativeSelectionOnly: true,
+  });
+
+  body.__reactFiber$codeyTest = {
+    memoizedProps: { queryClient: replacementQueryClient },
+  };
+  runtime.dispatchDocumentEvent("pointerdown", { target: sendButton });
+  await Promise.resolve();
+  assert.deepEqual(replacementQueryClient.models(), ["gpt-5.6-sol"]);
+
+  runtime.dispatchDocumentEvent("pointerdown", { target: modelButton });
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(replacementQueryClient.models(), models);
+  runtime.patch.dispose();
+});
+
+test("configured third-party models survive direct and wrapped requests", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["claude-opus-4-8", "deepseek-reasoner"],
+    default_model: "claude-opus-4-8",
+  }, [statsigClient()]);
+  const direct = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        method: "turn/start",
+        params: { threadId: "valid-thread", model: "deepseek-reasoner" },
+      },
+    },
+  };
+  const wrapped = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        method: "send-cli-request-for-host",
+        params: {
+          hostId: "local",
+          method: "turn/start",
+          params: { threadId: "valid-thread", model: "deepseek-reasoner" },
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("codex-message-from-view", direct);
+  runtime.dispatchWindowEvent("codex-message-from-view", wrapped);
+
+  assert.equal(direct.detail.request.params.model, "deepseek-reasoner");
+  assert.equal(
+    wrapped.detail.request.params.params.model,
+    "deepseek-reasoner",
+  );
+  runtime.patch.dispose();
+});
+
+test("valid models survive and an explicit unknown wrapped model is preserved", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol", "gpt-5.6-terra"],
+    default_model: "gpt-5.6-sol",
+  }, [statsigClient()]);
+  const direct = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        method: "turn/start",
+        params: { threadId: "valid-thread", model: "gpt-5.6-terra" },
+      },
+    },
+  };
+  const wrapped = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        method: "send-cli-request-for-host",
+        params: {
+          hostId: "local",
+          method: "turn/start",
+          params: { threadId: "stale-thread", model: "claude-opus-4-8" },
+        },
+      },
+    },
+  };
+
+  runtime.dispatchWindowEvent("codex-message-from-view", direct);
+  runtime.dispatchWindowEvent("codex-message-from-view", wrapped);
+
+  assert.equal(direct.detail.request.params.model, "gpt-5.6-terra");
+  assert.equal(
+    wrapped.detail.request.params.params.model,
+    "claude-opus-4-8",
+  );
+  runtime.patch.dispose();
+});
+
+test("missing turn model receives the current route default", async () => {
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["provider-current"],
+    default_model: "provider-current",
+  }, [statsigClient()]);
+  const event = {
+    detail: {
+      type: "mcp-request",
+      request: {
+        method: "turn/start",
+        params: { threadId: "legacy-thread" },
+      },
+    },
+  };
+  runtime.dispatchWindowEvent("codex-message-from-view", event);
+
+  assert.equal(event.detail.request.params.model, "provider-current");
+  runtime.patch.dispose();
+});
+
+test("an unchanged model list repairs missing reasoning effort options", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const existing = queryClient.model("gpt-5.6-sol");
+  existing.supportedReasoningEfforts = [];
+  delete existing.defaultReasoningEffort;
+
+  const { patch } = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  }, [client], { queryClient });
+
+  const repaired = queryClient.model("gpt-5.6-sol");
+  assert.deepEqual(
+    repaired.supportedReasoningEfforts.map((effort) => effort.reasoningEffort),
+    ["minimal", "low", "medium", "high", "xhigh"],
+  );
+  assert.equal(repaired.defaultReasoningEffort, "medium");
+  patch.dispose();
+});
+
+test("an unchanged model list repairs missing native Fast tiers", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const existing = queryClient.model("gpt-5.6-sol");
+  existing.serviceTiers = [{
+    id: "standard",
+    name: "Standard",
+    description: "Default speed",
+  }];
+  existing.additionalSpeedTiers = ["standard"];
+  delete existing.defaultServiceTier;
+
+  const { patch } = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+  }, [client], { queryClient });
+
+  const repaired = queryClient.model("gpt-5.6-sol");
+  assert.deepEqual(repaired.serviceTiers, [
+    {
+      id: "standard",
+      name: "Standard",
+      description: "Default speed",
+    },
+    {
+      id: "priority",
+      name: "Fast",
+      description: "1.5x speed, increased usage",
+    },
+  ]);
+  assert.deepEqual(repaired.additionalSpeedTiers, ["standard", "fast"]);
+  assert.equal(repaired.defaultServiceTier, null);
+  patch.dispose();
+});
+
+test("catalog model metadata overrides stale native reasoning efforts", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const stale = queryClient.model("gpt-5.6-sol");
+  stale.defaultReasoningEffort = "xhigh";
+  stale.supportedReasoningEfforts = ["low", "medium", "high", "xhigh"]
+    .map((reasoningEffort) => ({
+      reasoningEffort,
+      description: `${reasoningEffort} effort`,
+    }));
+
+  const { patch } = await loadPatch({
+    status: "ok",
+    native_selection_only: true,
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [{
+      model: "gpt-5.6-sol",
+      supported_reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+      default_reasoning_effort: "low",
+    }],
+  }, [client], { queryClient, nativeSelectionOnly: true });
+
+  const repaired = queryClient.model("gpt-5.6-sol");
+  assert.deepEqual(
+    repaired.supportedReasoningEfforts.map((effort) => effort.reasoningEffort),
+    ["low", "medium", "high", "xhigh", "max", "ultra"],
+  );
+  assert.equal(repaired.defaultReasoningEffort, "low");
+  patch.dispose();
+});
+
+test("third-party metadata replaces a stale high-only native descriptor", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["provider-fast-coder"]);
+  const stale = queryClient.model("provider-fast-coder");
+  stale.defaultReasoningEffort = "high";
+  stale.supportedReasoningEfforts = [{
+    reasoningEffort: "high",
+    description: "high effort",
+  }];
+
+  const { patch } = await loadPatch({
+    status: "ok",
+    models: ["provider-fast-coder"],
+    default_model: "provider-fast-coder",
+    model_metadata: [{
+      model: "provider-fast-coder",
+      supported_reasoning_efforts: ["low", "medium", "high", "xhigh"],
+      default_reasoning_effort: "low",
+    }],
+  }, [client], { queryClient });
+
+  const repaired = queryClient.model("provider-fast-coder");
+  assert.deepEqual(
+    repaired.supportedReasoningEfforts.map((effort) => effort.reasoningEffort),
+    ["low", "medium", "high", "xhigh"],
+  );
+  assert.equal(repaired.defaultReasoningEffort, "low");
+  patch.dispose();
+});
+
+test("a refresh applies changed reasoning metadata when model ids stay unchanged", async () => {
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["gpt-5.6-sol"]);
+  const catalogResponse = {
+    status: "ok",
+    models: ["gpt-5.6-sol"],
+    default_model: "gpt-5.6-sol",
+    model_metadata: [{
+      model: "gpt-5.6-sol",
+      supported_reasoning_efforts: ["low", "medium"],
+      default_reasoning_effort: "low",
+    }],
+  };
+  const { patch } = await loadPatch(catalogResponse, [client], { queryClient });
+
+  catalogResponse.model_metadata[0] = {
+    model: "gpt-5.6-sol",
+    supported_reasoning_efforts: ["low", "medium", "high", "xhigh", "max", "ultra"],
+    default_reasoning_effort: "high",
+  };
+  await patch.refresh();
+
+  const refreshed = queryClient.model("gpt-5.6-sol");
+  assert.deepEqual(
+    refreshed.supportedReasoningEfforts.map((effort) => effort.reasoningEffort),
+    ["low", "medium", "high", "xhigh", "max", "ultra"],
+  );
+  assert.equal(refreshed.defaultReasoningEffort, "high");
+  patch.dispose();
+});
+
+test("a stale bridge response cannot overwrite a backend-pushed catalog", async () => {
+  const client = statsigClient();
+  let resolveCatalog;
+  const staleCatalog = new Promise((resolve) => {
+    resolveCatalog = resolve;
+  });
+  const runtime = await loadPatch(() => staleCatalog, [client], {
+    bridgeReady: false,
+  });
+  runtime.connectBridge();
+  await Promise.resolve();
+  await Promise.resolve();
+  const staleRefresh = runtime.patch.refresh();
+
+  assert.equal(await runtime.patch.setCatalog({
+    status: "ok",
+    models: ["provider-current"],
+    default_model: "provider-current",
+  }), true);
+  resolveCatalog({
+    status: "ok",
+    models: ["provider-stale"],
+    default_model: "provider-stale",
+  });
+  await staleRefresh;
+
+  assert.deepEqual(runtime.patch.snapshot(), {
+    loaded: true,
+    models: ["provider-current"],
+    defaultModel: "provider-current",
+  });
+  runtime.patch.dispose();
+});
+
+test("an unchanged backend push supersedes an in-flight catalog refresh", async () => {
+  const currentCatalog = {
+    status: "ok",
+    models: ["provider-current"],
+    default_model: "provider-current",
+  };
+  let catalogResponse = currentCatalog;
+  const queryClient = activeModelQueryClient(["provider-current"]);
+  const runtime = await loadPatch(() => catalogResponse, [statsigClient()], { queryClient });
+  let resolveCatalog;
+  catalogResponse = new Promise((resolve) => { resolveCatalog = resolve; });
+  const staleRefresh = runtime.patch.refresh();
+  const deliveryBeforePush = runtime.patch.delivery();
+  const scansBeforePush = runtime.wildcardScanCount();
+
+  assert.equal(await runtime.patch.setCatalog(currentCatalog), true);
+  resolveCatalog({
+    status: "ok",
+    models: ["provider-stale"],
+    default_model: "provider-stale",
+  });
+  await staleRefresh;
+
+  assert.deepEqual(runtime.patch.snapshot(), {
+    loaded: true,
+    models: ["provider-current"],
+    defaultModel: "provider-current",
+  });
+  assert.deepEqual(queryClient.models(), ["provider-current"]);
+  assert.equal(runtime.patch.delivery().revision, deliveryBeforePush.revision);
+  assert.equal(runtime.wildcardScanCount(), scansBeforePush);
+
+  catalogResponse = {
+    status: "ok",
+    models: ["provider-newer"],
+    default_model: "provider-newer",
+  };
+  assert.equal(await runtime.patch.refresh(), true);
+  assert.deepEqual(queryClient.models(), ["provider-newer"]);
+  runtime.patch.dispose();
+});
+
+test("superseded catalog loads neither block nor clear a newer refresh", async () => {
+  const current = { status: "ok", models: ["current"], default_model: "current" };
+  let response = current;
+  let requests = 0;
+  const runtime = await loadPatch(() => { requests += 1; return response; }, [statsigClient()]);
+  let resolveStale;
+  response = new Promise((resolve) => { resolveStale = resolve; });
+  const stale = runtime.patch.refresh();
+  await runtime.patch.setCatalog(current);
+  let resolveLatest;
+  response = new Promise((resolve) => { resolveLatest = resolve; });
+  const latest = runtime.patch.refresh();
+  assert.equal(requests, 3);
+  assert.notEqual(latest, stale);
+
+  resolveStale({ status: "ok", models: ["stale"], default_model: "stale" });
+  assert.equal(await stale, false);
+  assert.equal(runtime.patch.refresh(), latest);
+  assert.equal(requests, 3);
+  resolveLatest({ status: "ok", models: ["latest"], default_model: "latest" });
+  assert.equal(await latest, true);
+  assert.deepEqual(runtime.patch.snapshot().models, ["latest"]);
+  runtime.patch.dispose();
+});
+
+test("an unchanged catalog immediately repairs a stale picker without rescanning the document", async () => {
+  const catalog = { status: "ok", models: ["current"], default_model: "current" };
+  const queryClient = activeModelQueryClient(["current"]);
+  const runtime = await loadPatch(catalog, [statsigClient()], { queryClient });
+  const [[queryKey]] = queryClient.getQueriesData({ queryKey: ["models", "list"] });
+  queryClient.setQueryData(queryKey, { data: [modelDescriptor("stale")], nextCursor: null });
+  const scans = runtime.wildcardScanCount();
+  const invalidations = queryClient.invalidations;
+
+  assert.equal(await runtime.patch.setCatalog(catalog), true);
+  assert.deepEqual(queryClient.models(), ["current"]);
+  assert.equal(runtime.wildcardScanCount(), scans);
+  assert.equal(queryClient.invalidations, invalidations);
+  assert.equal(runtime.patch.delivery().pendingQueryEntries, 0);
+  runtime.patch.dispose();
+});
+
+test("a disposed patch cannot accept a late catalog response", async () => {
+  let response = { status: "ok", models: ["current"], default_model: "current" };
+  const client = statsigClient();
+  const queryClient = activeModelQueryClient(["current"]);
+  const runtime = await loadPatch(() => response, [client], { queryClient });
+  let resolveLate;
+  response = new Promise((resolve) => { resolveLate = resolve; });
+  const pending = runtime.patch.refresh();
+  const snapshot = runtime.patch.snapshot();
+  runtime.patch.dispose();
+  const notifications = client.events.length;
+
+  resolveLate({ status: "ok", models: ["late"], default_model: "late" });
+  assert.equal(await pending, false);
+  assert.equal(await runtime.patch.refresh(), false);
+  assert.deepEqual(runtime.patch.snapshot(), snapshot);
+  assert.deepEqual(queryClient.models(), ["current"]);
+  assert.equal(client.events.length, notifications);
+});
+
+test("superseded catalog deliveries cannot publish another revision's acknowledgements", async () => {
+  const queryClient = activeModelQueryClient(["initial"]);
+  const runtime = await loadPatch({ status: "ok", models: ["initial"] }, [statsigClient()], { queryClient });
+  const stale = runtime.patch.setCatalog({ status: "ok", models: ["stale"] });
+  const latest = runtime.patch.setCatalog({ status: "ok", models: ["latest"] });
+
+  assert.equal(await stale, false);
+  assert.equal(await latest, true);
+  assert.deepEqual(queryClient.models(), ["latest"]);
+  assert.equal(runtime.patch.delivery().revision, 3);
+  assert.equal(runtime.patch.delivery().queryEntries, 1);
+  assert.equal(runtime.patch.delivery().pendingQueryEntries, 0);
+  runtime.patch.dispose();
+});
+
+test("disposing a patch during delivery prevents later notifications", async () => {
+  const client = statsigClient();
+  const runtime = await loadPatch({ status: "ok", models: ["initial"] }, [client]);
+  const pending = runtime.patch.setCatalog({ status: "ok", models: ["new"] });
+  runtime.patch.dispose();
+  const notifications = client.events.length;
+  assert.equal(await pending, false);
+  assert.equal(client.events.length, notifications);
+});
+
+async function verifyRendererDelivery(patch, catalog) {
+  const source = await readFile(new URL("../backend/src/cdp.rs", import.meta.url), "utf8");
+  const functionSource = source.slice(source.indexOf("fn model_whitelist_refresh_script("));
+  const template = functionSource.match(/r#"([\s\S]*?)"#/)[1];
+  const script = template.replaceAll("{{", "{").replaceAll("}}", "}")
+    .replace("{expected_catalog}", JSON.stringify(catalog));
+  const report = await Function("window", `return ${script}`)({
+    __codeyModelWhitelistPatch: patch,
+    setTimeout(callback) { callback(); },
+  });
+  return JSON.parse(report);
+}
+
+test("CDP requires every existing model cache to acknowledge the catalog", async () => {
+  const catalog = { status: "ok", models: ["current"], default_model: "current" };
+  const failingClient = activeModelQueryClient(["stale"]);
+  const goodClient = activeModelQueryClient(["stale"]);
+  const write = failingClient.setQueryData;
+  let writable = false;
+  failingClient.setQueryData = (...args) => { if (writable) return write(...args); };
+  const runtime = await loadPatch(catalog, [statsigClient()], {
+    queryClient: failingClient, reactModelState: { goodClient },
+  });
+
+  const failed = await verifyRendererDelivery(runtime.patch, catalog);
+  assert.equal(failed.ok, false);
+  assert.match(failed.error, /查询缓存尚未更新/);
+  assert.equal(failed.delivery.queryEntries, 1);
+  assert.equal(failed.delivery.pendingQueryEntries, 1);
+  assert.deepEqual(failingClient.models(), ["stale"]);
+
+  writable = true;
+  const repaired = await verifyRendererDelivery(runtime.patch, catalog);
+  assert.equal(repaired.ok, true);
+  assert.equal(repaired.delivered, "active");
+  assert.equal(repaired.delivery.queryEntries, 2);
+  assert.equal(repaired.delivery.pendingQueryEntries, 0);
+  assert.deepEqual(failingClient.models(), ["current"]);
+  runtime.patch.dispose();
+});
+
+test("CDP accepts a cold picker as deferred rather than requiring a restart", async () => {
+  const catalog = { status: "ok", models: ["current"], default_model: "current" };
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  const report = await verifyRendererDelivery(runtime.patch, catalog);
+  assert.equal(report.ok, true);
+  assert.equal(report.delivered, "deferred");
+  assert.equal(report.delivery.pendingQueryEntries, 0);
+  runtime.patch.dispose();
+});
+
+test("an empty model-array query receives newly added route models", async () => {
+  let models = [];
+  const queryKey = ["models", "list", "local"];
+  const queryClient = {
+    getQueriesData() { return [[queryKey, models]]; },
+    setQueryData(_queryKey, next) { models = next; },
+    async invalidateQueries() {},
+  };
+  const runtime = await loadPatch({ status: "ok", models: ["current"] }, [statsigClient()], { queryClient });
+  assert.deepEqual(models.map((model) => model.model), ["current"]);
+  assert.equal(runtime.patch.delivery().queryEntries, 1);
+  assert.equal(runtime.patch.delivery().pendingQueryEntries, 0);
+  runtime.patch.dispose();
+});
+
+test("a synced channel with no supported models clears the native allowlist", async () => {
+  const client = statsigClient();
+  const { patch } = await loadPatch({
+    status: "not_configured",
+    models: [],
+    default_model: "",
+  }, [client]);
+
+  assert.deepEqual(client.external.value.available_models, []);
+  assert.equal(client.external.value.default_model, "");
+  assert.deepEqual(
+    client.getDynamicConfig(MODEL_CONFIG_ID).value.available_models,
+    [],
+  );
+  patch.dispose();
+});
+
+test("the catalog load retries when the bridge appears after injection", async () => {
+  const client = statsigClient();
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.3-codex-spark"],
+    default_model: "gpt-5.3-codex-spark",
+  }, [client], { bridgeReady: false });
+
+  assert.equal(runtime.patch.snapshot().loaded, false);
+  runtime.connectBridge();
+  await runtime.runNextTimer();
+
+  assert.deepEqual(runtime.patch.snapshot(), {
+    loaded: true,
+    models: ["gpt-5.3-codex-spark"],
+    defaultModel: "gpt-5.3-codex-spark",
+  });
+  assert.deepEqual(client.external.value.available_models, ["gpt-5.3-codex-spark"]);
+  runtime.patch.dispose();
+});
+
+test("cold resume and fork preserve null models before and after the catalog arrives", async () => {
+  const runtime = await loadPatch({
+    status: "ok", models: ["unrelated"], default_model: "unrelated",
+  }, [statsigClient()], { bridgeReady: false });
+  for (const loaded of [false, true]) {
+    if (loaded) {
+      runtime.connectBridge();
+      await runtime.runNextTimer();
+    }
+    for (const method of ["thread/resume", "thread/fork"]) {
+      for (const modelParams of [{ model: null }, {}]) {
+        const params = Object.freeze({ threadId: "cold", ...modelParams });
+        const rewritten = runtime.patch.rewriteOutgoingMessage({
+          type: "mcp-request", request: { method, params },
+        }).request.params;
+        assert.equal(rewritten.model, modelParams.model);
+        assert.equal(Object.hasOwn(rewritten, "model"), Object.hasOwn(modelParams, "model"));
+        assert.equal(rewritten.modelProvider, "codey_router");
+      }
+    }
+  }
+  runtime.patch.dispose();
+});
+
+test("failed catalog responses preserve the native allowlist", async () => {
+  const client = statsigClient();
+  const { patch } = await loadPatch({
+    status: "failed",
+    message: "catalog unavailable",
+  }, [client]);
+
+  assert.equal(patch.snapshot().loaded, false);
+  assert.deepEqual(
+    client.external.value.available_models,
+    ["gpt-5.6-sol", "gpt-5.3-codex"],
+  );
+  patch.dispose();
+});
+
+test("frozen Statsig results and Map memo caches receive patched copies", async () => {
+  const frozenConfig = Object.freeze({
+    value: Object.freeze({
+      available_models: ["gpt-5.3-codex"],
+      default_model: "gpt-5.3-codex",
+    }),
+  });
+  const memoCache = new Map([[`c|${MODEL_CONFIG_ID}`, frozenConfig]]);
+  const client = {
+    _memoCache: memoCache,
+    getDynamicConfig: () => frozenConfig,
+  };
+  const { patch } = await loadPatch({
+    status: "ok",
+    models: ["gpt-5.3-codex-spark"],
+    default_model: "gpt-5.3-codex-spark",
+  }, [client]);
+
+  assert.notEqual(memoCache.get(`c|${MODEL_CONFIG_ID}`), frozenConfig);
+  assert.deepEqual(
+    memoCache.get(`c|${MODEL_CONFIG_ID}`).value.available_models,
+    ["gpt-5.3-codex-spark"],
+  );
+  assert.deepEqual(
+    client.getDynamicConfig(MODEL_CONFIG_ID).value.available_models,
+    ["gpt-5.3-codex-spark"],
+  );
+  patch.dispose();
+});
+
+function historicalRouteCatalog(providerIds, model = "vendor/model") {
+  return {
+    status: "ok",
+    models: providerIds.map(id => `${encodeURIComponent(id)}/${model}`),
+    default_model: `${encodeURIComponent(providerIds[0])}/${model}`,
+    model_metadata: providerIds.map(id => ({
+      model: `${encodeURIComponent(id)}/${model}`,
+      provider_id: "codey_router", route_provider_id: id,
+      source_model: model, upstream_model: model,
+    })),
+  };
+}
+
+test("legacy codey selectors recover without a history field and leave current slash models intact", async () => {
+  const runtime = await loadPatch(historicalRouteCatalog(["current"]), [statsigClient()]);
+  for (const model of ["CoDeY/vendor/model", "vendor/model", "current/vendor/model"]) {
+    const message = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: { method: "thread/resume", params: {
+        threadId: "legacy", model, model_provider: "codey",
+      } },
+    });
+    assert.deepEqual(message.request.params, {
+      threadId: "legacy", model: "current/vendor/model", modelProvider: "codey_router",
+    });
+  }
+  await runtime.patch.setCatalog(historicalRouteCatalog(["current"], "codey/vendor/model"));
+  const raw = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request", request: { method: "turn/start", params: { model: "codey/vendor/model" } },
+  });
+  assert.equal(raw.request.params.model, "codey/vendor/model");
+  assert.equal(raw.request.params.responsesapiClientMetadata.codey_route, "current");
+  runtime.patch.dispose();
+});
+
+test("persisted encoded aliases recover on a fresh renderer and history-only refresh invalidates the catalog", async () => {
+  const catalog = historicalRouteCatalog(["new/route"]);
+  const runtime = await loadPatch(catalog, [statsigClient()]);
+  const original = { type: "mcp-request", request: {
+    method: "thread/resume", params: { model: "old%2Froute/vendor/model", modelProvider: "codey_router" },
+  } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(original).request.params.model, "old%2Froute/vendor/model");
+  await runtime.patch.setCatalog({ ...catalog, legacy_model_aliases: {
+    "old%2Froute/vendor/model": "vendor/model",
+    "unknown/vendor/model": "unrelated-model",
+  } });
+  assert.equal(runtime.patch.rewriteOutgoingMessage(original).request.params.model, "new%2Froute/vendor/model");
+  const unknown = { ...original, request: { ...original.request, params: { model: "unknown/vendor/model" } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(unknown).request.params.model, "unknown/vendor/model");
+  runtime.patch.dispose();
+  const reopened = await loadPatch({ ...catalog, legacy_model_aliases: {
+    "old%2froute/vendor/model": "vendor/model",
+  } }, [statsigClient()]);
+  assert.equal(reopened.patch.rewriteOutgoingMessage(original).request.params.model, "new%2Froute/vendor/model");
+  reopened.patch.dispose();
+});
+
+test("a null-model resume restores its saved route instead of selecting the global default", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["restored", { routeProviderId: "current", sourceModel: "vendor/model" }],
+  ]));
+  const catalog = historicalRouteCatalog(["current"]);
+  const unrelated = historicalRouteCatalog(["another"], "different-model");
+  const runtime = await loadPatch({
+    ...catalog, models: [...unrelated.models, ...catalog.models],
+    default_model: unrelated.default_model,
+    model_metadata: [...unrelated.model_metadata, ...catalog.model_metadata],
+  }, [statsigClient()], { storage });
+  const resumed = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request", request: { method: "thread/resume", params: {
+      threadId: "restored", model: null, modelProvider: "codey_router",
+    } },
+  });
+  assert.equal(resumed.request.params.model, "current/vendor/model");
+  runtime.patch.dispose();
+});
+
+test("a model-less resume restores and persists the same model after its route disappears", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["restored", { routeProviderId: "deleted", sourceModel: "vendor/model" }],
+  ]));
+  const catalog = historicalRouteCatalog(["current"]);
+  const unrelated = historicalRouteCatalog(["another"], "different-model");
+  const runtime = await loadPatch({
+    ...catalog, models: [...unrelated.models, ...catalog.models],
+    default_model: unrelated.default_model,
+    model_metadata: [...unrelated.model_metadata, ...catalog.model_metadata],
+  }, [statsigClient()], { storage });
+  const resumed = runtime.patch.rewriteOutgoingMessage({
+    type: "mcp-request", request: { method: "thread/resume", params: {
+      threadId: "restored", modelProvider: "codey_router",
+    } },
+  });
+  assert.equal(resumed.request.params.model, "current/vendor/model");
+  assert.deepEqual(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")), [
+    ["restored", { routeProviderId: "current", sourceModel: "vendor/model" }],
+  ]);
+  runtime.patch.dispose();
+});
+
+test("ambiguous historical models retain their identity unless a valid hint chooses a route", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["ambiguous", { routeProviderId: "deleted", sourceModel: "vendor/model" }],
+  ]));
+  const runtime = await loadPatch(historicalRouteCatalog(["a", "b"]), [statsigClient()], { storage });
+  const original = { type: "mcp-request", request: { method: "turn/start", params: { model: "codey/vendor/model" } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(original).request.params.model, "codey/vendor/model");
+  const hinted = runtime.patch.rewriteOutgoingMessage({ ...original, request: { ...original.request, params: {
+    model: "codey/vendor/model", responsesapiClientMetadata: { codey_route: "b" },
+  } } });
+  assert.equal(hinted.request.params.model, "vendor/model");
+  assert.equal(hinted.request.params.responsesapiClientMetadata.codey_route, "b");
+  const resumed = runtime.patch.rewriteOutgoingMessage({ type: "mcp-request", request: {
+    method: "thread/resume", params: { threadId: "ambiguous", modelProvider: "codey_router" },
+  } });
+  assert.equal(resumed.request.params.model, "vendor/model", "preserve the stored model for the gateway to reject ambiguity");
+  runtime.patch.dispose();
+});
+
+test("native mode migrates old aliases and the persisted carrier without changing ordinary requests", async () => {
+  const catalog = {
+    status: "ok", native_selection_only: true, native_model_provider: "native-provider",
+    models: ["vendor/model", "codey/raw-model"], default_model: "vendor/model",
+    legacy_model_aliases: { "deleted/vendor/model": "vendor/model" },
+  };
+  const runtime = await loadPatch(catalog, [statsigClient()], { nativeSelectionOnly: true });
+  for (const model of ["codey/vendor/model", "deleted/vendor/model", "vendor/model"]) {
+    const resumed = runtime.patch.rewriteOutgoingMessage({
+      type: "mcp-request", request: { method: "send-cli-request-for-host", params: {
+        hostId: "local", method: "thread/resume", params: {
+          threadId: "old", model, model_provider: "codey_router",
+          responsesapiClientMetadata: { codey_route: "deleted", trace: "kept" },
+        },
+      } },
+    });
+    assert.deepEqual(resumed.request.params.params, {
+      threadId: "old", model: "vendor/model", modelProvider: "native-provider",
+      responsesapiClientMetadata: { trace: "kept" },
+    });
+    assert.equal(resumed.request.params.hostId, "local");
+  }
+  for (const model of ["vendor/model", "codey/raw-model", "unknown/model"]) {
+    const current = { type: "mcp-request", request: { method: "thread/start", params: {
+      model, modelProvider: "native-provider",
+    } } };
+    assert.equal(runtime.patch.rewriteOutgoingMessage(current), current);
+  }
+  const missing = runtime.patch.rewriteOutgoingMessage({ type: "mcp-request", request: {
+    method: "thread/resume", params: { model: "codey/missing", modelProvider: "codey_router" },
+  } });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(missing), true);
+  runtime.patch.dispose();
+});
+
+test("native mode can resume from a legacy binding without a model override and tracks successful provider migration", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["old", { routeProviderId: "deleted", sourceModel: "vendor/model" }],
+  ]));
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true, native_model_provider: "native",
+    models: ["vendor/model", "new-model"], default_model: "vendor/model",
+  }, [statsigClient()], { nativeSelectionOnly: true, storage });
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    result: { data: [{ id: "old", model: "codey/vendor/model", modelProvider: "codey_router" }] },
+  } } });
+  const request = { type: "mcp-request", request: { id: "resume", method: "thread/resume", params: { threadId: "old" } } };
+  const resumed = runtime.patch.rewriteOutgoingMessage(request);
+  assert.equal(resumed.request.params.model, "vendor/model");
+  assert.equal(resumed.request.params.modelProvider, "native");
+  const turn = { type: "mcp-request", request: { method: "turn/start", params: { threadId: "old" } } };
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(runtime.patch.rewriteOutgoingMessage(turn)), true);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "resume", error: { code: -1, message: "resume failed" },
+  } } });
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(runtime.patch.rewriteOutgoingMessage(turn)), true,
+    "a failed resume must not update the runtime provider");
+  runtime.patch.rewriteOutgoingMessage(request);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "resume", result: { modelProvider: "native", thread: { id: "old", modelProvider: "codey_router", model: "vendor/model" } },
+  } } });
+  const continued = runtime.patch.rewriteOutgoingMessage(turn);
+  assert.equal(continued, turn, "native app-server now owns the sticky model");
+  assert.equal(runtime.patch.isBlockedOutgoingMessage(continued), false);
+  const update = { type: "mcp-request", request: { method: "thread/settings/update", params: {
+    threadId: "old", model: "new-model",
+  } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(update), update);
+  assert.equal(runtime.patch.rewriteOutgoingMessage(turn), turn, "the old route must not overwrite a later native model choice");
+  assert.deepEqual(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")), []);
+  runtime.patch.dispose();
+});
+
+test("native settings clear historical bindings only after a successful reply", async () => {
+  const storage = memoryStorage();
+  storage.setItem("codey.thread-route-bindings.v1", JSON.stringify([
+    ["native-thread", { routeProviderId: "deleted", sourceModel: "old-model" }],
+  ]));
+  const runtime = await loadPatch({
+    status: "ok", native_selection_only: true, native_model_provider: "native",
+    models: ["old-model", "new-model"], default_model: "old-model",
+  }, [statsigClient()], { nativeSelectionOnly: true, storage });
+  const request = { type: "mcp-request", request: { id: "settings", method: "thread/settings/update", params: {
+    threadId: "native-thread", model: "new-model",
+  } } };
+  runtime.patch.rewriteOutgoingMessage(request);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "settings", error: { message: "failed" },
+  } } });
+  assert.equal(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")).length, 1);
+  runtime.patch.rewriteOutgoingMessage(request);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    id: "settings", result: {},
+  } } });
+  assert.deepEqual(JSON.parse(storage.getItem("codey.thread-route-bindings.v1")), []);
+  const turn = { type: "mcp-request", request: { method: "turn/start", params: { threadId: "native-thread" } } };
+  assert.equal(runtime.patch.rewriteOutgoingMessage(turn), turn);
+  runtime.patch.dispose();
+});
+
+test("thread list history is restored without an existing local binding", async () => {
+  const runtime = await loadPatch(historicalRouteCatalog(["current"]), [statsigClient()]);
+  runtime.dispatchWindowEvent("message", { data: { type: "mcp-response", message: {
+    result: { data: [{ id: "history", model: "codey/vendor/model", modelProvider: "codey" }] },
+  } } });
+  const resumed = runtime.patch.rewriteOutgoingMessage({ type: "mcp-request", request: {
+    method: "thread/resume", params: { threadId: "history" },
+  } });
+  assert.deepEqual(resumed.request.params, {
+    threadId: "history", model: "current/vendor/model", modelProvider: "codey_router",
+  });
+  runtime.patch.dispose();
+});
+
+test("a proxy query client that answers with a promise-like value cannot abort catalog delivery", async () => {
+  const goodClient = activeModelQueryClient(["route-a/old-model"]);
+  let rejectedClients = 0;
+  const rpcProxyClient = {
+    getQueriesData() {
+      return { then() {}, catch() {}, finally() {} };
+    },
+    setQueryData() {
+      throw new Error("the rpc proxy must never receive cache writes");
+    },
+    invalidateQueries() {
+      rejectedClients += 1;
+      return Promise.resolve();
+    },
+  };
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/current-model"],
+    default_model: "route-a/current-model",
+  }, [statsigClient()], {
+    queryClient: rpcProxyClient,
+    reactModelState: { goodClient },
+  });
+
+  assert.deepEqual(
+    goodClient.models(),
+    ["route-a/current-model"],
+    "the usable client must still receive the catalog after an unusable one is skipped",
+  );
+  assert.equal(rejectedClients, 0, "the unusable client must be skipped before invalidation");
+  runtime.patch.dispose();
+});
+
+test("catalog delivery survives a query client whose entries are not key-value pairs", async () => {
+  const goodClient = activeModelQueryClient(["route-a/old-model"]);
+  const malformedClient = {
+    getQueriesData() {
+      return ["not-a-pair", null, 7];
+    },
+    setQueryData() {
+      throw new Error("malformed entries must never reach the cache writer");
+    },
+    async invalidateQueries() {},
+  };
+  const runtime = await loadPatch({
+    status: "ok",
+    models: ["route-a/current-model"],
+    default_model: "route-a/current-model",
+  }, [statsigClient()], {
+    queryClient: malformedClient,
+    reactModelState: { goodClient },
+  });
+
+  assert.deepEqual(goodClient.models(), ["route-a/current-model"]);
+  runtime.patch.dispose();
+});
+
+const subagentRouteModel = "codey-official-account-d3265a21-a59f-40c8-a05a-5b4e03231c22/gpt-6-luna";
+const composerRouteModel = "route-mu5dql1a-5j3e97/gpt-6-astra";
+const composerOtherRouteModel = "route-other/gpt-6-astra";
+const composerCatalog = (prefix = "主") => ({
+  status: "ok",
+  models: [composerRouteModel, composerOtherRouteModel],
+  default_model: composerRouteModel,
+  model_metadata: [
+    [composerRouteModel, prefix], [composerOtherRouteModel, "备"],
+  ].map(([model, route]) => ({
+    model, display_name: `[${route}] gpt-6-astra`, route_name: route,
+    provider_id: "codey_router", route_provider_id: model.split("/")[0],
+    source_model: "gpt-6-astra",
+  })),
+});
+
+function composerModelTrigger(body, text, { reactPicker = true } = {}) {
+  const trigger = body.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-haspopup": "menu" },
+  }));
+  const label = trigger.appendChild(new FakeElementCore("span"));
+  const textNode = { nodeType: 3, nodeValue: text, parentElement: label };
+  label.childNodes = [textNode];
+  Object.defineProperty(label, "textContent", {
+    get: () => label.childNodes.map((node) => node.nodeValue).join(""),
+    set: () => assert.fail("preserve React's model label node"),
+  });
+  const effort = trigger.appendChild(new FakeElementCore("span"));
+  const effortNode = { nodeType: 3, nodeValue: "极高", parentElement: effort };
+  effort.childNodes = [effortNode];
+  const icon = trigger.appendChild(new FakeElementCore("svg"));
+  Object.defineProperty(trigger, "childNodes", { get: () => trigger.children });
+  const picker = { model: text, models: [], onSelectModel() {} };
+  if (reactPicker) trigger.__reactFiber$pickerLabelTest = { memoizedProps: picker };
+  return { trigger, label, textNode, effortNode, icon, picker };
+}
+
+for (const nativeSelectionOnly of [false, true]) {
+  test(`composer trigger shows the route short name and preserves native nodes (native: ${nativeSelectionOnly})`, async () => {
+    const body = new FakeElementCore("body", { connected: true });
+    const { trigger, label, textNode, effortNode, icon, picker } = composerModelTrigger(body, composerRouteModel);
+    let clicks = 0;
+    trigger.addEventListener("click", () => { clicks += 1; });
+    const runtime = await loadPatch({ ...composerCatalog(), native_selection_only: nativeSelectionOnly }, [statsigClient()], { documentBody: body, nativeSelectionOnly });
+    assert.equal(textNode.nodeValue, "[主] gpt-6-astra");
+    assert.equal(label.childNodes[0], textNode);
+    assert.equal(effortNode.nodeValue, "极高");
+    assert.equal(trigger.children[2], icon);
+    assert.equal(picker.model, composerRouteModel);
+    assert.deepEqual(runtime.patch.snapshot().models, [composerRouteModel, composerOtherRouteModel]);
+    trigger.dispatchEvent({ type: "click" });
+    assert.equal(clicks, 1);
+    const observer = runtime.mutationObserverInstalls().find(entry => entry.target === trigger);
+    assert.deepEqual(observer.options, { childList: true, characterData: true, subtree: true });
+    assert.equal(runtime.mutationObserverInstalls().find(entry => entry.target === body).options.characterData, undefined);
+    runtime.patch.dispose();
+    assert.equal(textNode.nodeValue, composerRouteModel);
+    assert.equal(observer.observer.disconnected, true);
+  });
+}
+
+test("composer trigger tracks exact route aliases, React updates and renamed routes", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const { trigger, label, textNode } = composerModelTrigger(body, ` ${composerRouteModel} · 极高`);
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], { documentBody: body });
+  const nativeUpdate = (text) => {
+    textNode.nodeValue = text;
+    runtime.dispatchObserverMutations(trigger, [{ type: "characterData", target: textNode }]);
+  };
+  assert.equal(textNode.nodeValue, " [主] gpt-6-astra · 极高");
+  nativeUpdate(`${composerOtherRouteModel} · High`);
+  assert.equal(textNode.nodeValue, "[备] gpt-6-astra · High");
+  nativeUpdate(`${composerRouteModel} · 中`);
+  nativeUpdate("[主] gpt-6-astra · 极高");
+  await runtime.patch.setCatalog(composerCatalog("新"));
+  assert.equal(textNode.nodeValue, "[新] gpt-6-astra · 极高");
+  const replacement = { nodeType: 3, nodeValue: composerOtherRouteModel, parentElement: label };
+  label.childNodes = [replacement];
+  runtime.dispatchObserverMutations(trigger, [{ type: "childList", target: label, addedNodes: [replacement], removedNodes: [textNode] }]);
+  assert.equal(replacement.nodeValue, "[备] gpt-6-astra");
+  assert.equal(textNode.nodeValue, `${composerRouteModel} · 极高`);
+  replacement.nodeValue = "gpt-6-astra";
+  runtime.dispatchObserverMutations(trigger, [{ type: "characterData", target: replacement }]);
+  assert.equal(replacement.nodeValue, "gpt-6-astra", "a shared upstream name must not select a route");
+  runtime.patch.dispose();
+  assert.equal(replacement.nodeValue, "gpt-6-astra");
+});
+
+test("composer trigger handles late catalogs and model changes from native labels", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const { trigger, textNode } = composerModelTrigger(body, "GPT-6");
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], { documentBody: body, bridgeReady: false });
+  assert.equal(textNode.nodeValue, "GPT-6");
+  runtime.connectBridge();
+  await runtime.patch.refresh();
+  textNode.nodeValue = composerRouteModel;
+  runtime.dispatchObserverMutations(trigger, [{ type: "characterData", target: textNode }]);
+  assert.equal(textNode.nodeValue, "[主] gpt-6-astra");
+  runtime.patch.dispose();
+});
+
+test("composer trigger fallback stays inside popup buttons and handles historical models", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const active = composerModelTrigger(body, composerRouteModel, { reactPicker: false });
+  const historical = composerModelTrigger(body, "route-mu5dql1a-5j3e97/retired-model · Low", { reactPicker: false });
+  const unrelated = composerModelTrigger(body, "vendor/model", { reactPicker: false });
+  const plain = composerModelTrigger(body, composerRouteModel);
+  plain.trigger.removeAttribute("aria-haspopup");
+  const turn = body.appendChild(new FakeElementCore("div", { attributes: { "data-turn-key": "turn" } }));
+  const conversation = composerModelTrigger(turn, composerRouteModel);
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], { documentBody: body });
+  assert.equal(active.textNode.nodeValue, "[主] gpt-6-astra");
+  assert.equal(historical.textNode.nodeValue, "[主] retired-model · Low");
+  for (const control of [unrelated, plain, conversation]) {
+    assert.equal(control.textNode.nodeValue, control.picker.model);
+    assert.ok(!runtime.mutationObserverInstalls().some(entry => entry.target === control.trigger));
+  }
+  runtime.patch.dispose();
+});
+
+test("composer trigger handles mounting, removal and hot reload without full scans", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const runtime = await loadPatch(composerCatalog(), [statsigClient()], { documentBody: body });
+  const scans = runtime.wildcardScanCount();
+  const { trigger, textNode } = composerModelTrigger(body, composerRouteModel);
+  runtime.dispatchObserverMutations(body, [{ type: "childList", target: body, addedNodes: [trigger], removedNodes: [] }]);
+  assert.equal(textNode.nodeValue, "[主] gpt-6-astra");
+  const observer = runtime.mutationObserverInstalls().find(entry => entry.target === trigger);
+  trigger.remove();
+  runtime.dispatchObserverMutations(body, [{ type: "childList", target: body, addedNodes: [], removedNodes: [trigger] }]);
+  assert.equal(observer.observer.disconnected, true);
+  assert.equal(textNode.nodeValue, composerRouteModel);
+  body.appendChild(trigger);
+  runtime.dispatchObserverMutations(body, [{ type: "childList", target: body, addedNodes: [trigger], removedNodes: [] }]);
+  assert.equal(textNode.nodeValue, "[主] gpt-6-astra");
+  assert.equal(runtime.wildcardScanCount(), scans);
+  const previousObservers = [...runtime.mutationObserverInstalls()];
+  runtime.patch.version = "previous";
+  const nextPatch = await runtime.reload();
+  assert.ok(previousObservers.every(entry => entry.observer.disconnected));
+  assert.equal(textNode.nodeValue, "[主] gpt-6-astra");
+  nextPatch.dispose();
+  assert.equal(textNode.nodeValue, composerRouteModel);
+  assert.ok(runtime.mutationObserverInstalls().every(entry => entry.observer.disconnected));
+});
+
+const subagentCatalog = (prefix = "官1") => ({
+  status: "ok",
+  models: [subagentRouteModel],
+  default_model: subagentRouteModel,
+  model_metadata: [{
+    model: subagentRouteModel,
+    display_name: `[${prefix}] gpt-6-luna`,
+    route_name: "官方账号1",
+    provider_id: "codey_router",
+    route_provider_id: subagentRouteModel.split("/")[0],
+    source_model: "gpt-6-luna",
+  }],
+});
+
+for (const nativeSelectionOnly of [false, true]) {
+  test(`slider model row shows the route short name (native: ${nativeSelectionOnly})`, async () => {
+    const body = new FakeElementCore("body", { connected: true });
+    const runtime = await loadPatch({ ...subagentCatalog(), native_selection_only: nativeSelectionOnly }, [statsigClient()], { documentBody: body, nativeSelectionOnly });
+    const { trigger, textNode, effortNode, icon, picker } = composerModelTrigger(body, subagentRouteModel, { reactPicker: false });
+    trigger.tagName = "DIV";
+    trigger.removeAttribute("aria-haspopup");
+    trigger.setAttribute("role", "menuitem");
+    trigger.setAttribute("data-model-picker-view-toggle", "true");
+    let clicks = 0;
+    trigger.addEventListener("click", () => { clicks += 1; });
+    runtime.dispatchObserverMutations(body, [{ type: "childList", target: body, addedNodes: [trigger], removedNodes: [] }]);
+    assert.equal(textNode.nodeValue, "[官1] gpt-6-luna");
+    assert.equal(effortNode.nodeValue, "极高");
+    assert.equal(trigger.children[2], icon);
+    assert.equal(picker.model, subagentRouteModel);
+    trigger.dispatchEvent({ type: "click" });
+    assert.equal(clicks, 1);
+    textNode.nodeValue = "codey-official-account-deleted/gpt-6-sol";
+    runtime.dispatchObserverMutations(trigger, [{ type: "characterData", target: textNode }]);
+    assert.equal(textNode.nodeValue, "gpt-6-sol");
+    textNode.nodeValue = subagentRouteModel;
+    runtime.dispatchObserverMutations(trigger, [{ type: "characterData", target: textNode }]);
+    await runtime.patch.setCatalog({ ...subagentCatalog("主"), native_selection_only: nativeSelectionOnly });
+    assert.equal(textNode.nodeValue, "[主] gpt-6-luna");
+    runtime.patch.dispose();
+    assert.equal(textNode.nodeValue, subagentRouteModel);
+  });
+}
+
+function subagentHeader(body, text) {
+  const toolbar = body.appendChild(new FakeElementCore("div"));
+  toolbar.className = "relative h-toolbar-pane border-b";
+  const header = toolbar.appendChild(new FakeElementCore("div"));
+  header.appendChild(new FakeElementCore("button", {
+    attributes: { "aria-label": "Back to subagents" },
+  }));
+  const label = header.appendChild(new FakeElementCore("span"));
+  label.className = "max-w-1/2 min-w-0 truncate text-xs text-tertiary select-none";
+  label.textContent = text;
+  return { toolbar, header, label };
+}
+
+test("mounted subagent headers use catalog labels without a startup resource patch", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const raw = `${subagentRouteModel} · 极高`;
+  const { label } = subagentHeader(body, raw);
+  const textNode = { nodeType: 3, nodeValue: raw, parentElement: label };
+  label.firstChild = textNode;
+  label.childNodes = [textNode];
+  Object.defineProperty(label, "textContent", {
+    get: () => textNode.nodeValue,
+    set: () => assert.fail("the text node owned by React must be preserved"),
+  });
+  const thread = { model: subagentRouteModel, reasoningEffort: "xhigh" };
+  label.__reactFiber$headerTest = { memoizedProps: thread };
+  const runtime = await loadPatch(subagentCatalog(), [statsigClient()], { documentBody: body });
+  assert.equal(label.textContent, "[官1] gpt-6-luna · 极高");
+  assert.equal(thread.model, subagentRouteModel);
+  assert.equal(runtime.patch.snapshot().models[0], subagentRouteModel);
+  const observer = runtime.mutationObserverInstalls().find(entry => entry.target === label);
+  assert.deepEqual(observer.options, { childList: true, characterData: true, subtree: true });
+  runtime.patch.dispose();
+  assert.equal(label.textContent, raw);
+  assert.equal(observer.observer.disconnected, true);
+});
+
+test("subagent headers survive React text updates and route renames", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const { label } = subagentHeader(body, subagentRouteModel);
+  const runtime = await loadPatch(subagentCatalog(), [statsigClient()], { documentBody: body });
+  const nativeUpdate = (text) => {
+    label.textContent = text;
+    runtime.dispatchObserverMutations(label, [{
+      type: "characterData", target: { parentElement: label },
+    }]);
+  };
+  assert.equal(label.textContent, "[官1] gpt-6-luna");
+  nativeUpdate(`${subagentRouteModel} · High`);
+  assert.equal(label.textContent, "[官1] gpt-6-luna · High");
+  nativeUpdate("[官1] gpt-6-luna · 中");
+  assert.equal(label.textContent, "[官1] gpt-6-luna · 中");
+  await runtime.patch.setCatalog(subagentCatalog("主"));
+  assert.equal(label.textContent, "[主] gpt-6-luna · 中");
+  nativeUpdate("vendor/custom-model · Low");
+  assert.equal(label.textContent, "vendor/custom-model · Low");
+  nativeUpdate("codey-official-account-deleted/gpt-6-sol · 极高");
+  assert.equal(label.textContent, "gpt-6-sol · 极高");
+  nativeUpdate(subagentRouteModel);
+  assert.equal(label.textContent, "[主] gpt-6-luna");
+  nativeUpdate(label.textContent);
+  assert.equal(label.textContent, "[主] gpt-6-luna");
+  runtime.patch.dispose();
+  assert.equal(label.textContent, subagentRouteModel);
+});
+
+test("subagent headers observe late mounts and release removed labels without scanning turns", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const runtime = await loadPatch(subagentCatalog(), [statsigClient()], { documentBody: body });
+  const scans = runtime.wildcardScanCount();
+  const { toolbar, header, label } = subagentHeader(body, `${subagentRouteModel} · 中`);
+  runtime.dispatchObserverMutations(body, [{
+    type: "childList", target: body, addedNodes: [toolbar], removedNodes: [],
+  }]);
+  assert.equal(label.textContent, "[官1] gpt-6-luna · 中");
+  const observer = runtime.mutationObserverInstalls().find(entry => entry.target === label);
+  label.remove();
+  runtime.dispatchObserverMutations(body, [{
+    type: "childList", target: header, addedNodes: [], removedNodes: [label],
+  }]);
+  assert.equal(observer.observer.disconnected, true);
+  assert.equal(label.textContent, `${subagentRouteModel} · 中`);
+  header.appendChild(label);
+  runtime.dispatchObserverMutations(body, [{
+    type: "childList", target: header, addedNodes: [label], removedNodes: [],
+  }]);
+  assert.equal(label.textContent, "[官1] gpt-6-luna · 中");
+  const turn = body.appendChild(new FakeElementCore("div", { attributes: { "data-turn-key": "turn" } }));
+  const content = subagentHeader(turn, subagentRouteModel);
+  runtime.dispatchObserverMutations(body, [{
+    type: "childList", target: turn, addedNodes: [content.toolbar], removedNodes: [],
+  }]);
+  assert.equal(content.label.textContent, subagentRouteModel);
+  assert.equal(runtime.mutationObserverInstalls().length, 3);
+  assert.equal(runtime.wildcardScanCount(), scans);
+  runtime.patch.dispose();
+});
+
+test("subagent header hot reload restores raw labels before reinstalling observers", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const { label } = subagentHeader(body, `${subagentRouteModel} · 极高`);
+  const runtime = await loadPatch(subagentCatalog(), [statsigClient()], { documentBody: body });
+  const firstObservers = [...runtime.mutationObserverInstalls()];
+  runtime.patch.version = "previous";
+  const reloaded = await runtime.reload();
+  assert.notEqual(reloaded, runtime.patch);
+  assert.equal(label.textContent, "[官1] gpt-6-luna · 极高");
+  assert.ok(firstObservers.every(entry => entry.observer.disconnected));
+  reloaded.dispose();
+  assert.equal(label.textContent, `${subagentRouteModel} · 极高`);
+  assert.ok(runtime.mutationObserverInstalls().every(entry => entry.observer.disconnected));
+});
+
+for (const nativeSelectionOnly of [false, true]) {
+  test(`subagent headers handle a late catalog without touching conversation content (native: ${nativeSelectionOnly})`, async () => {
+    const body = new FakeElementCore("body", { connected: true });
+    const { label } = subagentHeader(body, subagentRouteModel);
+    const turn = body.appendChild(new FakeElementCore("div", { attributes: { "data-turn-key": "turn" } }));
+    const content = subagentHeader(turn, subagentRouteModel);
+    const unrelated = body.appendChild(new FakeElementCore("span"));
+    unrelated.className = label.className;
+    unrelated.textContent = subagentRouteModel;
+    const runtime = await loadPatch({ ...subagentCatalog(), native_selection_only: nativeSelectionOnly }, [statsigClient()], {
+      documentBody: body, bridgeReady: false, nativeSelectionOnly,
+    });
+    assert.equal(label.textContent, subagentRouteModel);
+    runtime.connectBridge();
+    await runtime.patch.refresh();
+    assert.equal(label.textContent, "[官1] gpt-6-luna");
+    assert.equal(content.label.textContent, subagentRouteModel);
+    assert.equal(unrelated.textContent, subagentRouteModel);
+    assert.equal(runtime.mutationObserverInstalls().length, 2);
+    runtime.patch.dispose();
+  });
+}

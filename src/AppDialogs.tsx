@@ -1,0 +1,598 @@
+import { memo, useEffect, useMemo, useState } from "react";
+import {
+  IconAlertTriangle as AlertTriangle,
+  IconCheck as Check,
+  IconCircleArrowUp as CircleArrowUp,
+  IconCpu,
+  IconLoader2 as LoaderCircle,
+  IconPlus as Plus,
+  IconRefresh as RefreshCw,
+  IconSearch,
+  IconTrash as Trash2,
+  IconX,
+} from "@tabler/icons-react";
+
+import type {
+  Confirmation,
+  ModelContextConfig,
+  ModelReasoningEffort,
+  ModelState,
+  OfficialModelState,
+} from "./App.types";
+import { ModelSettingsFields } from "./components/ModelSettingsFields";
+import {
+  filterModelOptions,
+  MODEL_PICKER_PAGE_SIZE,
+  nextVisibleModelCount,
+  visibleModelOptions,
+} from "./modelPickerPagination";
+import { modelKey } from "./modelIds";
+import {
+  Badge,
+  Button,
+  Checkbox,
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  Input,
+  Switch,
+} from "./components/ui";
+
+type ModelPickerDialogProps = {
+  open: boolean;
+  routeConfigReadOnly: boolean;
+  officialOnly: boolean;
+  isBusy: boolean;
+  busy: string | null;
+  container: HTMLElement | null;
+  customModelInput: string;
+  modelInputError: string;
+  modelSyncWarning: string;
+  loading?: boolean;
+  autoReviewSupported: boolean;
+  reasoningEffortCapabilities?: Record<string, readonly string[]>;
+  thirdPartyModelOptions: string[];
+  modelState: ModelState;
+  draftModelSet: Set<string>;
+  draftModelContexts: Record<string, ModelContextConfig>;
+  draftReasoningEfforts: Record<string, ModelReasoningEffort[]>;
+  reasoningEffortAutoByModel: Record<string, ModelReasoningEffort[]>;
+  onUpdateDraftModelContext: (model: string, policy: ModelContextConfig | undefined) => void;
+  onUpdateDraftReasoningEffort: (
+    model: string,
+    efforts: ModelReasoningEffort[],
+  ) => void;
+  onResetDraftReasoningEffort: (model: string) => void;
+  manualThirdPartyModelKeys: Set<string>;
+  onOpenChange: (open: boolean) => void;
+  onCustomModelInputChange: (model: string) => void;
+  onAddCustomModel: () => void;
+  onToggleDraftModel: (model: string | readonly string[], checked: boolean) => void;
+  onDeleteThirdPartyModel: (model: string) => void;
+  onAutoReviewSupportedChange: (checked: boolean) => void;
+  onSave: () => void;
+};
+
+function ModelPickerDialogComponent({
+  open,
+  routeConfigReadOnly,
+  officialOnly,
+  isBusy,
+  busy,
+  container,
+  customModelInput,
+  modelInputError,
+  modelSyncWarning,
+  loading = false,
+  autoReviewSupported,
+  reasoningEffortCapabilities = {},
+  thirdPartyModelOptions,
+  modelState,
+  draftModelSet,
+  draftModelContexts,
+  draftReasoningEfforts,
+  reasoningEffortAutoByModel,
+  onUpdateDraftModelContext,
+  onUpdateDraftReasoningEffort,
+  onResetDraftReasoningEffort,
+  manualThirdPartyModelKeys,
+  onOpenChange,
+  onCustomModelInputChange,
+  onAddCustomModel,
+  onToggleDraftModel,
+  onDeleteThirdPartyModel,
+  onAutoReviewSupportedChange,
+  onSave,
+}: ModelPickerDialogProps) {
+  const [visibleThirdPartyCount, setVisibleThirdPartyCount] = useState(
+    MODEL_PICKER_PAGE_SIZE,
+  );
+  const [visibleOfficialCount, setVisibleOfficialCount] = useState(
+    MODEL_PICKER_PAGE_SIZE,
+  );
+  useEffect(() => {
+    if (!open) return;
+    setVisibleThirdPartyCount(MODEL_PICKER_PAGE_SIZE);
+    setVisibleOfficialCount(MODEL_PICKER_PAGE_SIZE);
+  }, [open, customModelInput]);
+  const filteredThirdPartyModels = useMemo(() => {
+    if (!open) return [];
+    return filterModelOptions(thirdPartyModelOptions, customModelInput);
+  }, [customModelInput, open, thirdPartyModelOptions]);
+  const officialModelCatalog = useMemo(() => {
+    const available = new Map(modelState.officialModels.map((model) => [modelKey(model.slug), model]));
+    const ids = modelState.officialModelIds.length > 0
+      ? modelState.officialModelIds
+      : modelState.officialModels.map((model) => model.slug);
+    const seen = new Set<string>();
+    const models: Array<{ model: OfficialModelState; haystack: string }> = [];
+    for (const id of ids) {
+      const key = modelKey(id);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const model = available.get(key) ?? {
+        slug: id,
+        displayName: id,
+        supported: false,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: "low",
+      };
+      models.push({
+        model,
+        haystack: `${model.slug} ${model.displayName}`.toLowerCase(),
+      });
+    }
+    return models;
+  }, [modelState.officialModelIds, modelState.officialModels]);
+  const filteredOfficialModels = useMemo(() => {
+    if (!open || !officialOnly) return [];
+    const query = customModelInput.trim().toLowerCase();
+    if (!query) return officialModelCatalog.map((entry) => entry.model);
+    return officialModelCatalog.flatMap((entry) => (
+      entry.haystack.includes(query) ? [entry.model] : []
+    ));
+  }, [customModelInput, officialModelCatalog, officialOnly, open]);
+  const matchingModels = useMemo(
+    () => [
+      ...filteredOfficialModels.map((model) => model.slug),
+      ...filteredThirdPartyModels,
+    ],
+    [filteredOfficialModels, filteredThirdPartyModels],
+  );
+  const selectedMatchingCount = useMemo(
+    () => matchingModels.filter((model) => draftModelSet.has(modelKey(model))).length,
+    [matchingModels, draftModelSet],
+  );
+  const allMatchingSelected =
+    matchingModels.length > 0 && selectedMatchingCount === matchingModels.length;
+  const someMatchingSelected =
+    selectedMatchingCount > 0 && !allMatchingSelected;
+  const checkAllState: boolean | "indeterminate" = allMatchingSelected
+    ? true
+    : someMatchingSelected
+      ? "indeterminate"
+      : false;
+  const visibleOfficialModels = visibleModelOptions(
+    filteredOfficialModels,
+    visibleOfficialCount,
+  );
+  const visibleThirdPartyModels = visibleModelOptions(
+    filteredThirdPartyModels,
+    visibleThirdPartyCount,
+  );
+  const selectedThirdPartyModelKeys = useMemo(
+    () =>
+      open
+        ? new Set(modelState.thirdPartyModels.map(modelKey))
+        : new Set<string>(),
+    [modelState.thirdPartyModels, open],
+  );
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      {open && <DialogContent
+        className="w-[min(560px,calc(100vw-32px))]"
+        container={container}
+        onEscapeKeyDown={(event) => {
+          if (isBusy) event.preventDefault();
+        }}
+        onPointerDownOutside={(event) => {
+          if (isBusy) event.preventDefault();
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>配置当前线路支持的模型</DialogTitle>
+          <DialogDescription>
+            {officialOnly
+              ? "列出当前官方账号可用的全部模型。勾选后才会出现在线路模型列表中；启用本地路由后可调整模型上下文预算。"
+              : modelState.officialModels.length > 0
+                ? "请选择本次官方账号登录可用的模型。"
+              : "请选择同步到的线路模型，或手动输入当前线路支持的模型 ID。"}
+            {routeConfigReadOnly && " 保存只更新模型选择，线路连接配置保持只读。"}
+          </DialogDescription>
+        </DialogHeader>
+        {modelSyncWarning && (
+          <div className="mt-3.5 flex items-start gap-2 rounded-[9px] border border-amber-700/20 dark:border-amber-700/20 bg-[var(--codey-amber-soft,#fff8eb)] px-3 py-2.5 text-[11px] leading-5 text-[var(--codey-amber,#8a4b08)]" role="alert">
+            <AlertTriangle className="mt-px shrink-0" size={17} aria-hidden="true" />
+            <span className="min-w-0 break-words">{modelSyncWarning}</span>
+          </div>
+        )}
+        {!routeConfigReadOnly && !officialOnly && <div className="mt-3 flex items-center justify-between gap-4 rounded-[9px] border border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 bg-[var(--codey-surface-sunken,#f7f7f8)] px-3.5 py-2.5">
+          <div className="grid min-w-0 gap-0.5">
+            <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">Auto Review</strong>
+            <small className="text-[10px] leading-[1.45] text-[var(--codey-muted,#6e6e73)]">
+              请确认是否支持<code>codex-auto-review</code>模型再进行修改
+            </small>
+          </div>
+          <Switch
+            size="sm"
+            checked={autoReviewSupported}
+            disabled={isBusy}
+            onCheckedChange={onAutoReviewSupportedChange}
+            aria-label="当前线路支持 auto-review"
+          />
+        </div>}
+        {!officialOnly && <div className="mt-3 flex items-center gap-2">
+          <Input
+            className="min-w-0 flex-1"
+            value={customModelInput}
+            onChange={(event) => onCustomModelInputChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !isBusy && customModelInput.trim()) {
+                event.preventDefault();
+                onAddCustomModel();
+              }
+            }}
+            leftSection={<IconSearch size={15} className="text-muted" aria-hidden="true" />}
+            rightSection={customModelInput ? (
+              <button
+                type="button"
+                className="flex size-5 cursor-pointer items-center justify-center rounded-full text-muted hover:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/5 hover:text-foreground"
+                onClick={() => onCustomModelInputChange("")}
+                disabled={isBusy}
+                aria-label="清空搜索"
+              >
+                <IconX size={12} aria-hidden="true" />
+              </button>
+            ) : undefined}
+            placeholder="搜索模型，或输入模型 ID 添加"
+            spellCheck={false}
+            aria-label={officialOnly ? "搜索模型" : "搜索或添加模型"}
+            aria-invalid={Boolean(modelInputError)}
+            error={Boolean(modelInputError)}
+            disabled={isBusy}
+          />
+          {!officialOnly && <Button
+              className="shrink-0"
+              disabled={isBusy || !customModelInput.trim()}
+              onClick={onAddCustomModel}
+            >
+              <Plus size={16} aria-hidden="true" />
+              添加
+            </Button>}
+        </div>}
+        {modelInputError && (
+          <p className="mt-1.5 text-[11px] leading-[1.45] text-[var(--codey-red,#d70015)]" role="alert">{modelInputError}</p>
+        )}
+        <div className="mt-3 mb-1 flex items-center justify-between gap-3 px-1">
+          <Checkbox
+            checked={checkAllState}
+            disabled={isBusy || loading || matchingModels.length === 0}
+            onCheckedChange={(checked) =>
+              onToggleDraftModel(matchingModels, checked === true)}
+            aria-label={allMatchingSelected ? "取消全选模型" : "全选模型"}
+          >
+            <span className="select-none text-xs font-medium text-[var(--codey-text,#1d1d1f)]">
+              全选{customModelInput.trim() ? "搜索结果" : ""}
+            </span>
+          </Checkbox>
+          <span className="text-[11.5px] text-[var(--codey-muted,#6e6e73)]">
+            {loading
+              ? "正在获取模型"
+              : <>已选 <strong className="font-semibold text-[var(--codey-text,#1d1d1f)]">{draftModelSet.size}</strong> 个模型</>}
+          </span>
+        </div>
+        <div className="my-2 max-h-[360px] overflow-y-auto rounded-[10px] border border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 bg-[var(--codey-surface-muted,#fbfbfc)] py-1 pl-1 pr-0.5 [scrollbar-color:rgba(99,99,104,0.46)_transparent] [scrollbar-gutter:stable] [scrollbar-width:thin] [&::-webkit-scrollbar]:w-2 [&::-webkit-scrollbar-button]:hidden [&::-webkit-scrollbar-thumb]:min-h-11 [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:border-2 [&::-webkit-scrollbar-thumb]:border-transparent [&::-webkit-scrollbar-thumb]:bg-[rgb(var(--codey-ink-rgb,0,0,0))]/40 [&::-webkit-scrollbar-thumb]:bg-clip-padding">
+          {loading ? (
+            <div className="flex flex-col items-center justify-center px-4 py-10 text-center">
+              <LoaderCircle className="mb-2.5 animate-spin text-[var(--codey-subtle,#86868b)]" size={22} aria-hidden="true" />
+              <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">正在获取当前账号可用的模型</strong>
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--codey-subtle,#86868b)]">获取完成后会列出全部模型，勾选的模型会显示在线路列表中。</p>
+            </div>
+          ) : null}
+          {!loading && filteredOfficialModels.length > 0 && (
+            <>
+              <div className="m-0.5 flex items-center justify-between gap-3 rounded-[7px] bg-[var(--codey-blue-soft,#f1f5fb)] px-2.5 py-2">
+                <div className="grid gap-0.5">
+                  <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">官方模型</strong>
+                  <small className="text-[10px] leading-[1.35] text-[var(--codey-muted,#6e6e73)]">来自本次 Codex 官方账号登录</small>
+                </div>
+                <Badge variant="info">{filteredOfficialModels.length} 个</Badge>
+              </div>
+              {visibleOfficialModels.map((model) => (
+                <div className="flex flex-wrap items-center gap-2.5 rounded-md bg-blue-500/[0.025] px-3 py-2 hover:bg-blue-500/[0.07]" key={model.slug}>
+                  <Checkbox
+                    checked={draftModelSet.has(modelKey(model.slug))}
+                    disabled={isBusy}
+                    onCheckedChange={(checked) =>
+                      onToggleDraftModel(model.slug, checked === true)}
+                    aria-label={`当前线路支持 ${model.slug}`}
+                  />
+                  <div className="grid min-w-0 flex-1 gap-px">
+                    <strong className="break-words text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">{model.displayName}</strong>
+                  </div>
+                  {!routeConfigReadOnly && <ModelSettingsFields model={model.slug} policy={draftModelContexts[model.slug]} disabled={isBusy}
+                    onChange={(policy) => onUpdateDraftModelContext(model.slug, policy)} />}
+                </div>
+              ))}
+              {visibleOfficialModels.length < filteredOfficialModels.length && (
+                <div className="flex justify-center px-2 pb-1 pt-1.5">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    disabled={isBusy}
+                    onClick={() =>
+                      setVisibleOfficialCount((count) =>
+                        nextVisibleModelCount(count, filteredOfficialModels.length)
+                      )}
+                  >
+                    再显示{" "}
+                    {Math.min(
+                      MODEL_PICKER_PAGE_SIZE,
+                      filteredOfficialModels.length - visibleOfficialModels.length,
+                    )}{" "}
+                    个
+                  </Button>
+                </div>
+              )}
+            </>
+          )}
+          {!loading && officialOnly && filteredOfficialModels.length === 0 && (
+            <div className="flex flex-col items-center justify-center px-4 py-8 text-center">
+              <IconCpu size={20} className="mb-2.5 text-[var(--codey-subtle,#86868b)]" aria-hidden="true" />
+              <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">暂未读取到当前账号可用模型</strong>
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--codey-subtle,#86868b)]">请关闭弹窗后重新同步官方线路。</p>
+            </div>
+          )}
+          {!loading && !officialOnly && <div
+            className={`mx-0.5 mb-0.5 flex items-center justify-between gap-3 rounded-[7px] bg-[var(--codey-surface-sunken,#f5f5f7)] px-2.5 py-2 ${
+              modelState.officialModels.length > 0
+                ? "mt-1.5 border-t border-[rgb(var(--codey-ink-rgb,0,0,0))]/6"
+                : "mt-0.5"
+            }`}
+          >
+            <div className="grid gap-0.5">
+              <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">线路模型</strong>
+              <small className="text-[10px] leading-[1.35] text-[var(--codey-muted,#6e6e73)]">全部通过当前 API Key 线路调用，可同步发现或手动输入</small>
+            </div>
+            <Badge variant="secondary">
+              {filteredThirdPartyModels.length === thirdPartyModelOptions.length
+                ? `${thirdPartyModelOptions.length} 个`
+                : `${filteredThirdPartyModels.length} / ${thirdPartyModelOptions.length} 个`}
+            </Badge>
+          </div>}
+          {!loading && !officialOnly && visibleThirdPartyModels.map((model) => {
+            const key = modelKey(model);
+            const selected = draftModelSet.has(key);
+            const added =
+              selected || selectedThirdPartyModelKeys.has(key);
+            const manual = manualThirdPartyModelKeys.has(key);
+            return (
+              <div className="flex flex-wrap items-center gap-2.5 rounded-md px-3 py-2 hover:bg-blue-500/6" key={model}>
+                <Checkbox
+                  checked={selected}
+                  disabled={isBusy}
+                  onCheckedChange={(checked) => onToggleDraftModel(model, checked === true)}
+                  aria-label={`当前线路支持 ${model}`}
+                />
+                <span className="min-w-0 flex-1 break-words text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">{model}</span>
+                {added && manual && (
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="shrink-0 text-[var(--codey-red,#d70015)]"
+                    disabled={isBusy}
+                    onClick={() => onDeleteThirdPartyModel(model)}
+                    aria-label={`删除其他模型 ${model}`}
+                  >
+                    <Trash2 aria-hidden="true" />
+                    删除
+                  </Button>
+                )}
+                {!routeConfigReadOnly && (
+                  <ModelSettingsFields
+                    model={model}
+                    disabled={isBusy}
+                    policy={draftModelContexts[model]}
+                    onChange={(policy) => onUpdateDraftModelContext(model, policy)}
+                    reasoning={{
+                      efforts: draftReasoningEfforts[key] ?? [],
+                      autoEfforts: reasoningEffortAutoByModel[key] ?? [],
+                      supportedLevels: reasoningEffortCapabilities[key],
+                      onChange: (efforts) => onUpdateDraftReasoningEffort(model, efforts),
+                      onReset: () => onResetDraftReasoningEffort(model),
+                    }}
+                  />
+                )}
+              </div>
+            );
+          })}
+          {!loading && !officialOnly && visibleThirdPartyModels.length < filteredThirdPartyModels.length && (
+            <div className="flex justify-center px-2 pb-1 pt-1.5">
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={isBusy}
+                onClick={() =>
+                  setVisibleThirdPartyCount((count) =>
+                    nextVisibleModelCount(
+                      count,
+                      filteredThirdPartyModels.length,
+                    )
+                  )}
+              >
+                再显示{" "}
+                {Math.min(
+                  MODEL_PICKER_PAGE_SIZE,
+                  filteredThirdPartyModels.length - visibleThirdPartyModels.length,
+                )}{" "}
+                个
+              </Button>
+            </div>
+          )}
+          {!loading && !officialOnly && filteredThirdPartyModels.length === 0 && (
+            <div className="flex flex-col items-center justify-center px-4 py-8 text-center">
+              <div className="mb-2.5 flex h-10 w-10 items-center justify-center rounded-full bg-[rgb(var(--codey-ink-rgb,0,0,0))]/[0.04] text-[var(--codey-subtle,#86868b)]">
+                {thirdPartyModelOptions.length === 0 ? (
+                  <IconCpu size={20} stroke={1.5} aria-hidden="true" />
+                ) : (
+                  <IconSearch size={20} stroke={1.5} aria-hidden="true" />
+                )}
+              </div>
+              <strong className="text-xs font-semibold text-[var(--codey-text,#1d1d1f)]">
+                {thirdPartyModelOptions.length === 0
+                  ? "暂无线路模型"
+                  : "未找到匹配的线路模型"}
+              </strong>
+              <p className="mt-1 text-[11px] leading-relaxed text-[var(--codey-subtle,#86868b)]">
+                {thirdPartyModelOptions.length === 0
+                  ? "可在上方输入模型 ID 手动添加"
+                  : "可更换关键词，或点击上方添加按钮添加此模型 ID"}
+              </p>
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" disabled={isBusy} onClick={() => onOpenChange(false)}>
+            取消
+          </Button>
+          <Button
+            disabled={isBusy || loading}
+            onClick={onSave}
+          >
+            {busy === "save-models"
+              ? <LoaderCircle className="animate-spin" aria-hidden="true" />
+              : <Check aria-hidden="true" />}
+            {officialOnly ? "保存选择" : "保存模型声明"}
+          </Button>
+        </DialogFooter>
+      </DialogContent>}
+    </Dialog>
+  );
+}
+
+type ConfirmationDialogProps = {
+  confirmation: Confirmation | null;
+  container: HTMLElement | null;
+  onClose: () => void;
+  onConfirm: (confirmation: Confirmation) => void;
+};
+
+function ConfirmationDialogComponent({
+  confirmation,
+  container,
+  onClose,
+  onConfirm,
+}: ConfirmationDialogProps) {
+  const destructive =
+    confirmation?.action === "discard-settings-changes" ||
+    confirmation?.action === "delete-notification-channel" ||
+    confirmation?.action === "delete-route" ||
+    confirmation?.action === "delete-official-account";
+  const isUpdate =
+    confirmation?.action === "download-update" ||
+    confirmation?.action === "install-update";
+  const noteGroups = useMemo(() => {
+    const groups: Array<{ title: string; lines: string[] }> = [];
+    if (!isUpdate) return groups;
+    let group = { title: "", lines: [] as string[] };
+    groups.push(group);
+    for (const line of confirmation?.releaseNotes?.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) ?? []) {
+      const heading = /^\*\*(新增功能|体验优化|问题修复)\*\*$/.exec(line);
+      if (heading) {
+        group = { title: heading[1], lines: [] };
+        groups.push(group);
+      } else {
+        group.lines.push(line.replace(/^[-*•]\s+/, ""));
+      }
+    }
+    return groups.filter((group) => group.lines.length > 0);
+  }, [isUpdate, confirmation?.releaseNotes]);
+  return (
+    <Dialog open={Boolean(confirmation)} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent
+        className={isUpdate
+          ? "confirmation-dialog update-confirmation-dialog sm:w-[560px] max-h-[calc(100dvh-32px)]"
+          : "confirmation-dialog"}
+        container={container}
+      >
+        <DialogHeader className={isUpdate ? "shrink-0" : undefined}>
+          <DialogTitle>{confirmation?.title}</DialogTitle>
+          <DialogDescription className={isUpdate ? "whitespace-pre-wrap [overflow-wrap:anywhere]" : undefined}>
+            {confirmation?.description}
+          </DialogDescription>
+        </DialogHeader>
+        {noteGroups.length > 0 && (
+          <section className="mt-4 flex min-h-0 flex-col gap-2">
+            <h3 className="m-0 shrink-0 text-xs font-medium text-foreground">更新日志</h3>
+            <div
+              className="update-release-notes min-h-0 max-h-[min(360px,45dvh)] overflow-y-auto overscroll-contain rounded-lg border border-default p-4 text-sm leading-7 text-muted [overflow-wrap:anywhere]"
+              role="region"
+              aria-label="更新日志内容"
+              tabIndex={0}
+            >
+              <div className="space-y-3">
+                {noteGroups.map((group, groupIndex) => (
+                  <div key={groupIndex}>
+                    {group.title && <h4 className="m-0 mb-1 text-xs font-semibold text-foreground">{group.title}</h4>}
+                    <ul className="m-0 list-disc space-y-2 pl-4">
+                      {group.lines.map((line, index) => (
+                        <li key={index} className="pl-1 whitespace-pre-wrap">
+                          {line}
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </section>
+        )}
+        <DialogFooter className={isUpdate ? "shrink-0" : undefined}>
+          <Button variant="outline" onClick={onClose}>
+            {isUpdate ? "稍后" : "取消"}
+          </Button>
+          <Button
+            variant={
+              destructive
+                ? "destructive"
+                : confirmation?.action === "restart"
+                  ? "warning"
+                  : "default"
+            }
+            onClick={() => {
+              if (confirmation) onConfirm(confirmation);
+            }}
+          >
+            {destructive ? (
+              <Trash2 aria-hidden="true" />
+            ) : confirmation?.action === "restart" ? (
+              <RefreshCw aria-hidden="true" />
+            ) : isUpdate ? (
+              <CircleArrowUp aria-hidden="true" />
+            ) : (
+              <Check aria-hidden="true" />
+            )}
+            {confirmation?.confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+export const ModelPickerDialog = memo(ModelPickerDialogComponent);
+export const ConfirmationDialog = memo(ConfirmationDialogComponent);

@@ -1,0 +1,4690 @@
+//! Multiple ChatGPT (Codex official) accounts managed by Codey.
+//!
+//! Accounts are added through the same OAuth PKCE flow Codex and CLIProxyAPI
+//! use, by importing the current Codex login, or by pasting a refresh token
+//! or OAuth JSON. A refresh token is exchanged for a full credential document.
+//! JSON that already contains an access token is stored without exchanging it.
+//! A still-valid access token with no refresh time is marked as just imported,
+//! so the following usage query does not rotate the source refresh token.
+//! Credentials are stored as complete `auth.json`
+//! documents under Codey's own config directory. Exactly one account can be
+//! the default; making an account the default copies its credentials into the
+//! Codex home so Codex itself (and the local router, which reads the same
+//! file) run as that account.
+
+use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use anyhow::{Context, Result, anyhow, bail};
+use base64::Engine as _;
+use base64::engine::general_purpose::{URL_SAFE, URL_SAFE_NO_PAD};
+use fs2::FileExt;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
+
+use crate::config::default_official_route_name;
+
+pub const ACCOUNTS_DIR_NAME: &str = "official-accounts";
+const DEFAULT_FILE_NAME: &str = "default.json";
+const CODEX_AUTH_FILE_NAME: &str = "auth.json";
+/// SIWC 凭据物化文件后缀。账号记录是权威数据，这份文件只给本地路由按
+/// 请求读取，避免每次解析整条账号记录。
+const SIWC_FILE_SUFFIX: &str = ".siwc.json";
+static STORE_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+struct StoreWriteGuard {
+    _file: fs::File,
+    _thread: MutexGuard<'static, ()>,
+}
+
+pub(crate) const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const OAUTH_AUTHORIZE_URL: &str = "https://auth.openai.com/oauth/authorize";
+const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const OAUTH_CALLBACK_PORT: u16 = 1455;
+const OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const OAUTH_SCOPE: &str = "openid profile email offline_access";
+const LOGIN_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+const MAX_CALLBACK_REQUEST_BYTES: usize = 16 * 1024;
+const MAX_JWT_PAYLOAD_BYTES: usize = 64 * 1024;
+/// Stored credentials older than this are refreshed before being handed to
+/// Codex, so switching back to an account that idled for days still works.
+const REFRESH_BEFORE_ACTIVATE_AGE: Duration = Duration::from_secs(6 * 60 * 60);
+/// Access tokens that expire within this margin are refreshed before use, so a
+/// request never starts on a token that is about to lapse.
+const TOKEN_REFRESH_MARGIN_SECONDS: u64 = 5 * 60;
+/// Same bound as the local router's proxied upstream clients: a handful of
+/// account proxies keep their TLS pools warm; a rare flood of new addresses
+/// just drops the older pools.
+const MAX_OFFICIAL_PROXY_CLIENTS: usize = 8;
+/// 手动粘贴的 Refresh Token 或 OAuth JSON 上限。正常登录文档远小于此值。
+const MAX_MANUAL_CREDENTIAL_BYTES: usize = 64 * 1024;
+const MIN_REFRESH_TOKEN_CHARS: usize = 20;
+
+// ---------------------------------------------------------------------------
+// Records
+// ---------------------------------------------------------------------------
+
+/// 「Sign in with ChatGPT」授权拿到的第二套凭据（OpenAI 官方 token sharing）。
+/// 与 `auth` 字段的 Codex 凭据完全独立：access/refresh/id token、签发 client_id
+/// 以及账户身份都保存在这里，绝不写进 Codex auth.json 文档。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SiwcCredential {
+    /// OpenAI 为该账号注册签发的 client_id（`oaiapp_*`）；首次注册固定提交
+    /// `dynamic_agent_client`，回调签发的值存到这里，后续刷新/重授权必须复用。
+    pub client_id: String,
+    /// 授权回调+换票响应里实际授予的 scope 列表。
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: String,
+    /// 保留 id_token 用于重授权时的 `id_token_hint`（跳过账号选择页）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id_token: Option<String>,
+    /// 秒级 Unix 时间戳。
+    #[serde(default)]
+    pub expires_at: u64,
+    /// token 响应里的 `earliest_refresh_at`（秒），到达后应尽早刷新。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_refresh_at: Option<u64>,
+    #[serde(default)]
+    pub saved_at: u64,
+    /// 验签后的 id_token 身份，用于账户匹配与展示。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<String>,
+    /// 与 Codex 凭据的 invalidReason 语义一致，但只影响 SIWC 平面。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_since: Option<u64>,
+}
+
+impl SiwcCredential {
+    pub fn invalid(&self) -> bool {
+        self.invalid_reason.is_some()
+    }
+
+    pub fn mark_invalid(&mut self, reason: impl Into<String>, when_unix_seconds: u64) {
+        self.invalid_reason = Some(reason.into());
+        self.invalid_since = Some(when_unix_seconds);
+    }
+
+    /// 授权是否包含订阅调用 scope。缺失时凭据保留但直连不可用，
+    /// 用户重新授权（带上完整 scope）后可恢复。
+    pub fn plan_scope_granted(&self) -> bool {
+        self.scopes.iter().any(|scope| scope == SIWC_PLAN_SCOPE)
+    }
+
+    /// 距过期不足 margin 或者已越过 earliest_refresh_at 时需要刷新。
+    pub fn needs_refresh(&self, now_unix_seconds: u64, margin_seconds: u64) -> bool {
+        if self.expires_at == 0 {
+            return true;
+        }
+        if self.expires_at <= now_unix_seconds.saturating_add(margin_seconds) {
+            return true;
+        }
+        self.earliest_refresh_at
+            .is_some_and(|earliest| now_unix_seconds >= earliest)
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialAccountRecord {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub added_at: u64,
+    /// Route overrides Codey keeps for this account. They shape the derived
+    /// official route while the account is the default; `None` keeps the value
+    /// derived from the Codex configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_short_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_proxy: Option<String>,
+    /// Custom OpenAI gateway for this account. `None` keeps the official
+    /// Codex endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// 官方明确拒绝该账号凭据时写入的原因与检测时间。网络故障、超时和
+    /// 服务端 5xx 不会写入，刷新成功后清空。老记录没有这两个字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid_since: Option<u64>,
+    /// Complete Codex `auth.json` document for this account.
+    pub auth: Value,
+    /// SIWC（官方直连）第二凭据槽。`None` 表示该账号只走 Codex backend-api
+    /// 通道；有值且未失效时对话流量改走 `api.openai.com/v1`，额度等
+    /// backend-api 专属能力仍使用 `auth`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub siwc: Option<SiwcCredential>,
+}
+
+/// Renderer-facing view of an account. Never carries tokens.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct OfficialAccountSummary {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    pub added_at: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_refresh: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_short_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_proxy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
+    /// 卡片据此把失效账号标红，并隐藏切换到该账号的入口。
+    pub invalid: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub invalid_reason: Option<String>,
+    pub is_default: bool,
+    /// SIWC 直连凭据状态：`none` 未启用 / `active` 可用 / `invalid` 已失效
+    /// 需要重新授权。卡片据此展示「官方直连」tag 与操作入口。
+    pub siwc_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub siwc_invalid_reason: Option<String>,
+}
+
+impl OfficialAccountRecord {
+    pub fn from_auth(auth: Value, added_at: u64) -> Result<Self> {
+        let tokens = auth
+            .get("tokens")
+            .and_then(Value::as_object)
+            .context("登录信息缺少 tokens 字段")?;
+        let auth_mode_ok = matches!(auth.get("auth_mode"), None | Some(Value::Null))
+            || auth.get("auth_mode").and_then(Value::as_str) == Some("chatgpt");
+        if !auth_mode_ok {
+            bail!("当前登录不是 ChatGPT 官方账号登录");
+        }
+        let access_token = tokens
+            .get("access_token")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .context("登录信息缺少 access_token")?;
+        let id_claims = tokens
+            .get("id_token")
+            .and_then(Value::as_str)
+            .and_then(jwt_claims);
+        let access_claims = jwt_claims(access_token);
+        let account_id = tokens
+            .get("account_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .or_else(|| {
+                [&id_claims, &access_claims]
+                    .into_iter()
+                    .flatten()
+                    .find_map(chatgpt_account_id_from_claims)
+            });
+        let email = [&id_claims, &access_claims]
+            .into_iter()
+            .flatten()
+            .find_map(|claims| string_claim(claims, "email"));
+        let plan_type = plan_type_from_auth(&auth);
+        let id = account_id
+            .clone()
+            .map(|account_id| sanitize_id(&account_id))
+            .or_else(|| email.as_deref().map(email_account_id))
+            .unwrap_or_else(|| format!("account-{}", uuid::Uuid::new_v4()));
+        let mut auth = auth;
+        if let Some(object) = auth.as_object_mut() {
+            object.insert("auth_mode".to_string(), json!("chatgpt"));
+            if let Some(account_id) = account_id.as_deref()
+                && let Some(tokens) = object.get_mut("tokens").and_then(Value::as_object_mut)
+                && !tokens.contains_key("account_id")
+            {
+                tokens.insert("account_id".to_string(), json!(account_id));
+            }
+        }
+        Ok(Self {
+            id,
+            email,
+            plan_type,
+            account_id,
+            added_at,
+            // A document rebuilt from `auth.json` carries credentials only;
+            // `OfficialAccountStore::upsert` keeps the saved route settings.
+            route_name: None,
+            route_short_name: None,
+            upstream_proxy: None,
+            base_url: None,
+            invalid_reason: None,
+            invalid_since: None,
+            auth,
+            siwc: None,
+        })
+    }
+
+    pub fn last_refresh(&self) -> Option<String> {
+        self.auth
+            .get("last_refresh")
+            .and_then(Value::as_str)
+            .map(ToString::to_string)
+    }
+
+    fn last_refresh_age(&self, now: SystemTime) -> Option<Duration> {
+        let raw = self.last_refresh()?;
+        let refreshed = chrono::DateTime::parse_from_rfc3339(&raw).ok()?;
+        let refreshed_unix = u64::try_from(refreshed.timestamp()).ok()?;
+        let now_unix = now.duration_since(UNIX_EPOCH).ok()?.as_secs();
+        Some(Duration::from_secs(now_unix.saturating_sub(refreshed_unix)))
+    }
+
+    fn refresh_token(&self) -> Option<&str> {
+        self.auth
+            .get("tokens")
+            .and_then(|tokens| tokens.get("refresh_token"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+    }
+
+    pub fn summary(&self, default_id: Option<&str>) -> OfficialAccountSummary {
+        OfficialAccountSummary {
+            id: self.id.clone(),
+            email: self.email.clone(),
+            plan_type: self.plan_type.clone(),
+            account_id: self.account_id.clone(),
+            added_at: self.added_at,
+            last_refresh: self.last_refresh(),
+            route_name: self.route_name.clone(),
+            route_short_name: self.route_short_name.clone(),
+            upstream_proxy: self.upstream_proxy.clone(),
+            base_url: self.base_url.clone(),
+            invalid: self.invalid(),
+            invalid_reason: self.invalid_reason.clone(),
+            is_default: default_id == Some(self.id.as_str()),
+            siwc_status: if self.siwc_active() {
+                "active".to_string()
+            } else if self.siwc.is_some() {
+                "invalid".to_string()
+            } else {
+                "none".to_string()
+            },
+            siwc_invalid_reason: self
+                .siwc
+                .as_ref()
+                .and_then(|siwc| siwc.invalid_reason.clone()),
+        }
+    }
+
+    /// 官方是否明确拒绝过该账号的凭据。额度查询和切换默认都会先看这个标记。
+    pub fn invalid(&self) -> bool {
+        self.invalid_reason.is_some()
+    }
+
+    /// SIWC 直连凭据存在且未被标记失效。路由快照据此把对话切到
+    /// `api.openai.com/v1`；失效时自动回落到 Codex backend-api 通道。
+    pub fn siwc_active(&self) -> bool {
+        self.siwc
+            .as_ref()
+            .is_some_and(|siwc| !siwc.invalid() && siwc.plan_scope_granted())
+    }
+
+    pub fn invalid_reason(&self) -> Option<&str> {
+        self.invalid_reason.as_deref()
+    }
+
+    /// 记录失效。已有原因时保留首次检测时间，只更新原因文本。
+    pub fn mark_invalid(&mut self, reason: &str) {
+        if self.invalid_reason.is_none() {
+            self.invalid_since = Some(unix_timestamp());
+        }
+        self.invalid_reason = Some(reason.to_string());
+    }
+
+    pub fn clear_invalid(&mut self) {
+        self.invalid_reason = None;
+        self.invalid_since = None;
+    }
+
+    /// 记录官方给出的套餐类型。只有确实变化时才返回 true，调用方据此决定
+    /// 是否落盘；空值表示这次没能解析出套餐，保留已有结果。
+    pub fn set_plan_type(&mut self, plan_type: Option<&str>) -> bool {
+        let Some(plan) = plan_type.map(str::trim).filter(|value| !value.is_empty()) else {
+            return false;
+        };
+        if self
+            .plan_type
+            .as_deref()
+            .is_some_and(|current| current.eq_ignore_ascii_case(plan))
+        {
+            return false;
+        }
+        self.plan_type = Some(plan.to_string());
+        true
+    }
+
+    /// 本地保存的 access token 是否仍在使用期限内。默认账号的凭据由 Codex
+    /// 维护，判断额度接口 401 是否可信时用它排除尚未刷新的过期令牌。
+    pub fn has_live_access_token(&self) -> bool {
+        access_token_expires_at(self)
+            .is_some_and(|expires_at| expires_at > unix_timestamp() + TOKEN_REFRESH_MARGIN_SECONDS)
+    }
+
+    /// Whether a Codex `auth.json` document belongs to this account.
+    fn matches_auth(&self, auth: &Value) -> bool {
+        match (&self.account_id, auth_account_id(auth)) {
+            (Some(mine), Some(theirs)) => *mine == theirs,
+            _ => {
+                let mine = self
+                    .auth
+                    .get("tokens")
+                    .and_then(|tokens| tokens.get("access_token"));
+                let theirs = auth
+                    .get("tokens")
+                    .and_then(|tokens| tokens.get("access_token"));
+                mine.is_some() && mine == theirs
+            }
+        }
+    }
+}
+
+fn read_account_record(path: &Path, operation: &str) -> Result<Option<OfficialAccountRecord>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取官方账号文件失败：{}", path.display()));
+        }
+    };
+    match serde_json::from_slice::<OfficialAccountRecord>(&bytes) {
+        Ok(record) => Ok(Some(record)),
+        Err(error) => {
+            crate::error_log::record_failure(
+                "official_account_file_invalid",
+                operation,
+                format!("{error}"),
+                json!({ "path": path.display().to_string() }),
+            );
+            Ok(None)
+        }
+    }
+}
+
+fn email_account_id(email: &str) -> String {
+    format!(
+        "email-{}",
+        &crate::fs_util::sha256_hex(email.to_ascii_lowercase().as_bytes())[..24]
+    )
+}
+
+/// `from_auth` 在既没有账号 ID 也没有邮箱时生成的占位 ID。
+fn is_generated_account_id(id: &str) -> bool {
+    id.strip_prefix("account-")
+        .is_some_and(|rest| uuid::Uuid::parse_str(rest).is_ok())
+}
+
+fn sanitize_id(value: &str) -> String {
+    let cleaned = value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    if cleaned.is_empty() {
+        format!("account-{}", uuid::Uuid::new_v4())
+    } else {
+        cleaned
+    }
+}
+
+fn string_claim(claims: &Value, key: &str) -> Option<String> {
+    claims
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn chatgpt_account_id_from_claims(claims: &Value) -> Option<String> {
+    claims
+        .get("https://api.openai.com/auth")
+        .and_then(|auth| string_claim(auth, "chatgpt_account_id"))
+        .or_else(|| string_claim(claims, "chatgpt_account_id"))
+}
+
+/// 当前登录信息里的套餐类型。JWT 只在登录和刷新令牌时重建，所以升级或降级
+/// 之后必须用最新一次解析结果覆盖账号记录，卡片才不会停在旧套餐上。
+pub(crate) fn plan_type_from_auth(auth: &Value) -> Option<String> {
+    let tokens = auth.get("tokens")?;
+    let id_claims = tokens
+        .get("id_token")
+        .and_then(Value::as_str)
+        .and_then(jwt_claims);
+    let access_claims = tokens
+        .get("access_token")
+        .and_then(Value::as_str)
+        .and_then(jwt_claims);
+    [&id_claims, &access_claims]
+        .into_iter()
+        .flatten()
+        .find_map(|claims| {
+            claims
+                .get("https://api.openai.com/auth")
+                .and_then(|auth| string_claim(auth, "chatgpt_plan_type"))
+        })
+}
+
+pub(crate) fn jwt_claims(token: &str) -> Option<Value> {
+    let payload = token.split('.').nth(1)?;
+    if payload.len() > MAX_JWT_PAYLOAD_BYTES {
+        return None;
+    }
+    let bytes = URL_SAFE_NO_PAD
+        .decode(payload)
+        .or_else(|_| URL_SAFE.decode(payload))
+        .ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+pub(crate) fn access_token_issued_at(token: &str) -> Option<u64> {
+    jwt_claims(token)?.get("iat").and_then(Value::as_u64)
+}
+
+fn auth_account_id(auth: &Value) -> Option<String> {
+    let tokens = auth.get("tokens")?;
+    tokens
+        .get("account_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            ["id_token", "access_token"].iter().find_map(|key| {
+                tokens
+                    .get(*key)
+                    .and_then(Value::as_str)
+                    .and_then(jwt_claims)
+                    .as_ref()
+                    .and_then(chatgpt_account_id_from_claims)
+            })
+        })
+}
+
+pub(crate) fn auth_is_chatgpt_login(auth: &Value) -> bool {
+    (matches!(auth.get("auth_mode"), None | Some(Value::Null))
+        || auth.get("auth_mode").and_then(Value::as_str) == Some("chatgpt"))
+        && auth
+            .get("tokens")
+            .and_then(|tokens| tokens.get("access_token"))
+            .and_then(Value::as_str)
+            .is_some_and(|token| !token.trim().is_empty())
+}
+
+pub(crate) fn unix_timestamp() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn rfc3339_now() -> String {
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+}
+
+/// Route overrides are stored trimmed, and a blank value means "no override".
+fn route_setting(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 去掉首尾空白后仍非空的设置值。
+fn trimmed_setting(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+/// 从「官方账号1」或「官1」这类默认名称里取出编号，自定义名称返回 `None`。
+fn route_index(value: Option<&str>) -> Option<usize> {
+    let value = trimmed_setting(value)?;
+    let digits = value
+        .strip_prefix(crate::config::OFFICIAL_ROUTE_NAME_PREFIX)
+        .or_else(|| value.strip_prefix(crate::config::OFFICIAL_ROUTE_SHORT_NAME))?;
+    if let Ok(index) = digits.parse::<usize>() {
+        return (index > 0).then_some(index);
+    }
+    // 第 10 个账号起短名称改用字母编号，这里换回同一个编号。
+    let mut letters = digits.chars();
+    let letter = letters.next()?;
+    if letters.next().is_some() {
+        return None;
+    }
+    crate::config::OFFICIAL_ROUTE_SHORT_NAME_LETTERS
+        .chars()
+        .position(|candidate| candidate == letter)
+        .map(|position| position + 10)
+}
+
+fn smallest_free_official_index(used_indices: &BTreeSet<usize>) -> usize {
+    (1..)
+        .find(|index| !used_indices.contains(index))
+        .unwrap_or(1)
+}
+
+// ---------------------------------------------------------------------------
+// Store
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub struct OfficialAccountStore {
+    dir: PathBuf,
+}
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DefaultAccountFile {
+    #[serde(default)]
+    default_account_id: Option<String>,
+}
+
+/// Result of reconciling the default account with the Codex home at launch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaunchLoginResolution {
+    /// A default account exists and its credentials are in the Codex home.
+    Available { account_id: String },
+    /// No default account; the official route cannot be used.
+    Unavailable { reason: String },
+}
+
+impl OfficialAccountStore {
+    fn lock_writes(&self) -> Result<StoreWriteGuard> {
+        let thread = STORE_WRITE_LOCK
+            .lock()
+            .map_err(|_| anyhow!("官方账号写入锁已损坏"))?;
+        fs::create_dir_all(&self.dir)?;
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(false).read(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let file = options.open(self.dir.join(".write.lock"))?;
+        file.lock_exclusive()?;
+        Ok(StoreWriteGuard {
+            _file: file,
+            _thread: thread,
+        })
+    }
+
+    pub fn new(dir: impl Into<PathBuf>) -> Self {
+        Self { dir: dir.into() }
+    }
+
+    pub fn for_config_path(config_path: &Path) -> Self {
+        let parent = config_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("."));
+        Self::new(parent.join(ACCOUNTS_DIR_NAME))
+    }
+
+    pub(crate) fn account_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{}.json", sanitize_id(id)))
+    }
+
+    fn default_path(&self) -> PathBuf {
+        self.dir.join(DEFAULT_FILE_NAME)
+    }
+
+    pub fn list(&self) -> Result<Vec<OfficialAccountRecord>> {
+        let entries = match fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("读取官方账号目录失败：{}", self.dir.display()));
+            }
+        };
+        let mut records = Vec::new();
+        for entry in entries {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json")
+                || path.file_name().and_then(|name| name.to_str()) == Some(DEFAULT_FILE_NAME)
+                || path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(SIWC_FILE_SUFFIX))
+            {
+                continue;
+            }
+            if let Some(record) = read_account_record(&path, "official_accounts.list")? {
+                records.push(record);
+            }
+        }
+        records.sort_by(|a, b| a.added_at.cmp(&b.added_at).then_with(|| a.id.cmp(&b.id)));
+        Ok(records)
+    }
+
+    pub fn get(&self, id: &str) -> Result<Option<OfficialAccountRecord>> {
+        Ok(
+            read_account_record(&self.account_path(id), "official_accounts.get")?
+                .filter(|record| record.id == id),
+        )
+    }
+
+    /// 插件由用户填写邮箱绑定；不存在或同邮箱对应多个账号时拒绝猜测。
+    pub(crate) fn by_email(&self, email: &str) -> Result<OfficialAccountRecord> {
+        let email = email.trim();
+        if email.is_empty() {
+            anyhow::bail!("插件未配置账号邮箱");
+        }
+        let mut matching = self.list()?.into_iter().filter(|record| {
+            record
+                .email
+                .as_deref()
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case(email))
+        });
+        let record = matching
+            .next()
+            .ok_or_else(|| anyhow!("插件配置的邮箱未匹配到已保存账号"))?;
+        if matching.next().is_some() {
+            anyhow::bail!("插件配置的邮箱匹配到多个账号，请先清理重复账号或使用唯一邮箱");
+        }
+        if record.invalid_reason.is_some() {
+            anyhow::bail!("插件绑定账号的登录态已失效，请重新登录");
+        }
+        Ok(record)
+    }
+
+    /// 刷新后重新读取绑定，避免移除、重复导入或重新登录期间交付旧凭据。
+    pub(crate) fn plugin_credentials(
+        &self,
+        email: &str,
+        expected: &OfficialAccountRecord,
+    ) -> Result<codey_plugin_sdk::transport::Credentials> {
+        let record = self.by_email(email)?;
+        if record.id != expected.id || record.account_id != expected.account_id {
+            anyhow::bail!("插件绑定账号的身份已变化，请检查账号配置后重试");
+        }
+        if !record.has_live_access_token() {
+            anyhow::bail!(
+                "绑定账号的访问令牌已过期、即将过期或无法确认有效期，请在 Codex 中更新登录态或重新登录后重试"
+            );
+        }
+        let access_token = record.auth["tokens"]["access_token"]
+            .as_str()
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("绑定账号缺少访问令牌"))?
+            .to_owned();
+        let upstream_account_id = record
+            .account_id
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| anyhow!("绑定账号缺少 ChatGPT 账号标识"))?;
+        Ok(codey_plugin_sdk::transport::Credentials {
+            access_token,
+            upstream_account_id,
+        })
+    }
+
+    pub fn default_account_id(&self) -> Result<Option<String>> {
+        let bytes = match fs::read(self.default_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error).context("读取默认官方账号记录失败"),
+        };
+        let file: DefaultAccountFile =
+            serde_json::from_slice(&bytes).context("默认官方账号记录格式无效")?;
+        Ok(file.default_account_id.filter(|id| !id.trim().is_empty()))
+    }
+
+    pub fn default_account(&self) -> Result<Option<OfficialAccountRecord>> {
+        let Some(id) = self.default_account_id()? else {
+            return Ok(None);
+        };
+        self.get(&id)
+    }
+
+    pub fn set_default_account_id(&self, id: Option<&str>) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        self.set_default_account_id_unlocked(id)
+    }
+
+    fn set_default_account_id_unlocked(&self, id: Option<&str>) -> Result<()> {
+        let file = DefaultAccountFile {
+            default_account_id: id.map(ToString::to_string),
+        };
+        let bytes = serde_json::to_vec_pretty(&file)?;
+        crate::fs_util::atomic_write_private_with_parent(&self.default_path(), &bytes)
+            .context("保存默认官方账号记录失败")
+    }
+
+    /// Stores the credentials of an account. Route settings belong to Codey
+    /// rather than to the credential document, so the saved ones survive a
+    /// re-login or a token refresh, which both arrive without them.
+    pub fn upsert(&self, record: &OfficialAccountRecord) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        let mut record = record.clone();
+        if let Some(saved) = self.get(&record.id)? {
+            record.route_name = saved.route_name;
+            record.route_short_name = saved.route_short_name;
+            record.upstream_proxy = saved.upstream_proxy;
+            record.base_url = saved.base_url;
+            // 重新登录只替换 Codex 凭据，SIWC 槽位按账号保留。
+            record.siwc = saved.siwc;
+        }
+        self.write(&record)
+    }
+
+    pub fn update_credentials_if_current(
+        &self,
+        expected: &OfficialAccountRecord,
+        updated: &OfficialAccountRecord,
+    ) -> Result<Option<OfficialAccountRecord>> {
+        anyhow::ensure!(expected.id == updated.id, "官方账号身份不一致");
+        let _guard = self.lock_writes()?;
+        let Some(mut current) = self.get(&expected.id)? else {
+            return Ok(None);
+        };
+        if current.auth == expected.auth
+            && current.invalid_reason == expected.invalid_reason
+            && current.invalid_since == expected.invalid_since
+            && current.added_at == expected.added_at
+        {
+            current.auth = updated.auth.clone();
+            current.invalid_reason = updated.invalid_reason.clone();
+            current.invalid_since = updated.invalid_since;
+            // 只有本次更新确实带来新套餐才覆盖：刷新期间用户可能已经打开线路
+            // 菜单读到更新的套餐，不能被手上的旧快照盖回去。
+            if updated.plan_type != expected.plan_type {
+                current.plan_type = updated.plan_type.clone();
+            }
+            self.write(&current)?;
+        }
+        Ok(Some(current))
+    }
+
+    /// 用官方额度接口给出的实时套餐覆盖记录。额度接口每次读取都带当前套餐，
+    /// 是降级或升级之后最先变化的数据源；只改套餐字段，凭据、失效标记和
+    /// 线路设置都不受影响。
+    pub fn update_plan_type(&self, id: &str, plan_type: Option<&str>) -> Result<bool> {
+        let _guard = self.lock_writes()?;
+        let Some(mut record) = self.get(id)? else {
+            return Ok(false);
+        };
+        if !record.set_plan_type(plan_type) {
+            return Ok(false);
+        }
+        self.write(&record)?;
+        Ok(true)
+    }
+
+    /// Replaces the route overrides of one account; `None` restores the value
+    /// derived from the Codex configuration.
+    pub fn update_route_settings(
+        &self,
+        id: &str,
+        route_name: Option<String>,
+        route_short_name: Option<String>,
+        upstream_proxy: Option<String>,
+        base_url: Option<String>,
+    ) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        let mut record = self
+            .get(id)?
+            .ok_or_else(|| anyhow!("找不到官方账号：{id}"))?;
+        record.route_name = route_name.map(|name| name.trim().to_string());
+        record.route_short_name = route_setting(route_short_name);
+        record.upstream_proxy = route_setting(upstream_proxy);
+        record.base_url = route_setting(base_url);
+        self.write(&record)
+    }
+
+    /// 只回写运行时派生后的短名称：官方与第三方线路共用短名称命名空间，
+    /// 派生时可能被占用的名字挤开，账号记录跟随调整后才与线路列表一致。
+    pub fn update_route_short_name(&self, id: &str, short_name: &str) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        let mut record = self
+            .get(id)?
+            .ok_or_else(|| anyhow!("找不到官方账号：{id}"))?;
+        record.route_short_name = route_setting(Some(short_name.to_string()));
+        self.write(&record)
+    }
+
+    /// 为历史账号补齐缺失的名称和短名称，保留主动清空的线路名称。
+    pub fn ensure_generated_route_settings(&self) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        let records = self.list()?;
+        let missing = |value: Option<&str>| trimmed_setting(value).is_none();
+        let mut used_short_names = records
+            .iter()
+            .filter_map(|record| trimmed_setting(record.route_short_name.as_deref()))
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let mut used_indices = BTreeSet::new();
+        for record in &records {
+            for value in [&record.route_name, &record.route_short_name] {
+                if let Some(index) = route_index(value.as_deref()) {
+                    used_indices.insert(index);
+                }
+            }
+        }
+        for record in &records {
+            let needs_name = record.route_name.is_none();
+            let needs_short_name = missing(record.route_short_name.as_deref());
+            if !needs_name && !needs_short_name {
+                continue;
+            }
+            let index = route_index(record.route_name.as_deref())
+                .or_else(|| route_index(record.route_short_name.as_deref()))
+                .unwrap_or_else(|| smallest_free_official_index(&used_indices));
+            let mut updated = record.clone();
+            if needs_name {
+                used_indices.insert(index);
+                updated.route_name = Some(default_official_route_name(index));
+            }
+            if needs_short_name {
+                let short_name = updated
+                    .route_name
+                    .as_deref()
+                    .unwrap_or_default()
+                    .trim()
+                    .chars()
+                    .take(2)
+                    .collect::<String>();
+                let short_name =
+                    crate::config::unique_official_route_short_name(&short_name, &used_short_names);
+                used_short_names.insert(short_name.clone());
+                updated.route_short_name = Some(short_name);
+            }
+            self.write(&updated)?;
+        }
+        Ok(())
+    }
+
+    fn write(&self, record: &OfficialAccountRecord) -> Result<()> {
+        let bytes = serde_json::to_vec_pretty(record)?;
+        crate::fs_util::atomic_write_private_with_parent(&self.account_path(&record.id), &bytes)
+            .with_context(|| format!("保存官方账号失败：{}", record.id))
+    }
+
+    pub fn remove(&self, id: &str) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        crate::fs_util::remove_file_if_exists(&self.account_path(id))
+            .with_context(|| format!("删除官方账号失败：{id}"))?;
+        crate::fs_util::remove_file_if_exists(&self.siwc_path(id))
+            .with_context(|| format!("删除官方直连凭据失败：{id}"))?;
+        if self.default_account_id()?.as_deref() == Some(id) {
+            self.set_default_account_id_unlocked(None)?;
+        }
+        Ok(())
+    }
+
+    pub fn summaries(&self) -> Result<Vec<OfficialAccountSummary>> {
+        let default_id = self.default_account_id()?;
+        Ok(self
+            .list()?
+            .into_iter()
+            .map(|record| record.summary(default_id.as_deref()))
+            .collect())
+    }
+
+    /// Credential document the runtime reads for one account. Codex refreshes
+    /// the default account's copy in place, so it keeps using the Codex home
+    /// `auth.json`; every other account reads the document Codey stored.
+    pub fn credential_path(&self, codex_home: &Path, account_id: &str) -> PathBuf {
+        let is_default = self
+            .default_account_id()
+            .ok()
+            .flatten()
+            .is_some_and(|id| id == account_id);
+        if is_default {
+            codex_home.join(CODEX_AUTH_FILE_NAME)
+        } else {
+            self.account_path(account_id)
+        }
+    }
+
+    /// Reads the Codex home `auth.json` as an account record when it is a
+    /// ChatGPT login.
+    pub fn read_codex_login(codex_home: &Path) -> Result<Option<OfficialAccountRecord>> {
+        let path = codex_home.join(CODEX_AUTH_FILE_NAME);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("读取 Codex 登录信息失败：{}", path.display()));
+            }
+        };
+        let auth: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("Codex 登录信息格式无效：{}", path.display()))?;
+        if !auth_is_chatgpt_login(&auth) {
+            return Ok(None);
+        }
+        OfficialAccountRecord::from_auth(auth, unix_timestamp()).map(Some)
+    }
+
+    /// Copies an account's credentials into the Codex home.
+    pub fn write_codex_login(codex_home: &Path, record: &OfficialAccountRecord) -> Result<()> {
+        let path = codex_home.join(CODEX_AUTH_FILE_NAME);
+        let bytes = serde_json::to_vec_pretty(&record.auth)?;
+        if fs::read(&path).is_ok_and(|current| current == bytes) {
+            return Ok(());
+        }
+        crate::fs_util::atomic_write_private_with_parent(&path, &bytes)
+            .with_context(|| format!("写入 Codex 登录信息失败：{}", path.display()))
+    }
+
+    /// Codex refreshes tokens in place; pull a newer copy of the default
+    /// account back into the store so switching away and back keeps working.
+    pub fn sync_default_from_codex_home(&self, codex_home: &Path) -> Result<()> {
+        let Some(mut record) = self.default_account()? else {
+            return Ok(());
+        };
+        let path = codex_home.join(CODEX_AUTH_FILE_NAME);
+        let bytes = match fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(error)
+                    .with_context(|| format!("读取 Codex 登录信息失败：{}", path.display()));
+            }
+        };
+        let auth: Value = serde_json::from_slice(&bytes)
+            .with_context(|| format!("Codex 登录信息格式无效：{}", path.display()))?;
+        if !auth_is_chatgpt_login(&auth) || !record.matches_auth(&auth) || auth == record.auth {
+            return Ok(());
+        }
+        let parse_refresh = |auth: &Value| {
+            auth.get("last_refresh")
+                .and_then(Value::as_str)
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+        };
+        // 缺少可比较的刷新时间时保留 Codex 当前凭据，避免重新登录后
+        // 又被账号库中的旧令牌覆盖。带时区的时间按实际时刻比较。
+        let newer = match (parse_refresh(&auth), parse_refresh(&record.auth)) {
+            (Some(theirs), Some(mine)) => theirs >= mine,
+            _ => true,
+        };
+        if !newer {
+            return Ok(());
+        }
+        let expected = record.clone();
+        let plan_type = plan_type_from_auth(&auth);
+        record.auth = auth;
+        // 另一个 Codex 进程内的重新登录可能已经换了套餐。
+        record.set_plan_type(plan_type.as_deref());
+        // Codex 自己刷新成功说明凭据仍然有效，之前的失效标记不再成立。
+        record.clear_invalid();
+        self.update_credentials_if_current(&expected, &record)
+            .map(|_| ())
+    }
+
+    /// Ensures the Codex home reflects the default account. With no accounts
+    /// stored, an existing ChatGPT login in the Codex home is adopted as the
+    /// first (default) account so upgrades keep working without a re-login.
+    pub fn resolve_launch_login(&self, codex_home: &Path) -> Result<LaunchLoginResolution> {
+        self.sync_default_from_codex_home(codex_home)?;
+        if let Some(record) = self.default_account()? {
+            Self::write_codex_login(codex_home, &record)?;
+            return Ok(LaunchLoginResolution::Available {
+                account_id: record.id,
+            });
+        }
+        if self.list()?.is_empty()
+            && let Some(record) = Self::read_codex_login(codex_home)?
+        {
+            self.upsert(&record)?;
+            self.set_default_account_id(Some(&record.id))?;
+            return Ok(LaunchLoginResolution::Available {
+                account_id: record.id,
+            });
+        }
+        Ok(LaunchLoginResolution::Unavailable {
+            reason: "Codey 中没有设为默认的官方账号；请在线路设置中添加官方账号并设为默认"
+                .to_string(),
+        })
+    }
+
+    /// Removes the Codex home login when it belongs to the given account.
+    pub fn clear_codex_login_if_matches(
+        codex_home: &Path,
+        record: &OfficialAccountRecord,
+    ) -> Result<bool> {
+        let path = codex_home.join(CODEX_AUTH_FILE_NAME);
+        let Ok(bytes) = fs::read(&path) else {
+            return Ok(false);
+        };
+        let Ok(auth) = serde_json::from_slice::<Value>(&bytes) else {
+            return Ok(false);
+        };
+        if !record.matches_auth(&auth) {
+            return Ok(false);
+        }
+        crate::fs_util::remove_file_if_exists(&path)
+            .with_context(|| format!("移除 Codex 登录信息失败：{}", path.display()))?;
+        Ok(true)
+    }
+
+    // -----------------------------------------------------------------------
+    // SIWC（官方直连）凭据槽
+    // -----------------------------------------------------------------------
+
+    /// 本地路由按请求读取的 SIWC 物化文件。
+    pub(crate) fn siwc_path(&self, id: &str) -> PathBuf {
+        self.dir
+            .join(format!("{}{}", sanitize_id(id), SIWC_FILE_SUFFIX))
+    }
+
+    /// 把 SIWC 凭据挂到既有账号上。要求身份匹配由调用方完成；这里只保证
+    /// 同一 sub/client_id 不会被两个账号条目同时持有。
+    pub fn attach_siwc(&self, id: &str, credential: &SiwcCredential) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        let mut record = self
+            .get(id)?
+            .ok_or_else(|| anyhow!("找不到官方账号：{id}"))?;
+        for other in self.list()? {
+            if other.id == id {
+                continue;
+            }
+            let Some(other_siwc) = &other.siwc else {
+                continue;
+            };
+            let same_subject = credential
+                .sub
+                .as_deref()
+                .is_some_and(|sub| other_siwc.sub.as_deref() == Some(sub));
+            let same_client = credential.client_id == other_siwc.client_id;
+            if same_subject || same_client {
+                anyhow::bail!(
+                    "该 ChatGPT 账号已在另一个官方账号条目（{}）上启用官方直连，请先在对应账号停用",
+                    other
+                        .route_name
+                        .as_deref()
+                        .or(other.email.as_deref())
+                        .unwrap_or(other.id.as_str())
+                );
+            }
+        }
+        record.siwc = Some(credential.clone());
+        self.write(&record)?;
+        self.write_siwc_file(id, &record)
+            .with_context(|| format!("保存官方直连凭据失败：{id}"))
+    }
+
+    /// 只清理 SIWC 槽位；Codex 凭据与线路设置保持不变。
+    pub fn clear_siwc(&self, id: &str) -> Result<()> {
+        let _guard = self.lock_writes()?;
+        if let Some(mut record) = self.get(id)?
+            && record.siwc.take().is_some()
+        {
+            self.write(&record)?;
+        }
+        crate::fs_util::remove_file_if_exists(&self.siwc_path(id))
+            .with_context(|| format!("删除官方直连凭据失败：{id}"))
+    }
+
+    /// 轮换安全地替换 SIWC 凭据：`expected` 提供时要求记录里的 refresh
+    /// token 仍等于它，否则说明另一个刷新已经轮换过，直接返回当前值。
+    /// 记录先写、物化文件后写：崩溃间隙只会让路由多看到一次旧凭据，
+    /// 下一次刷新会以记录为准修复文件。
+    pub(crate) fn update_siwc_if_current(
+        &self,
+        id: &str,
+        expected: Option<&SiwcCredential>,
+        updated: &SiwcCredential,
+    ) -> Result<Option<SiwcCredential>> {
+        let _guard = self.lock_writes()?;
+        let Some(mut record) = self.get(id)? else {
+            return Ok(None);
+        };
+        if let Some(expected) = expected
+            && record.siwc.as_ref().is_none_or(|current| {
+                current.refresh_token != expected.refresh_token
+                    || current.client_id != expected.client_id
+            })
+        {
+            return Ok(record.siwc);
+        }
+        record.siwc = Some(updated.clone());
+        self.write(&record)?;
+        self.write_siwc_file(id, &record)?;
+        Ok(record.siwc)
+    }
+
+    /// 只更新 SIWC 失效标记，不动令牌本体；物化文件同步带上失效原因，
+    /// 路由无需再发注定失败的上游请求。返回值表示本次是否真正写入了标记，
+    /// 调用方据此决定是否触发线路重建。
+    pub(crate) fn mark_siwc_invalid(&self, id: &str, reason: &str) -> Result<bool> {
+        let _guard = self.lock_writes()?;
+        let Some(mut record) = self.get(id)? else {
+            return Ok(false);
+        };
+        let Some(mut credential) = record.siwc.clone() else {
+            return Ok(false);
+        };
+        if credential.invalid_reason.as_deref() == Some(reason) {
+            return Ok(false);
+        }
+        credential.mark_invalid(reason.to_string(), unix_timestamp());
+        record.siwc = Some(credential);
+        self.write(&record)?;
+        self.write_siwc_file(id, &record)?;
+        Ok(true)
+    }
+
+    /// 从账号记录物化路由要读的 SIWC 文件。`record.siwc` 为空时删除文件。
+    fn write_siwc_file(&self, id: &str, record: &OfficialAccountRecord) -> Result<()> {
+        let path = self.siwc_path(id);
+        let Some(credential) = &record.siwc else {
+            return crate::fs_util::remove_file_if_exists(&path)
+                .with_context(|| format!("删除官方直连凭据失败：{}", path.display()));
+        };
+        let file = SiwcFileCredential {
+            client_id: credential.client_id.clone(),
+            access_token: credential.access_token.clone(),
+            refresh_token: credential.refresh_token.clone(),
+            expires_at: credential.expires_at,
+            earliest_refresh_at: credential.earliest_refresh_at,
+            saved_at: credential.saved_at,
+            proxy_url: record.upstream_proxy.clone(),
+            invalid_reason: credential.invalid_reason.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&file)?;
+        crate::fs_util::atomic_write_private_with_parent(&path, &bytes)
+            .with_context(|| format!("保存官方直连凭据失败：{}", path.display()))
+    }
+
+    /// 物化文件缺失或落后于记录时补写；路由懒刷新复用它保持一致。
+    pub(crate) fn sync_siwc_file(&self, id: &str) -> Result<()> {
+        let file = read_siwc_credential_file(&self.siwc_path(id))
+            .ok()
+            .flatten();
+        let _guard = self.lock_writes()?;
+        let Some(record) = self.get(id)? else {
+            return Ok(());
+        };
+        let stale = match (&record.siwc, &file) {
+            (None, None) => false,
+            (None, Some(_)) | (Some(_), None) => true,
+            (Some(credential), Some(file)) => {
+                file.access_token != credential.access_token
+                    || file.refresh_token != credential.refresh_token
+                    || file.expires_at != credential.expires_at
+                    || file.invalid_reason != credential.invalid_reason
+            }
+        };
+        if stale {
+            self.write_siwc_file(id, &record)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// 本地路由读取的 SIWC 凭据视图。与 `SiwcCredential` 分离，路由不接触
+/// id_token 与账号身份信息。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SiwcFileCredential {
+    pub client_id: String,
+    pub access_token: String,
+    #[serde(default)]
+    pub refresh_token: String,
+    #[serde(default)]
+    pub expires_at: u64,
+    #[serde(default)]
+    pub earliest_refresh_at: Option<u64>,
+    #[serde(default)]
+    pub saved_at: u64,
+    /// 账号线路设置的代理地址快照；SIWC 流量与 Codex 流量走同一出口。
+    #[serde(default)]
+    pub proxy_url: Option<String>,
+    #[serde(default)]
+    pub invalid_reason: Option<String>,
+}
+
+impl SiwcFileCredential {
+    pub(crate) fn needs_refresh(&self, now_unix_seconds: u64, margin_seconds: u64) -> bool {
+        if self.expires_at == 0 || self.refresh_token.trim().is_empty() {
+            return self.expires_at == 0;
+        }
+        if self.expires_at <= now_unix_seconds.saturating_add(margin_seconds) {
+            return true;
+        }
+        self.earliest_refresh_at
+            .is_some_and(|earliest| now_unix_seconds >= earliest)
+    }
+}
+
+pub(crate) fn read_siwc_credential_file(path: &Path) -> Result<Option<SiwcFileCredential>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("读取官方直连凭据失败：{}", path.display()));
+        }
+    };
+    let credential: SiwcFileCredential = serde_json::from_slice(&bytes)
+        .with_context(|| format!("官方直连凭据格式无效：{}", path.display()))?;
+    Ok(Some(credential))
+}
+
+/// `ext_agent_host_id`：本机持久化的 `urn:uuid:*` 标识，SIWC 注册与重授权
+/// 都携带它，OpenAI 据此把同一台设备的授权归并到同一注册。
+pub(crate) fn agent_host_id(config_dir: &Path) -> Result<String> {
+    let path = config_dir.join("agent-host-id");
+    if let Ok(raw) = fs::read_to_string(&path) {
+        let value = raw.trim();
+        if let Some(uuid) = value.strip_prefix("urn:uuid:")
+            && uuid::Uuid::parse_str(uuid).is_ok()
+        {
+            return Ok(value.to_string());
+        }
+    }
+    let value = format!("urn:uuid:{}", uuid::Uuid::new_v4());
+    crate::fs_util::atomic_write_private_with_parent(&path, value.as_bytes())
+        .with_context(|| format!("保存设备标识失败：{}", path.display()))?;
+    Ok(value)
+}
+
+// ---------------------------------------------------------------------------
+// Token refresh
+// ---------------------------------------------------------------------------
+
+/// 官方令牌端点返回 invalid_grant：refresh token 已被撤销，账号必须重新
+/// 登录。调用方据此把账号标记为失效；网络故障、超时、5xx 和限流都会走
+/// 普通错误，不会误标账号。
+#[derive(Debug)]
+pub struct OfficialAccountInvalid {
+    reason: String,
+    detail: Option<String>,
+}
+
+impl OfficialAccountInvalid {
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    /// 官方返回的原始错误描述，只用于请求日志，不进入界面文案。
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+}
+
+impl std::fmt::Display for OfficialAccountInvalid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.detail.as_deref() {
+            Some(detail) => write!(formatter, "{}：{detail}", self.reason),
+            None => write!(formatter, "{}", self.reason),
+        }
+    }
+}
+
+impl std::error::Error for OfficialAccountInvalid {}
+
+/// OAuth 标准错误响应里 `invalid_grant` 表示刷新令牌已被拒绝。其他 OAuth
+/// 错误（例如 `invalid_request`）说明请求本身有问题，不代表账号失效。
+fn official_account_invalid_from_body(body: &[u8]) -> Option<OfficialAccountInvalid> {
+    let payload = serde_json::from_slice::<Value>(body).ok()?;
+    if payload.get("error").and_then(Value::as_str) != Some("invalid_grant") {
+        return None;
+    }
+    Some(OfficialAccountInvalid {
+        reason: "官方已撤销该账号的登录凭据，需要重新添加账号".to_string(),
+        detail: payload
+            .get("error_description")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .map(ToString::to_string),
+    })
+}
+
+/// Expiry time of the stored access token, when the token carries one.
+pub(crate) fn access_token_expires_at(record: &OfficialAccountRecord) -> Option<u64> {
+    record
+        .auth
+        .get("tokens")
+        .and_then(|tokens| tokens.get("access_token"))
+        .and_then(Value::as_str)
+        .and_then(jwt_claims)?
+        .get("exp")
+        .and_then(Value::as_u64)
+}
+
+fn needs_token_refresh(record: &OfficialAccountRecord) -> bool {
+    if access_token_expires_at(record)
+        .is_some_and(|expires_at| expires_at <= unix_timestamp() + TOKEN_REFRESH_MARGIN_SECONDS)
+    {
+        return true;
+    }
+    record
+        .last_refresh_age(SystemTime::now())
+        .is_none_or(|age| age >= REFRESH_BEFORE_ACTIVATE_AGE)
+}
+
+/// Refreshes the account's tokens when the stored access token is expired,
+/// close to expiry, or old enough to matter. Errors are returned so callers can
+/// decide whether to fall back to the stored copy. Production callers pass the
+/// shared proxy-client cache so repeated refreshes reuse the TLS pool.
+pub async fn refresh_if_stale_cached(
+    client: &reqwest::Client,
+    record: &mut OfficialAccountRecord,
+    upstream_proxy: Option<&str>,
+    proxied_clients: Option<&Mutex<HashMap<String, reqwest::Client>>>,
+) -> Result<bool> {
+    // 已确认失效的账号不再尝试刷新：官方每次都会拒绝，重复请求只会抬高
+    // 风控概率；重新添加账号会写入新凭据并清除失效标记。
+    if record.invalid() {
+        return Ok(false);
+    }
+    if !needs_token_refresh(record) {
+        return Ok(false);
+    }
+    let Some(refresh_token) = record.refresh_token().map(ToString::to_string) else {
+        return Ok(false);
+    };
+    let owned_client = official_http_client(client, proxied_clients, upstream_proxy)?;
+    let response = owned_client
+        .post(OAUTH_TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        .json(&refresh_token_grant(&refresh_token))
+        .send()
+        .await
+        .context("刷新官方账号令牌请求失败")?;
+    let status = response.status();
+    let body =
+        crate::http_response::read_bounded_body(response, 256 * 1024, "刷新令牌响应").await?;
+    if !status.is_success() {
+        if let Some(invalid) = official_account_invalid_from_body(&body) {
+            return Err(anyhow::Error::new(invalid));
+        }
+        bail!("刷新官方账号令牌失败：{status}");
+    }
+    let payload: Value = serde_json::from_slice(&body).context("刷新令牌响应格式无效")?;
+    apply_token_response(record, &payload)?;
+    // 刷新成功说明凭据重新可用，之前记录的失效状态随之清除。
+    record.clear_invalid();
+    Ok(true)
+}
+
+#[cfg(test)]
+pub async fn refresh_if_stale(
+    client: &reqwest::Client,
+    record: &mut OfficialAccountRecord,
+    upstream_proxy: Option<&str>,
+) -> Result<bool> {
+    refresh_if_stale_cached(client, record, upstream_proxy, None).await
+}
+
+fn official_http_client(
+    default_client: &reqwest::Client,
+    proxied_clients: Option<&Mutex<HashMap<String, reqwest::Client>>>,
+    upstream_proxy: Option<&str>,
+) -> Result<reqwest::Client> {
+    let Some(proxy) = upstream_proxy
+        .map(str::trim)
+        .filter(|proxy| !proxy.is_empty())
+    else {
+        return Ok(default_client.clone());
+    };
+    if let Some(cache) = proxied_clients {
+        let mut clients = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(client) = clients.get(proxy) {
+            return Ok(client.clone());
+        }
+        let client = build_official_proxy_client(proxy)?;
+        if clients.len() >= MAX_OFFICIAL_PROXY_CLIENTS {
+            clients.clear();
+        }
+        clients.insert(proxy.to_string(), client.clone());
+        return Ok(client);
+    }
+    build_official_proxy_client(proxy)
+}
+
+fn build_official_proxy_client(proxy: &str) -> Result<reqwest::Client> {
+    Ok(reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::none())
+        .proxy(reqwest::Proxy::all(proxy).context("官方账号上游代理无效")?)
+        .build()?)
+}
+
+fn apply_token_response(record: &mut OfficialAccountRecord, payload: &Value) -> Result<()> {
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .context("令牌响应缺少 access_token")?;
+    let object = record
+        .auth
+        .as_object_mut()
+        .context("账号登录信息格式无效")?;
+    let tokens = object
+        .entry("tokens")
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+        .context("账号 tokens 格式无效")?;
+    tokens.insert("access_token".to_string(), json!(access_token));
+    if let Some(id_token) = payload.get("id_token").and_then(Value::as_str) {
+        tokens.insert("id_token".to_string(), json!(id_token));
+    }
+    if let Some(refresh_token) = payload.get("refresh_token").and_then(Value::as_str) {
+        tokens.insert("refresh_token".to_string(), json!(refresh_token));
+    }
+    object.insert("last_refresh".to_string(), json!(rfc3339_now()));
+    // 刷新回来的令牌带着当前套餐，升级或降级都要跟着记录更新，否则卡片会
+    // 一直显示添加账号时的旧套餐。
+    let plan_type = plan_type_from_auth(&record.auth);
+    record.set_plan_type(plan_type.as_deref());
+    Ok(())
+}
+
+fn refresh_token_grant(refresh_token: &str) -> Value {
+    json!({
+        "client_id": OAUTH_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": "openid profile email",
+    })
+}
+
+/// 手动添加官方账号。
+///
+/// 只含 Refresh Token 时向官方换取完整登录信息。已经带 access token 的
+/// OAuth JSON 原样保存，避免换票时轮换来源 Refresh Token。
+pub async fn official_account_from_manual_input(
+    client: &reqwest::Client,
+    input: &str,
+) -> Result<OfficialAccountRecord> {
+    match parse_manual_official_credential(input)? {
+        ManualOfficialCredential::Record(record) => Ok(*record),
+        ManualOfficialCredential::RefreshToken(token) => {
+            exchange_refresh_token(client, &token).await
+        }
+    }
+}
+
+enum ManualOfficialCredential {
+    Record(Box<OfficialAccountRecord>),
+    RefreshToken(String),
+}
+
+fn parse_manual_official_credential(input: &str) -> Result<ManualOfficialCredential> {
+    if input.len() > MAX_MANUAL_CREDENTIAL_BYTES {
+        bail!("输入过长，请只粘贴 Refresh Token 或一份 OAuth JSON");
+    }
+    let trimmed = prepare_manual_input(input);
+    if trimmed.is_empty() {
+        bail!("请粘贴 Refresh Token 或 OAuth JSON");
+    }
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        let value: Value =
+            serde_json::from_str(trimmed).map_err(|_| anyhow!("OAuth JSON 格式无效"))?;
+        return credential_from_oauth_json(&value);
+    }
+    if trimmed.starts_with('"') {
+        return match serde_json::from_str::<Value>(trimmed) {
+            Ok(Value::String(token)) => credential_from_refresh_token(&token),
+            _ => bail!("OAuth JSON 格式无效"),
+        };
+    }
+    credential_from_refresh_token(trimmed)
+}
+
+fn prepare_manual_input(input: &str) -> &str {
+    let trimmed = input.trim().trim_start_matches('\u{feff}');
+    let Some(fenced) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let fenced = fenced.trim_start();
+    let fenced = fenced
+        .strip_prefix("json")
+        .or_else(|| fenced.strip_prefix("JSON"))
+        .unwrap_or(fenced)
+        .trim();
+    fenced.strip_suffix("```").unwrap_or(fenced).trim()
+}
+
+fn credential_from_refresh_token(raw: &str) -> Result<ManualOfficialCredential> {
+    let token = normalize_bare_token(raw);
+    if token.is_empty() {
+        bail!("请粘贴 Refresh Token 或 OAuth JSON");
+    }
+    if token.chars().count() < MIN_REFRESH_TOKEN_CHARS {
+        bail!("Refresh Token 无效");
+    }
+    if token.starts_with("sk-") {
+        bail!("这是 API Key，官方账号需要 Refresh Token 或 OAuth JSON");
+    }
+    if looks_like_jwt(&token) {
+        bail!("这是 Access Token，请粘贴 Refresh Token，或包含 refresh_token 的 OAuth JSON");
+    }
+    Ok(ManualOfficialCredential::RefreshToken(token))
+}
+
+fn normalize_bare_token(raw: &str) -> String {
+    let mut text = raw.trim();
+    if text.len() >= 6 && text[..6].eq_ignore_ascii_case("bearer") {
+        let rest = &text[6..];
+        if rest.chars().next().is_some_and(char::is_whitespace) {
+            text = rest.trim();
+        }
+    }
+    let compact: String = text
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect();
+    let bytes = compact.as_bytes();
+    if compact.len() >= 2
+        && ((bytes[0] == b'"' && bytes[compact.len() - 1] == b'"')
+            || (bytes[0] == b'\'' && bytes[compact.len() - 1] == b'\''))
+    {
+        return compact[1..compact.len() - 1].to_string();
+    }
+    compact
+}
+
+fn looks_like_jwt(token: &str) -> bool {
+    let mut parts = token.split('.');
+    matches!(
+        (parts.next(), parts.next(), parts.next(), parts.next()),
+        (Some(header), Some(payload), Some(signature), None)
+            if !header.is_empty() && !payload.is_empty() && !signature.is_empty()
+    )
+}
+
+fn credential_from_oauth_json(value: &Value) -> Result<ManualOfficialCredential> {
+    if !value.is_object() {
+        bail!("OAuth JSON 必须是对象");
+    }
+    let source = oauth_json_source(value)?;
+    let access_token = token_string(source, &["access_token", "accessToken"]);
+    let refresh_token = token_string(source, &["refresh_token", "refreshToken", "rt"]);
+    let id_token = token_string(source, &["id_token", "idToken"]);
+    let account_id = token_string(source, &["account_id", "accountId"])
+        .or_else(|| string_field(value, &["account_id", "accountId"]));
+    let email = string_field(source, &["email"]).or_else(|| string_field(value, &["email"]));
+    let plan = string_field(source, &["plan_type", "planType", "chatgpt_plan_type"])
+        .or_else(|| string_field(value, &["plan_type", "planType", "chatgpt_plan_type"]));
+    let Some(access_token) = access_token else {
+        let Some(refresh_token) = refresh_token else {
+            bail!("OAuth JSON 里没有 refresh_token 或 access_token");
+        };
+        return credential_from_refresh_token(&refresh_token);
+    };
+    if let Some(mode) = source.get("auth_mode").and_then(Value::as_str)
+        && mode != "chatgpt"
+    {
+        bail!("当前登录不是 ChatGPT 官方账号登录");
+    }
+    let auth = auth_document_from_oauth_json(
+        source,
+        &access_token,
+        refresh_token.as_deref(),
+        id_token.as_deref(),
+        account_id.as_deref(),
+    );
+    let mut record = OfficialAccountRecord::from_auth(auth, unix_timestamp())?;
+    apply_declared_identity(&mut record, email, plan);
+    // 仍在有效期内、又没有刷新时间的登录文档，按刚刚导入处理。
+    // 否则接下来的额度查询会立刻轮换 Refresh Token，使来源登录失效。
+    if record.last_refresh().is_none()
+        && record.has_live_access_token()
+        && let Some(object) = record.auth.as_object_mut()
+    {
+        object.insert("last_refresh".to_string(), json!(rfc3339_now()));
+    }
+    Ok(ManualOfficialCredential::Record(Box::new(record)))
+}
+
+fn oauth_json_source(value: &Value) -> Result<&Value> {
+    if token_string(
+        value,
+        &[
+            "access_token",
+            "accessToken",
+            "refresh_token",
+            "refreshToken",
+            "rt",
+        ],
+    )
+    .is_some()
+    {
+        return Ok(value);
+    }
+    if let Some(auth) = value.get("auth")
+        && token_string(
+            auth,
+            &[
+                "access_token",
+                "accessToken",
+                "refresh_token",
+                "refreshToken",
+                "rt",
+            ],
+        )
+        .is_some()
+    {
+        return Ok(auth);
+    }
+    bail!("OAuth JSON 里没有 refresh_token 或 access_token")
+}
+
+fn token_string(document: &Value, keys: &[&str]) -> Option<String> {
+    document
+        .get("tokens")
+        .and_then(|tokens| string_field(tokens, keys))
+        .or_else(|| string_field(document, keys))
+}
+
+fn string_field(document: &Value, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        document
+            .get(*key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+    })
+}
+
+fn auth_document_from_oauth_json(
+    source: &Value,
+    access_token: &str,
+    refresh_token: Option<&str>,
+    id_token: Option<&str>,
+    account_id: Option<&str>,
+) -> Value {
+    if source.get("tokens").and_then(Value::as_object).is_some() {
+        let mut auth = source.clone();
+        if let Some(tokens) = auth.get_mut("tokens").and_then(Value::as_object_mut) {
+            insert_token_if_blank(tokens, "access_token", Some(access_token));
+            insert_token_if_blank(tokens, "refresh_token", refresh_token);
+            insert_token_if_blank(tokens, "id_token", id_token);
+            insert_token_if_blank(tokens, "account_id", account_id);
+        }
+        return auth;
+    }
+    let mut tokens = serde_json::Map::new();
+    tokens.insert("access_token".to_string(), json!(access_token));
+    tokens.insert(
+        "refresh_token".to_string(),
+        json!(refresh_token.unwrap_or("")),
+    );
+    tokens.insert("id_token".to_string(), json!(id_token.unwrap_or("")));
+    if let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) {
+        tokens.insert("account_id".to_string(), json!(account_id));
+    }
+    let mut auth = serde_json::Map::new();
+    auth.insert("OPENAI_API_KEY".to_string(), Value::Null);
+    auth.insert("auth_mode".to_string(), json!("chatgpt"));
+    auth.insert("tokens".to_string(), Value::Object(tokens));
+    if let Some(last_refresh) = source
+        .get("last_refresh")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        auth.insert("last_refresh".to_string(), json!(last_refresh));
+    }
+    Value::Object(auth)
+}
+
+fn insert_token_if_blank(
+    tokens: &mut serde_json::Map<String, Value>,
+    key: &str,
+    value: Option<&str>,
+) {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let occupied = tokens
+        .get(key)
+        .and_then(Value::as_str)
+        .is_some_and(|current| !current.trim().is_empty());
+    if !occupied {
+        tokens.insert(key.to_string(), json!(value));
+    }
+}
+
+fn apply_declared_identity(
+    record: &mut OfficialAccountRecord,
+    email: Option<String>,
+    plan: Option<String>,
+) {
+    if record.email.is_none() {
+        record.email = email.filter(|value| !value.is_empty());
+    }
+    if record.plan_type.is_none() {
+        record.plan_type = plan.filter(|value| !value.is_empty());
+    }
+    if record.account_id.is_none()
+        && is_generated_account_id(&record.id)
+        && let Some(email) = record.email.clone()
+    {
+        record.id = email_account_id(&email);
+    }
+}
+
+async fn exchange_refresh_token(
+    client: &reqwest::Client,
+    refresh_token: &str,
+) -> Result<OfficialAccountRecord> {
+    let response = client
+        .post(OAUTH_TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        .json(&refresh_token_grant(refresh_token))
+        .send()
+        .await
+        .context("用 Refresh Token 换取登录信息失败")?;
+    let status = response.status();
+    let body =
+        crate::http_response::read_bounded_body(response, 256 * 1024, "换取登录信息响应").await?;
+    if !status.is_success() {
+        if official_account_invalid_from_body(&body).is_some() {
+            bail!("Refresh Token 已被拒绝，请确认令牌仍然有效");
+        }
+        bail!("用 Refresh Token 换取登录信息失败：{status}");
+    }
+    let mut payload: Value = serde_json::from_slice(&body).context("登录信息响应格式无效")?;
+    let missing_refresh = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .is_none();
+    if missing_refresh && let Some(object) = payload.as_object_mut() {
+        object.insert("refresh_token".to_string(), json!(refresh_token));
+    }
+    record_from_token_response(&payload).context("Refresh Token 换到的登录信息不完整")
+}
+
+// ---------------------------------------------------------------------------
+// OAuth login sessions
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+pub enum LoginPhase {
+    Waiting,
+    /// Boxed so a waiting session, which is the common phase, stays small.
+    Completed(Box<OfficialAccountRecord>),
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub struct LoginSession {
+    pub auth_url: String,
+    created_at: Instant,
+    phase: Arc<Mutex<LoginPhase>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LoginSession {
+    pub fn phase(&self) -> LoginPhase {
+        self.phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn expired(&self) -> bool {
+        self.created_at.elapsed() > LOGIN_TIMEOUT
+    }
+
+    pub fn cancel(&self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct LoginSessions {
+    sessions: HashMap<String, LoginSession>,
+}
+
+impl LoginSessions {
+    pub fn insert(&mut self, id: String, session: LoginSession) {
+        self.sessions.insert(id, session);
+    }
+
+    pub fn get(&self, id: &str) -> Option<&LoginSession> {
+        self.sessions.get(id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<LoginSession> {
+        self.sessions.remove(id)
+    }
+
+    /// Aborts every pending login so a new one can claim the callback port.
+    pub fn cancel_all(&mut self) {
+        for (_, session) in self.sessions.drain() {
+            session.cancel();
+        }
+    }
+
+    pub fn remove_expired(&mut self) {
+        let expired = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.expired())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in expired {
+            if let Some(session) = self.sessions.remove(&id) {
+                session.cancel();
+            }
+        }
+    }
+}
+
+struct PkcePair {
+    verifier: String,
+    challenge: String,
+}
+
+fn pkce_pair() -> PkcePair {
+    let mut seed = Vec::with_capacity(48);
+    for _ in 0..3 {
+        seed.extend_from_slice(uuid::Uuid::new_v4().as_bytes());
+    }
+    let verifier = URL_SAFE_NO_PAD.encode(&seed);
+    let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
+    PkcePair {
+        verifier,
+        challenge,
+    }
+}
+
+fn build_authorize_url(state: &str, challenge: &str) -> String {
+    let mut url = reqwest::Url::parse(OAUTH_AUTHORIZE_URL).expect("static authorize url");
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", OAUTH_CLIENT_ID)
+        .append_pair("redirect_uri", OAUTH_REDIRECT_URI)
+        .append_pair("scope", OAUTH_SCOPE)
+        .append_pair("code_challenge", challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("id_token_add_organizations", "true")
+        .append_pair("codex_cli_simplified_flow", "true")
+        .append_pair("state", state)
+        .append_pair("originator", "codex_cli_rs");
+    url.to_string()
+}
+
+async fn bind_callback_listener(port: u16) -> Result<TcpListener> {
+    TcpListener::bind(("127.0.0.1", port)).await.map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AddrInUse {
+            anyhow!("登录回调端口 127.0.0.1:{port} 已被占用，当前登录流程使用固定回调地址；请释放该端口后重试，或导入 Codex 现有登录")
+        } else {
+            anyhow!("无法监听登录回调端口 127.0.0.1:{port}（{error}）")
+        }
+    })
+}
+
+/// Starts a login: binds the OAuth callback port, returns the URL to open.
+pub async fn start_login(client: reqwest::Client) -> Result<LoginSession> {
+    let listener = bind_callback_listener(OAUTH_CALLBACK_PORT).await?;
+    let pkce = pkce_pair();
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    let auth_url = build_authorize_url(&state, &pkce.challenge);
+    let phase = Arc::new(Mutex::new(LoginPhase::Waiting));
+    let task_phase = Arc::clone(&phase);
+    let task = tokio::spawn(async move {
+        let outcome = tokio::time::timeout(
+            LOGIN_TIMEOUT,
+            run_callback_server(listener, client, state, pkce.verifier),
+        )
+        .await;
+        let next = match outcome {
+            Ok(Ok(record)) => LoginPhase::Completed(Box::new(record)),
+            Ok(Err(error)) => LoginPhase::Failed(format!("{error:#}")),
+            Err(_) => LoginPhase::Failed("登录等待超时，请重新开始添加账号".to_string()),
+        };
+        *task_phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    });
+    Ok(LoginSession {
+        auth_url,
+        created_at: Instant::now(),
+        phase,
+        task,
+    })
+}
+
+async fn run_callback_server(
+    listener: TcpListener,
+    client: reqwest::Client,
+    expected_state: String,
+    verifier: String,
+) -> Result<OfficialAccountRecord> {
+    loop {
+        let (mut socket, _) = listener.accept().await.context("接受登录回调连接失败")?;
+        let request = match read_request_head(&mut socket).await {
+            Ok(request) => request,
+            Err(_) => continue,
+        };
+        let Some(target) = request_target(&request) else {
+            let _ = write_response(&mut socket, 400, "Bad Request").await;
+            continue;
+        };
+        let Some(query) = target.strip_prefix("/auth/callback") else {
+            let _ = write_response(&mut socket, 404, "Not Found").await;
+            continue;
+        };
+        let params = query_params(query.trim_start_matches('?'));
+        if params.get("state").map(String::as_str) != Some(expected_state.as_str()) {
+            let _ = write_response(
+                &mut socket,
+                400,
+                "登录状态校验失败，请回到 Codey 重新开始。",
+            )
+            .await;
+            continue;
+        }
+        if let Some(error) = params.get("error") {
+            let description = params.get("error_description").cloned().unwrap_or_default();
+            let _ = write_response(&mut socket, 200, "登录已取消，可关闭此页面。").await;
+            bail!("OpenAI 登录被拒绝：{error} {description}");
+        }
+        let Some(code) = params.get("code").filter(|code| !code.is_empty()) else {
+            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 Codey 重新开始。").await;
+            continue;
+        };
+        let exchanged = exchange_code(&client, code, &verifier).await;
+        match exchanged {
+            Ok(record) => {
+                let _ = write_response(
+                    &mut socket,
+                    200,
+                    "登录成功，账号已添加到 Codey，可关闭此页面。",
+                )
+                .await;
+                return Ok(record);
+            }
+            Err(error) => {
+                let _ =
+                    write_response(&mut socket, 500, "换取令牌失败，请回到 Codey 查看错误。").await;
+                return Err(error);
+            }
+        }
+    }
+}
+
+async fn read_request_head(socket: &mut tokio::net::TcpStream) -> Result<String> {
+    let mut buffer = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 1024];
+    loop {
+        let read = tokio::time::timeout(Duration::from_secs(5), socket.read(&mut chunk))
+            .await
+            .context("读取登录回调请求超时")??;
+        if read == 0 {
+            break;
+        }
+        buffer.extend_from_slice(&chunk[..read]);
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n")
+            || buffer.len() > MAX_CALLBACK_REQUEST_BYTES
+        {
+            break;
+        }
+    }
+    Ok(String::from_utf8_lossy(&buffer).into_owned())
+}
+
+fn request_target(request: &str) -> Option<&str> {
+    let line = request.lines().next()?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next()?;
+    if method != "GET" {
+        return None;
+    }
+    parts.next()
+}
+
+fn query_params(query: &str) -> HashMap<String, String> {
+    reqwest::Url::parse(&format!("http://localhost/?{query}"))
+        .map(|url| {
+            url.query_pairs()
+                .map(|(key, value)| (key.into_owned(), value.into_owned()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+async fn write_response(
+    socket: &mut tokio::net::TcpStream,
+    status: u16,
+    message: &str,
+) -> Result<()> {
+    let reason = match status {
+        200 => "OK",
+        400 => "Bad Request",
+        404 => "Not Found",
+        _ => "Internal Server Error",
+    };
+    let body = format!(
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>Codey</title></head>\
+         <body style=\"font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;color:#222\">\
+         <p style=\"font-size:18px\">{}</p></body></html>",
+        html_escape(message)
+    );
+    let response = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    socket.write_all(response.as_bytes()).await?;
+    let _ = socket.shutdown().await;
+    Ok(())
+}
+
+fn html_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+async fn exchange_code(
+    client: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+) -> Result<OfficialAccountRecord> {
+    let response = client
+        .post(OAUTH_TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", OAUTH_REDIRECT_URI),
+            ("client_id", OAUTH_CLIENT_ID),
+            ("code_verifier", verifier),
+        ])
+        .send()
+        .await
+        .context("向 OpenAI 换取登录令牌失败")?;
+    let status = response.status();
+    let body =
+        crate::http_response::read_bounded_body(response, 256 * 1024, "换取令牌响应").await?;
+    if !status.is_success() {
+        bail!("OpenAI 令牌接口返回 {status}");
+    }
+    let payload: Value = serde_json::from_slice(&body).context("令牌响应格式无效")?;
+    record_from_token_response(&payload)
+}
+
+fn record_from_token_response(payload: &Value) -> Result<OfficialAccountRecord> {
+    let id_token = payload
+        .get("id_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .filter(|token| !token.trim().is_empty())
+        .context("令牌响应缺少 access_token")?;
+    let refresh_token = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let auth = json!({
+        "OPENAI_API_KEY": Value::Null,
+        "auth_mode": "chatgpt",
+        "tokens": {
+            "id_token": id_token,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+        },
+        "last_refresh": rfc3339_now(),
+    });
+    OfficialAccountRecord::from_auth(auth, unix_timestamp())
+}
+
+// ---------------------------------------------------------------------------
+// SIWC（Sign in with ChatGPT）授权：官方文档的 open-source token sharing 流程
+// ---------------------------------------------------------------------------
+
+pub(crate) const SIWC_AUTHORIZE_URL: &str = "https://auth.openai.com/api/accounts/authorize";
+pub(crate) const SIWC_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
+pub(crate) const SIWC_RESOURCE: &str = "https://api.openai.com/v1";
+/// 直连推理固定走官方公开 API：SIWC 令牌不能发给 Codex backend-api，也不能
+/// 改指用户自定义网关。
+pub(crate) const SIWC_BASE_URL: &str = "https://api.openai.com/v1";
+/// 回调必须与授权请求里的 redirect_uri 完全一致；文档要求 127.0.0.1 而非
+/// localhost，/auth/callback 与 /callback 是两个不同地址。
+pub(crate) const SIWC_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback";
+pub(crate) const SIWC_CALLBACK_PORT: u16 = 1455;
+/// 首次注册的入口 client_id；回调签发的 `oaiapp_*` 才是账号的持久身份。
+const SIWC_DYNAMIC_CLIENT_ID: &str = "dynamic_agent_client";
+const SIWC_AGENT_NAME_HINT: &str = "Codey";
+const SIWC_SCOPE: &str =
+    "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
+/// 缺少该 scope 时凭据保留但直连不可用，界面引导重新授权。
+const SIWC_PLAN_SCOPE: &str = "chatgpt.tokens.use.direct";
+/// `SiwcCredential::invalid_reason` 的固定值之一：授权成功但订阅调用未开启。
+pub(crate) const SIWC_PLAN_SCOPE_MISSING_REASON: &str = "siwc_plan_scope_missing";
+const SIWC_ISSUER: &str = "https://auth.openai.com";
+const SIWC_DISCOVERY_URL: &str = "https://auth.openai.com/.well-known/openid-configuration";
+const SIWC_DISCOVERY_TTL: Duration = Duration::from_secs(6 * 60 * 60);
+/// SIWC access token 约一小时过期；距过期不足该值就在使用前刷新。
+pub(crate) const SIWC_REFRESH_MARGIN_SECONDS: u64 = TOKEN_REFRESH_MARGIN_SECONDS;
+
+#[derive(Debug, Clone)]
+pub enum SiwcLoginPhase {
+    Waiting,
+    /// 授权链路完成后的凭据；命令层校验账号身份后才真正写回记录。
+    Completed(Box<SiwcCredential>),
+    Failed(String),
+}
+
+#[derive(Debug)]
+pub struct SiwcLoginSession {
+    pub auth_url: String,
+    /// 这次授权要附着的账号，回调完成也只能写回它。
+    pub account_id: String,
+    created_at: Instant,
+    phase: Arc<Mutex<SiwcLoginPhase>>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl SiwcLoginSession {
+    pub fn phase(&self) -> SiwcLoginPhase {
+        self.phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    pub fn expired(&self) -> bool {
+        self.created_at.elapsed() > LOGIN_TIMEOUT
+    }
+
+    pub fn cancel(&self) {
+        self.task.abort();
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct SiwcLoginSessions {
+    sessions: HashMap<String, SiwcLoginSession>,
+}
+
+impl SiwcLoginSessions {
+    pub fn insert(&mut self, id: String, session: SiwcLoginSession) {
+        self.sessions.insert(id, session);
+    }
+
+    pub fn get(&self, id: &str) -> Option<&SiwcLoginSession> {
+        self.sessions.get(id)
+    }
+
+    pub fn remove(&mut self, id: &str) -> Option<SiwcLoginSession> {
+        self.sessions.remove(id)
+    }
+
+    /// SIWC 与 Codex 登录共用回调端口，新会话开始前必须停掉旧监听。
+    pub fn cancel_all(&mut self) {
+        for (_, session) in self.sessions.drain() {
+            session.cancel();
+        }
+    }
+
+    pub fn remove_expired(&mut self) {
+        let expired = self
+            .sessions
+            .iter()
+            .filter(|(_, session)| session.expired())
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        for id in expired {
+            if let Some(session) = self.sessions.remove(&id) {
+                session.cancel();
+            }
+        }
+    }
+}
+
+/// 为既有账号启动 SIWC 授权。已有 SIWC 凭据时走重授权：复用签发的
+/// client_id，带 `id_token_hint` 跳过账号选择页；否则用
+/// `dynamic_agent_client` 注册新客户端，回调里收签发的 client_id。
+pub async fn start_siwc_login(
+    client: reqwest::Client,
+    account: &OfficialAccountRecord,
+    host_id: &str,
+) -> Result<SiwcLoginSession> {
+    let listener = bind_callback_listener(SIWC_CALLBACK_PORT).await?;
+    let pkce = pkce_pair();
+    let state = uuid::Uuid::new_v4().simple().to_string();
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let saved = account.siwc.as_ref();
+    let issued_client_id = saved
+        .map(|siwc| siwc.client_id.trim())
+        .filter(|id| !id.is_empty())
+        .map(ToString::to_string);
+    let registration = issued_client_id.is_none();
+    let auth_url = build_siwc_authorize_url(
+        issued_client_id
+            .as_deref()
+            .unwrap_or(SIWC_DYNAMIC_CLIENT_ID),
+        &state,
+        &nonce,
+        &pkce.challenge,
+        host_id,
+        registration,
+        // 重授权带 id_token_hint 与 login_hint；首次注册不带，只带
+        // agent_name_hint 与本机标识。
+        if registration {
+            None
+        } else {
+            saved.and_then(|siwc| siwc.id_token.as_deref())
+        },
+        if registration {
+            None
+        } else {
+            saved
+                .and_then(|siwc| siwc.email.as_deref())
+                .or(account.email.as_deref())
+        },
+    );
+    let phase = Arc::new(Mutex::new(SiwcLoginPhase::Waiting));
+    let task_phase = Arc::clone(&phase);
+    let account_id = account.id.clone();
+    let task = tokio::spawn(async move {
+        let outcome = tokio::time::timeout(
+            LOGIN_TIMEOUT,
+            run_siwc_callback_server(
+                listener,
+                client,
+                state,
+                nonce,
+                pkce.verifier,
+                issued_client_id,
+            ),
+        )
+        .await;
+        let next = match outcome {
+            Ok(Ok(credential)) => SiwcLoginPhase::Completed(Box::new(credential)),
+            Ok(Err(error)) => SiwcLoginPhase::Failed(format!("{error:#}")),
+            Err(_) => SiwcLoginPhase::Failed("授权等待超时，请重新发起官方直连授权".to_string()),
+        };
+        *task_phase
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
+    });
+    Ok(SiwcLoginSession {
+        auth_url,
+        account_id,
+        created_at: Instant::now(),
+        phase,
+        task,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_siwc_authorize_url(
+    client_id: &str,
+    state: &str,
+    nonce: &str,
+    challenge: &str,
+    host_id: &str,
+    registration: bool,
+    id_token_hint: Option<&str>,
+    login_hint: Option<&str>,
+) -> String {
+    let mut url = reqwest::Url::parse(SIWC_AUTHORIZE_URL).expect("static authorize url");
+    {
+        let mut pairs = url.query_pairs_mut();
+        pairs
+            .append_pair("response_type", "code")
+            .append_pair("client_id", client_id)
+            .append_pair("redirect_uri", SIWC_REDIRECT_URI)
+            .append_pair("scope", SIWC_SCOPE)
+            .append_pair("resource", SIWC_RESOURCE)
+            .append_pair("state", state)
+            .append_pair("nonce", nonce)
+            .append_pair("code_challenge", challenge)
+            .append_pair("code_challenge_method", "S256")
+            .append_pair("ext_agent_host_id", host_id);
+        if registration {
+            pairs.append_pair("agent_name_hint", SIWC_AGENT_NAME_HINT);
+        }
+        if let Some(hint) = id_token_hint {
+            pairs.append_pair("id_token_hint", hint);
+        }
+        if let Some(hint) = login_hint {
+            pairs.append_pair("login_hint", hint);
+        }
+    }
+    url.to_string()
+}
+
+async fn run_siwc_callback_server(
+    listener: TcpListener,
+    client: reqwest::Client,
+    expected_state: String,
+    expected_nonce: String,
+    verifier: String,
+    expected_client_id: Option<String>,
+) -> Result<SiwcCredential> {
+    loop {
+        let (mut socket, _) = listener.accept().await.context("接受授权回调连接失败")?;
+        let request = match read_request_head(&mut socket).await {
+            Ok(request) => request,
+            Err(_) => continue,
+        };
+        let Some(target) = request_target(&request) else {
+            let _ = write_response(&mut socket, 400, "Bad Request").await;
+            continue;
+        };
+        let Some(query) = target.strip_prefix("/auth/callback") else {
+            let _ = write_response(&mut socket, 404, "Not Found").await;
+            continue;
+        };
+        let params = query_params(query.trim_start_matches('?'));
+        if params.get("state").map(String::as_str) != Some(expected_state.as_str()) {
+            let _ = write_response(
+                &mut socket,
+                400,
+                "授权状态校验失败，请回到 Codey 重新开始。",
+            )
+            .await;
+            continue;
+        }
+        if let Some(error) = params.get("error") {
+            let description = params.get("error_description").cloned().unwrap_or_default();
+            let _ = write_response(&mut socket, 200, "授权已取消，可关闭此页面。").await;
+            bail!("ChatGPT 授权被拒绝：{error} {description}");
+        }
+        let Some(code) = params.get("code").filter(|code| !code.is_empty()) else {
+            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 Codey 重新开始。").await;
+            continue;
+        };
+        let result = async {
+            let client_id = siwc_client_id_from_callback(
+                expected_client_id.as_deref(),
+                params.get("client_id").map(String::as_str),
+            )?;
+            let payload = exchange_siwc_code(&client, code, &verifier, &client_id).await?;
+            siwc_credential_from_token_response(&client, &payload, &client_id, &expected_nonce)
+                .await
+        }
+        .await;
+        match result {
+            Ok(credential) => {
+                let _ = write_response(&mut socket, 200, "授权成功，已回到 Codey，可关闭此页面。")
+                    .await;
+                return Ok(credential);
+            }
+            Err(error) => {
+                let _ =
+                    write_response(&mut socket, 500, "授权校验失败，请回到 Codey 查看错误。").await;
+                return Err(error);
+            }
+        }
+    }
+}
+
+/// 回调返回的签发 client_id 决定凭据写进哪个注册。首次注册必须带回它；
+/// 重授权可省略，但若带回必须和账号保存的一致——两条规则都不允许静默换
+/// 客户端，否则令牌会落到错误的注册名下。
+fn siwc_client_id_from_callback(expected: Option<&str>, returned: Option<&str>) -> Result<String> {
+    let returned = returned.map(str::trim).filter(|value| !value.is_empty());
+    match (expected, returned) {
+        (Some(expected), Some(returned)) if returned != expected => {
+            bail!("回调返回的 client_id 与账号已保存的注册不一致")
+        }
+        (Some(expected), _) => Ok(expected.to_string()),
+        (None, Some(returned)) => Ok(returned.to_string()),
+        (None, None) => bail!("授权回调缺少签发的 client_id"),
+    }
+}
+
+async fn exchange_siwc_code(
+    client: &reqwest::Client,
+    code: &str,
+    verifier: &str,
+    client_id: &str,
+) -> Result<Value> {
+    let response = client
+        .post(SIWC_TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        .form(&[
+            ("grant_type", "authorization_code"),
+            ("code", code),
+            ("redirect_uri", SIWC_REDIRECT_URI),
+            ("client_id", client_id),
+            ("code_verifier", verifier),
+            ("resource", SIWC_RESOURCE),
+        ])
+        .send()
+        .await
+        .context("向 OpenAI 换取官方直连令牌失败")?;
+    let status = response.status();
+    let body =
+        crate::http_response::read_bounded_body(response, 256 * 1024, "换取令牌响应").await?;
+    if !status.is_success() {
+        bail!("OpenAI 令牌接口返回 {status}");
+    }
+    serde_json::from_slice(&body).context("令牌响应格式无效")
+}
+
+/// 由 token 响应构建 SIWC 凭据：验签 id_token、核对 nonce/audience、检查
+/// 订阅调用 scope。scope 缺失时凭据保留但标记不可用（文档要求保留授权态，
+/// 用户重新授权后可恢复）。
+async fn siwc_credential_from_token_response(
+    client: &reqwest::Client,
+    payload: &Value,
+    client_id: &str,
+    nonce: &str,
+) -> Result<SiwcCredential> {
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 access_token")?;
+    let refresh_token = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 refresh_token")?;
+    let id_token = payload
+        .get("id_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 id_token，无法校验授权身份")?;
+    let identity = verify_siwc_id_token(client, id_token, client_id, nonce).await?;
+    let scopes = payload
+        .get("scope")
+        .and_then(Value::as_str)
+        .map(|scope| {
+            scope
+                .split_whitespace()
+                .filter(|value| !value.is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let now = unix_timestamp();
+    let mut credential = SiwcCredential {
+        client_id: client_id.to_string(),
+        scopes,
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.to_string(),
+        id_token: Some(id_token.to_string()),
+        expires_at: payload
+            .get("expires_in")
+            .and_then(Value::as_u64)
+            .map(|seconds| now.saturating_add(seconds))
+            .unwrap_or_else(|| now.saturating_add(3600)),
+        earliest_refresh_at: payload.get("earliest_refresh_at").and_then(Value::as_u64),
+        saved_at: now,
+        email: identity.email,
+        sub: Some(identity.sub),
+        invalid_reason: None,
+        invalid_since: None,
+    };
+    if !credential.plan_scope_granted() {
+        credential.mark_invalid(SIWC_PLAN_SCOPE_MISSING_REASON.to_string(), unix_timestamp());
+    }
+    Ok(credential)
+}
+
+/// 由刷新响应更新凭据：轮换返回的 refresh_token 必须整组替换，旧值立即作废。
+fn apply_siwc_token_response(credential: &mut SiwcCredential, payload: &Value) -> Result<()> {
+    let access_token = payload
+        .get("access_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .context("令牌响应缺少 access_token")?;
+    credential.access_token = access_token.to_string();
+    if let Some(refresh_token) = payload
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        credential.refresh_token = refresh_token.to_string();
+    }
+    if let Some(id_token) = payload
+        .get("id_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        credential.id_token = Some(id_token.to_string());
+    }
+    if let Some(seconds) = payload.get("expires_in").and_then(Value::as_u64) {
+        credential.expires_at = unix_timestamp().saturating_add(seconds);
+    }
+    if let Some(earliest) = payload.get("earliest_refresh_at").and_then(Value::as_u64) {
+        credential.earliest_refresh_at = Some(earliest);
+    }
+    if let Some(scope) = payload.get("scope").and_then(Value::as_str) {
+        credential.scopes = scope
+            .split_whitespace()
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .collect();
+    }
+    credential.saved_at = unix_timestamp();
+    credential.invalid_reason = None;
+    credential.invalid_since = None;
+    if !credential.plan_scope_granted() {
+        credential.mark_invalid(SIWC_PLAN_SCOPE_MISSING_REASON.to_string(), unix_timestamp());
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// SIWC 令牌刷新与撤销
+// ---------------------------------------------------------------------------
+
+/// SIWC 刷新端点返回的错误里，这些 code 表示 refresh token 不可再用，
+/// 需要重新授权；`invalid_client` 说明签发的注册已失效，同样按失效处理。
+#[derive(Debug)]
+pub struct SiwcInvalid {
+    reason: String,
+    detail: Option<String>,
+}
+
+impl SiwcInvalid {
+    pub fn reason(&self) -> &str {
+        &self.reason
+    }
+
+    pub fn detail(&self) -> Option<&str> {
+        self.detail.as_deref()
+    }
+}
+
+impl std::fmt::Display for SiwcInvalid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.detail.as_deref() {
+            Some(detail) => write!(formatter, "{}：{detail}", self.reason),
+            None => write!(formatter, "{}", self.reason),
+        }
+    }
+}
+
+impl std::error::Error for SiwcInvalid {}
+
+fn siwc_invalid_from_body(body: &[u8]) -> Option<SiwcInvalid> {
+    let payload = serde_json::from_slice::<Value>(body).ok()?;
+    let code = payload.get("error").and_then(Value::as_str)?;
+    let unusable = matches!(
+        code,
+        "invalid_grant"
+            | "invalid_refresh_token"
+            | "token_expired"
+            | "refresh_token_expired"
+            | "refresh_token_invalidated"
+            | "refresh_token_reused"
+    );
+    let (reason, detail_key) = if unusable {
+        ("官方直连授权已被撤销，需要重新授权", "error_description")
+    } else if code == "invalid_client" {
+        (
+            "官方直连的注册凭据已失效，请停用后重新启用",
+            "error_description",
+        )
+    } else {
+        return None;
+    };
+    Some(SiwcInvalid {
+        reason: reason.to_string(),
+        detail: payload
+            .get(detail_key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|description| !description.is_empty())
+            .map(ToString::to_string),
+    })
+}
+
+static SIWC_REFRESH_LOCKS: std::sync::LazyLock<
+    Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// 同账号刷新串行化：refresh token 轮换后旧值作废，并发刷新会让先完成的
+/// 那份凭据立刻失效。
+fn siwc_refresh_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    SIWC_REFRESH_LOCKS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .entry(account_id.to_string())
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+/// SIWC 凭据临期时刷新；账号移除、凭据缺失或仍有效时返回 Ok(false)。
+/// 刷新失败只影响 SIWC 槽位，Codex 凭据不受牵连。
+pub async fn refresh_siwc_if_stale(
+    client: &reqwest::Client,
+    store: &OfficialAccountStore,
+    account_id: &str,
+    proxied_clients: Option<&Mutex<HashMap<String, reqwest::Client>>>,
+) -> Result<bool> {
+    let lock = siwc_refresh_lock(account_id);
+    let _guard = lock.lock().await;
+    let record = {
+        let store = store.clone();
+        let account_id = account_id.to_string();
+        tokio::task::spawn_blocking(move || store.get(&account_id))
+            .await
+            .context("读取官方账号任务异常退出")??
+    };
+    let Some(record) = record else {
+        return Ok(false);
+    };
+    let Some(credential) = record.siwc.clone() else {
+        return Ok(false);
+    };
+    if credential.invalid() {
+        return Ok(false);
+    }
+    if !credential.needs_refresh(unix_timestamp(), SIWC_REFRESH_MARGIN_SECONDS) {
+        // 记录仍然有效时顺手修复缺失或落后的物化文件。
+        store_sync_siwc_file(store, account_id).await;
+        return Ok(false);
+    }
+    if credential.refresh_token.trim().is_empty() {
+        let reason = "官方直连缺少 refresh token，请重新授权";
+        mark_siwc_invalid(store, account_id, reason).await;
+        return Err(anyhow::Error::new(SiwcInvalid {
+            reason: reason.to_string(),
+            detail: None,
+        }));
+    }
+    let request_client =
+        official_http_client(client, proxied_clients, record.upstream_proxy.as_deref())?;
+    let response = request_client
+        .post(SIWC_TOKEN_URL)
+        .timeout(Duration::from_secs(20))
+        // 不带 scope：保留首次授权得到的全部授权范围。
+        .form(&[
+            ("grant_type", "refresh_token"),
+            ("client_id", credential.client_id.as_str()),
+            ("refresh_token", credential.refresh_token.as_str()),
+            ("resource", SIWC_RESOURCE),
+        ])
+        .send()
+        .await
+        .context("刷新官方直连令牌请求失败")?;
+    let status = response.status();
+    let body =
+        crate::http_response::read_bounded_body(response, 256 * 1024, "刷新令牌响应").await?;
+    if !status.is_success() {
+        if let Some(invalid) = siwc_invalid_from_body(&body) {
+            mark_siwc_invalid(store, account_id, invalid.reason()).await;
+            return Err(anyhow::Error::new(invalid));
+        }
+        bail!("刷新官方直连令牌失败：{status}");
+    }
+    let payload: Value = serde_json::from_slice(&body).context("刷新令牌响应格式无效")?;
+    let mut updated = credential.clone();
+    apply_siwc_token_response(&mut updated, &payload)?;
+    let result = {
+        let store = store.clone();
+        let account_id = account_id.to_string();
+        let expected = credential.clone();
+        let updated = updated.clone();
+        tokio::task::spawn_blocking(move || {
+            store.update_siwc_if_current(&account_id, Some(&expected), &updated)
+        })
+        .await
+        .context("写回官方直连凭据任务异常退出")??
+    };
+    // None：账号已被移除或凭据槽消失；返回当前值即可，无需再写。
+    Ok(result.is_some())
+}
+
+async fn mark_siwc_invalid(store: &OfficialAccountStore, account_id: &str, reason: &str) {
+    let store = store.clone();
+    let account_id = account_id.to_string();
+    let reason = reason.to_string();
+    let marked_id = account_id.clone();
+    let marked =
+        tokio::task::spawn_blocking(move || store.mark_siwc_invalid(&marked_id, &reason)).await;
+    if matches!(marked, Ok(Ok(true))) {
+        notify_siwc_invalidated(&account_id);
+    }
+}
+
+/// 凭据首次转入失效时通知宿主重建派生线路：直连路径上的请求在路由侧
+/// 观察到 401 后只是标记记录，没有这个回调的话快照要等到下一次账号
+/// 同步才会回落到 Codex 平面。
+type SiwcInvalidatedListener = Arc<dyn Fn(String) + Send + Sync>;
+
+static SIWC_INVALIDATED_LISTENER: Mutex<Option<SiwcInvalidatedListener>> = Mutex::new(None);
+
+pub fn set_siwc_invalidated_listener(listener: Option<SiwcInvalidatedListener>) {
+    *SIWC_INVALIDATED_LISTENER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = listener;
+}
+
+pub(crate) fn notify_siwc_invalidated(account_id: &str) {
+    let listener = SIWC_INVALIDATED_LISTENER
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    if let Some(listener) = listener {
+        listener(account_id.to_string());
+    }
+}
+
+async fn store_sync_siwc_file(store: &OfficialAccountStore, account_id: &str) {
+    let store = store.clone();
+    let account_id = account_id.to_string();
+    let _ = tokio::task::spawn_blocking(move || store.sync_siwc_file(&account_id)).await;
+}
+
+/// 停用/移除账号时撤销 SIWC 的可续期会话。返回 Err 表示远端撤销未被确认，
+/// 调用方应继续本地清理并提示用户可在 ChatGPT 设置里断开应用。
+pub async fn revoke_siwc_session(
+    client: &reqwest::Client,
+    credential: &SiwcCredential,
+) -> Result<()> {
+    if credential.refresh_token.trim().is_empty() {
+        return Ok(());
+    }
+    let discovery = siwc_discovery(client).await?;
+    let endpoint = discovery
+        .get("revocation_endpoint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("OpenAI 未提供撤销端点")?;
+    let response = client
+        .post(endpoint)
+        .timeout(Duration::from_secs(10))
+        .form(&[
+            ("token", credential.refresh_token.as_str()),
+            ("token_type_hint", "refresh_token"),
+            ("client_id", credential.client_id.as_str()),
+        ])
+        .send()
+        .await
+        .context("撤销官方直连授权请求失败")?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+    bail!("撤销官方直连授权返回 {}", response.status())
+}
+
+// ---------------------------------------------------------------------------
+// id_token 验签
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct SiwcIdentity {
+    sub: String,
+    email: Option<String>,
+}
+
+static SIWC_DISCOVERY_CACHE: Mutex<Option<(Instant, Value)>> = Mutex::new(None);
+
+/// OpenAI 发现文档：jwks_uri、issuer、revocation_endpoint 都在这里读。
+/// 缓存半天内的结果，验签 miss 或过期时重新拉取。
+async fn siwc_discovery(client: &reqwest::Client) -> Result<Value> {
+    {
+        let cache = SIWC_DISCOVERY_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some((fetched, document)) = cache.as_ref()
+            && fetched.elapsed() < SIWC_DISCOVERY_TTL
+        {
+            return Ok(document.clone());
+        }
+    }
+    let response = client
+        .get(SIWC_DISCOVERY_URL)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .context("获取 OpenAI 发现文档失败")?;
+    if !response.status().is_success() {
+        bail!("获取 OpenAI 发现文档返回 {}", response.status());
+    }
+    let body =
+        crate::http_response::read_bounded_body(response, 128 * 1024, "OpenAI 发现文档").await?;
+    let document: Value = serde_json::from_slice(&body).context("OpenAI 发现文档格式无效")?;
+    *SIWC_DISCOVERY_CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((Instant::now(), document.clone()));
+    Ok(document)
+}
+
+fn decode_jwt_segment(segment: &str) -> Result<Value> {
+    let bytes = URL_SAFE_NO_PAD
+        .decode(segment)
+        .or_else(|_| URL_SAFE.decode(segment))
+        .context("JWT 分段编码无效")?;
+    serde_json::from_slice(&bytes).context("JWT 分段格式无效")
+}
+
+/// 验签 OpenAI 签发的 id_token：RS256 签名（发现文档 JWKS）、issuer、
+/// audience、过期与 nonce。返回验签后的账号身份。
+async fn verify_siwc_id_token(
+    client: &reqwest::Client,
+    id_token: &str,
+    expected_audience: &str,
+    expected_nonce: &str,
+) -> Result<SiwcIdentity> {
+    let mut parts = id_token.split('.');
+    let (header, payload, signature) =
+        match (parts.next(), parts.next(), parts.next(), parts.next()) {
+            (Some(header), Some(payload), Some(signature), None)
+                if !header.is_empty() && !payload.is_empty() && !signature.is_empty() =>
+            {
+                (header, payload, signature)
+            }
+            _ => bail!("id_token 不是合法的 JWT"),
+        };
+    let header_json = decode_jwt_segment(header)?;
+    if header_json.get("alg").and_then(Value::as_str) != Some("RS256") {
+        bail!("id_token 签名算法不是预期的 RS256");
+    }
+    let kid = header_json
+        .get("kid")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("id_token 缺少签名 kid")?;
+    let signature_bytes = URL_SAFE_NO_PAD
+        .decode(signature)
+        .or_else(|_| URL_SAFE.decode(signature))
+        .context("id_token 签名编码无效")?;
+    let claims = decode_jwt_segment(payload)?;
+    let signing_input = format!("{header}.{payload}");
+
+    let mut verified = verify_siwc_signature(client, kid, &signing_input, &signature_bytes).await?;
+    if !verified {
+        // kid 或缓存的 JWKS 可能已轮换，清掉缓存再试一次。
+        *SIWC_DISCOVERY_CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+        verified = verify_siwc_signature(client, kid, &signing_input, &signature_bytes).await?;
+    }
+    if !verified {
+        bail!("id_token 签名验证失败");
+    }
+
+    let discovery = siwc_discovery(client).await?;
+    let issuer = discovery
+        .get("issuer")
+        .and_then(Value::as_str)
+        .unwrap_or(SIWC_ISSUER);
+    if claims.get("iss").and_then(Value::as_str) != Some(issuer) {
+        bail!("id_token 的签发方不是预期的 OpenAI 授权服务");
+    }
+    let audience_matches = match claims.get("aud") {
+        Some(Value::String(audience)) => audience == expected_audience,
+        Some(Value::Array(audiences)) => audiences
+            .iter()
+            .any(|audience| audience.as_str() == Some(expected_audience)),
+        _ => false,
+    };
+    if !audience_matches {
+        bail!("id_token 的 audience 与本次授权的 client_id 不一致");
+    }
+    let now = unix_timestamp();
+    let expires = claims
+        .get("exp")
+        .and_then(Value::as_u64)
+        .context("id_token 缺少过期时间")?;
+    if expires.saturating_add(60) <= now {
+        bail!("id_token 已过期");
+    }
+    if claims.get("nonce").and_then(Value::as_str) != Some(expected_nonce) {
+        bail!("id_token 的 nonce 与本次授权不一致");
+    }
+    let sub = claims
+        .get("sub")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .context("id_token 缺少账号身份标识")?
+        .to_string();
+    let email = claims
+        .get("email")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+    Ok(SiwcIdentity { sub, email })
+}
+
+/// 用发现文档里的 JWKS 验证 RS256 签名；找不到匹配 kid 返回 Ok(false)。
+async fn verify_siwc_signature(
+    client: &reqwest::Client,
+    kid: &str,
+    signing_input: &str,
+    signature: &[u8],
+) -> Result<bool> {
+    let discovery = siwc_discovery(client).await?;
+    let jwks_uri = discovery
+        .get("jwks_uri")
+        .and_then(Value::as_str)
+        .context("OpenAI 发现文档缺少 jwks_uri")?;
+    let response = client
+        .get(jwks_uri)
+        .timeout(Duration::from_secs(10))
+        .send()
+        .await
+        .context("获取 OpenAI 签名公钥失败")?;
+    if !response.status().is_success() {
+        bail!("获取 OpenAI 签名公钥返回 {}", response.status());
+    }
+    let body =
+        crate::http_response::read_bounded_body(response, 128 * 1024, "OpenAI 签名公钥").await?;
+    let jwks: Value = serde_json::from_slice(&body).context("OpenAI 签名公钥格式无效")?;
+    let keys = jwks
+        .get("keys")
+        .and_then(Value::as_array)
+        .context("OpenAI 签名公钥列表缺失")?;
+    for key in keys {
+        if key.get("kid").and_then(Value::as_str) != Some(kid)
+            || key.get("kty").and_then(Value::as_str) != Some("RSA")
+        {
+            continue;
+        }
+        let (Some(n), Some(e)) = (
+            key.get("n").and_then(Value::as_str),
+            key.get("e").and_then(Value::as_str),
+        ) else {
+            continue;
+        };
+        let (Ok(n), Ok(e)) = (
+            URL_SAFE_NO_PAD.decode(n).or_else(|_| URL_SAFE.decode(n)),
+            URL_SAFE_NO_PAD.decode(e).or_else(|_| URL_SAFE.decode(e)),
+        ) else {
+            continue;
+        };
+        let components = ring::signature::RsaPublicKeyComponents { n: &n, e: &e };
+        if components
+            .verify(
+                &ring::signature::RSA_PKCS1_2048_8192_SHA256,
+                signing_input.as_bytes(),
+                signature,
+            )
+            .is_ok()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn plugin_email_binding_is_unique_and_never_uses_default() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let first = OfficialAccountRecord::from_auth(
+            chatgpt_auth("a", "User@Example.com", "2026-09-28T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&first).unwrap();
+        store.set_default_account_id(Some(&first.id)).unwrap();
+        assert_eq!(store.by_email("  USER@example.COM ").unwrap().id, first.id);
+        assert!(store.by_email("missing@example.com").is_err());
+        assert!(store.by_email("").is_err());
+        let duplicate = OfficialAccountRecord::from_auth(
+            chatgpt_auth("b", "user@example.com", "2026-09-28T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&duplicate).unwrap();
+        assert!(
+            store
+                .by_email("user@example.com")
+                .unwrap_err()
+                .to_string()
+                .contains("多个")
+        );
+        store.remove(&duplicate.id).unwrap();
+        let mut invalid = first.clone();
+        invalid.mark_invalid("expired");
+        store.upsert(&invalid).unwrap();
+        assert!(
+            store
+                .by_email("user@example.com")
+                .unwrap_err()
+                .to_string()
+                .contains("失效")
+        );
+    }
+
+    use super::*;
+    use tempfile::TempDir;
+
+    #[test]
+    fn plugin_credentials_recheck_identity_uniqueness_and_token_expiry() {
+        let directory = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(directory.path());
+        let mut original = OfficialAccountRecord::from_auth(
+            chatgpt_auth("a", "user@example.com", "2026-09-28T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        original.auth["tokens"]["access_token"] =
+            json!(unsigned_jwt(json!({"exp": unix_timestamp()+3600})));
+        store.upsert(&original).unwrap();
+        store.set_default_account_id(Some(&original.id)).unwrap();
+        let credentials = store
+            .plugin_credentials(" USER@EXAMPLE.COM ", &original)
+            .unwrap();
+        assert_eq!(credentials.upstream_account_id, "a");
+        for token in [
+            unsigned_jwt(json!({"exp": unix_timestamp().saturating_sub(1)})),
+            unsigned_jwt(json!({"exp": unix_timestamp()+1})),
+            "opaque-private-token".into(),
+        ] {
+            let mut expired = original.clone();
+            expired.auth["tokens"]["access_token"] = json!(token);
+            store.upsert(&expired).unwrap();
+            let error = store
+                .plugin_credentials("user@example.com", &original)
+                .err()
+                .unwrap()
+                .to_string();
+            assert!(error.contains("有效期"));
+            assert!(!error.contains(&token));
+        }
+        store.upsert(&original).unwrap();
+        let mut duplicate = original.clone();
+        duplicate.id = "duplicate".into();
+        duplicate.account_id = Some("b".into());
+        store.upsert(&duplicate).unwrap();
+        assert!(
+            store
+                .plugin_credentials("user@example.com", &original)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("多个")
+        );
+        store.remove(&original.id).unwrap();
+        assert!(
+            store
+                .plugin_credentials("user@example.com", &original)
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("身份")
+        );
+        store.remove(&duplicate.id).unwrap();
+        assert!(
+            store
+                .plugin_credentials("user@example.com", &original)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn credential_commits_preserve_route_edits_and_do_not_recreate_removed_accounts() {
+        let directory = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(directory.path());
+        let original = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&original).unwrap();
+        let mut refreshed = original.clone();
+        apply_token_response(&mut refreshed, &json!({"access_token":"refreshed"})).unwrap();
+        store
+            .update_route_settings(
+                &original.id,
+                Some("new route".into()),
+                None,
+                Some("http://127.0.0.1:1234".into()),
+                Some("https://gateway.example/backend-api/codex".into()),
+            )
+            .unwrap();
+        let committed = store
+            .update_credentials_if_current(&original, &refreshed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.route_name.as_deref(), Some("new route"));
+        assert_eq!(
+            committed.upstream_proxy.as_deref(),
+            Some("http://127.0.0.1:1234")
+        );
+        assert_eq!(
+            committed.base_url.as_deref(),
+            Some("https://gateway.example/backend-api/codex")
+        );
+        assert_eq!(committed.auth, refreshed.auth);
+        store.remove(&original.id).unwrap();
+        assert!(
+            store
+                .update_credentials_if_current(&original, &refreshed)
+                .unwrap()
+                .is_none()
+        );
+        assert!(store.get(&original.id).unwrap().is_none());
+    }
+
+    #[test]
+    fn old_refresh_and_rejection_cannot_replace_new_login_credentials() {
+        let directory = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(directory.path());
+        let original = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&original).unwrap();
+        let mut new_login = original.clone();
+        apply_token_response(&mut new_login, &json!({"access_token":"new-login"})).unwrap();
+        store.upsert(&new_login).unwrap();
+        let mut stale = original.clone();
+        stale.mark_invalid("expired");
+        let actual = store
+            .update_credentials_if_current(&original, &stale)
+            .unwrap()
+            .unwrap();
+        assert_eq!(actual.auth, new_login.auth);
+        assert!(!actual.invalid());
+    }
+
+    #[tokio::test]
+    async fn invalid_account_does_not_attempt_token_refresh() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        record.mark_invalid("revoked");
+        let original = record.auth.clone();
+        let refreshed = refresh_if_stale(&client, &mut record, Some("invalid proxy URL"))
+            .await
+            .unwrap();
+        assert!(!refreshed);
+        assert!(record.invalid());
+        assert_eq!(record.auth, original);
+    }
+
+    #[tokio::test]
+    async fn token_refresh_uses_account_proxy_without_falling_back_to_direct() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = vec![0; 4096];
+            let count = stream.read(&mut bytes).await.unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+            String::from_utf8_lossy(&bytes[..count]).to_string()
+        });
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        let original = record.auth.clone();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            refresh_if_stale(&client, &mut record, Some(&format!("http://{address}"))),
+        )
+        .await
+        .unwrap();
+        assert!(result.is_err());
+        let request = tokio::time::timeout(Duration::from_secs(5), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(request.starts_with("CONNECT auth.openai.com:443 "));
+        assert_eq!(record.auth, original);
+    }
+
+    #[test]
+    fn official_proxy_clients_are_reused_for_the_same_proxy() {
+        let cache = Mutex::new(HashMap::new());
+        let default_client = reqwest::Client::builder().no_proxy().build().unwrap();
+        official_http_client(&default_client, Some(&cache), Some("http://127.0.0.1:9")).unwrap();
+        official_http_client(&default_client, Some(&cache), Some("http://127.0.0.1:9")).unwrap();
+        official_http_client(&default_client, Some(&cache), Some("http://127.0.0.1:10")).unwrap();
+        assert!(
+            official_http_client(&default_client, Some(&cache), Some("not a proxy url")).is_err()
+        );
+        let cached = cache.lock().unwrap();
+        assert_eq!(cached.len(), 2);
+        assert!(cached.contains_key("http://127.0.0.1:9"));
+        assert!(cached.contains_key("http://127.0.0.1:10"));
+    }
+
+    fn unsigned_jwt(payload: Value) -> String {
+        let header = URL_SAFE_NO_PAD.encode(br#"{"alg":"none"}"#);
+        let body = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        format!("{header}.{body}.sig")
+    }
+
+    fn chatgpt_auth(account_id: &str, email: &str, refreshed: &str) -> Value {
+        json!({
+            "OPENAI_API_KEY": null,
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "id_token": unsigned_jwt(json!({
+                    "email": email,
+                    "https://api.openai.com/auth": {
+                        "chatgpt_account_id": account_id,
+                        "chatgpt_plan_type": "plus",
+                    }
+                })),
+                "access_token": format!("access-{account_id}"),
+                "refresh_token": format!("refresh-{account_id}"),
+            },
+            "last_refresh": refreshed,
+        })
+    }
+
+    #[test]
+    fn record_derives_identity_from_id_token() {
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(record.id, "acct_1");
+        assert_eq!(record.account_id.as_deref(), Some("acct_1"));
+        assert_eq!(record.email.as_deref(), Some("a@example.com"));
+        assert_eq!(record.plan_type.as_deref(), Some("plus"));
+        assert_eq!(
+            record.auth["tokens"]["account_id"],
+            json!("acct_1"),
+            "account_id is persisted for Codex"
+        );
+        let summary = record.summary(Some("acct_1"));
+        assert!(summary.is_default);
+        assert!(
+            serde_json::to_string(&summary)
+                .unwrap()
+                .contains("a@example.com")
+        );
+        assert!(!serde_json::to_string(&summary).unwrap().contains("access-"));
+    }
+
+    #[test]
+    fn record_rejects_api_key_logins() {
+        let error = OfficialAccountRecord::from_auth(
+            json!({ "auth_mode": "apikey", "OPENAI_API_KEY": "sk", "tokens": null }),
+            1,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("tokens"));
+        let error = OfficialAccountRecord::from_auth(
+            json!({ "auth_mode": "apikey", "tokens": { "access_token": "x" } }),
+            1,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("ChatGPT"));
+    }
+
+    #[test]
+    fn store_lists_upserts_and_tracks_default() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        assert!(store.list().unwrap().is_empty());
+        assert_eq!(store.default_account_id().unwrap(), None);
+
+        let first = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        let second = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_2", "b@example.com", "2026-01-01T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&first).unwrap();
+        store.upsert(&second).unwrap();
+        store.set_default_account_id(Some("acct_2")).unwrap();
+        let summaries = store.summaries().unwrap();
+        assert_eq!(summaries.len(), 2);
+        assert!(!summaries[0].is_default);
+        assert!(summaries[1].is_default);
+
+        store.remove("acct_2").unwrap();
+        assert_eq!(store.default_account_id().unwrap(), None);
+        assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn get_reads_only_the_requested_account_file() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        fs::write(store.account_path("acct_2"), "{not-json").unwrap();
+        fs::write(
+            store.account_path("acct_3"),
+            serde_json::to_vec(&json!({
+                "id": "someone-else",
+                "addedAt": 1,
+                "auth": { "auth_mode": "chatgpt", "tokens": { "access_token": "x" } }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let loaded = store.get("acct_1").unwrap().unwrap();
+        assert_eq!(loaded.id, "acct_1");
+        assert!(store.get("acct_2").unwrap().is_none());
+        assert!(store.get("acct_3").unwrap().is_none());
+        assert!(store.get("missing").unwrap().is_none());
+    }
+
+    #[test]
+    fn route_settings_outlive_credential_updates_and_can_be_cleared() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store
+            .update_route_settings(
+                "acct_1",
+                Some("  主力官方号  ".into()),
+                Some("主".into()),
+                // A blank value means "no override", not an empty proxy.
+                Some("   ".into()),
+                Some("  https://gateway.example/v1/  ".into()),
+            )
+            .unwrap();
+        let saved = store.get("acct_1").unwrap().unwrap();
+        assert_eq!(saved.route_name.as_deref(), Some("主力官方号"));
+        assert_eq!(saved.route_short_name.as_deref(), Some("主"));
+        assert_eq!(saved.upstream_proxy, None);
+        assert_eq!(
+            saved.base_url.as_deref(),
+            Some("https://gateway.example/v1/")
+        );
+
+        // Re-logging in rebuilds the record from `auth.json`, which carries
+        // credentials only; the saved route must stay.
+        let relogin = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-02-01T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&relogin).unwrap();
+        let summary = store
+            .summaries()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.id == "acct_1")
+            .unwrap();
+        assert_eq!(summary.route_name.as_deref(), Some("主力官方号"));
+        assert_eq!(summary.route_short_name.as_deref(), Some("主"));
+        assert_eq!(
+            summary.base_url.as_deref(),
+            Some("https://gateway.example/v1/")
+        );
+
+        store
+            .update_route_settings("acct_1", None, None, None, None)
+            .unwrap();
+        let cleared = store.get("acct_1").unwrap().unwrap();
+        assert_eq!(cleared.route_name, None);
+        assert_eq!(cleared.route_short_name, None);
+        assert_eq!(cleared.base_url, None);
+
+        let error = store
+            .update_route_settings("acct_missing", None, None, None, None)
+            .unwrap_err();
+        assert!(error.to_string().contains("acct_missing"));
+    }
+
+    #[test]
+    fn generated_route_settings_number_accounts_and_keep_custom_names() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        for (index, id) in ["acct_1", "acct_2", "acct_3"].into_iter().enumerate() {
+            let record = OfficialAccountRecord::from_auth(
+                chatgpt_auth(id, &format!("{id}@example.com"), "2026-01-01T00:00:00Z"),
+                index as u64 + 1,
+            )
+            .unwrap();
+            store.upsert(&record).unwrap();
+        }
+
+        store.ensure_generated_route_settings().unwrap();
+        let generated = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|record| {
+                (
+                    record.id,
+                    record.route_name.unwrap_or_default(),
+                    record.route_short_name.unwrap_or_default(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            generated,
+            vec![
+                (
+                    "acct_1".to_string(),
+                    "官方账号1".to_string(),
+                    "官方".to_string()
+                ),
+                (
+                    "acct_2".to_string(),
+                    "官方账号2".to_string(),
+                    "官1".to_string()
+                ),
+                (
+                    "acct_3".to_string(),
+                    "官方账号3".to_string(),
+                    "官2".to_string()
+                ),
+            ]
+        );
+
+        // 重复执行不会改写已经生成的名称，手动设置的名称也不会被覆盖。
+        store.ensure_generated_route_settings().unwrap();
+        store
+            .update_route_settings(
+                "acct_2",
+                Some("主力官方号".into()),
+                Some("主".into()),
+                None,
+                None,
+            )
+            .unwrap();
+        store.ensure_generated_route_settings().unwrap();
+        let custom = store.get("acct_2").unwrap().unwrap();
+        assert_eq!(custom.route_name.as_deref(), Some("主力官方号"));
+        assert_eq!(custom.route_short_name.as_deref(), Some("主"));
+
+        store
+            .update_route_settings("acct_2", Some("Plus".into()), None, None, None)
+            .unwrap();
+        store.ensure_generated_route_settings().unwrap();
+        let cleared = store.get("acct_2").unwrap().unwrap();
+        assert_eq!(cleared.route_name.as_deref(), Some("Plus"));
+        assert_eq!(cleared.route_short_name.as_deref(), Some("Pl"));
+
+        // 移除账号 1 后新增的账号取当前最小编号，不会和账号 3 的「官方账号3」重复。
+        store.remove("acct_1").unwrap();
+        let added_later = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_4", "acct_4@example.com", "2026-01-01T00:00:00Z"),
+            4,
+        )
+        .unwrap();
+        store.upsert(&added_later).unwrap();
+        store.ensure_generated_route_settings().unwrap();
+        let renumbered = store.get("acct_4").unwrap().unwrap();
+        assert_eq!(renumbered.route_name.as_deref(), Some("官方账号1"));
+        assert_eq!(renumbered.route_short_name.as_deref(), Some("官方"));
+        let untouched = store.get("acct_3").unwrap().unwrap();
+        assert_eq!(untouched.route_name.as_deref(), Some("官方账号3"));
+        assert_eq!(untouched.route_short_name.as_deref(), Some("官2"));
+
+        store
+            .update_route_settings("acct_3", Some("官方账号7".into()), None, None, None)
+            .unwrap();
+        store.ensure_generated_route_settings().unwrap();
+        let paired = store.get("acct_3").unwrap().unwrap();
+        assert_eq!(paired.route_name.as_deref(), Some("官方账号7"));
+        assert_eq!(paired.route_short_name.as_deref(), Some("官1"));
+    }
+
+    #[test]
+    fn generated_route_settings_keep_unique_short_names_after_the_ninth_account() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        for index in 1..=11u64 {
+            let id = format!("acct_{index}");
+            let record = OfficialAccountRecord::from_auth(
+                chatgpt_auth(&id, &format!("{id}@example.com"), "2026-01-01T00:00:00Z"),
+                index,
+            )
+            .unwrap();
+            store.upsert(&record).unwrap();
+        }
+
+        store.ensure_generated_route_settings().unwrap();
+        let short_names = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .map(|record| record.route_short_name.unwrap())
+            .collect::<BTreeSet<_>>();
+        assert_eq!(short_names.len(), 11);
+        assert!(
+            short_names
+                .iter()
+                .all(|name| !name.is_empty() && name.chars().count() <= 4)
+        );
+
+        store.ensure_generated_route_settings().unwrap();
+        let names = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter_map(|record| record.route_name)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(names.len(), 11);
+    }
+
+    #[test]
+    fn launch_resolution_writes_default_into_codex_home() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store.set_default_account_id(Some("acct_1")).unwrap();
+        fs::write(
+            home.path().join("auth.json"),
+            br#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk"}"#,
+        )
+        .unwrap();
+
+        let resolution = store.resolve_launch_login(home.path()).unwrap();
+        assert_eq!(
+            resolution,
+            LaunchLoginResolution::Available {
+                account_id: "acct_1".into()
+            }
+        );
+        let written: Value =
+            serde_json::from_slice(&fs::read(home.path().join("auth.json")).unwrap()).unwrap();
+        assert_eq!(written, record.auth);
+    }
+
+    #[test]
+    fn launch_resolution_preserves_current_credentials_without_comparable_refresh_times() {
+        for (saved_refresh, current_refresh) in [
+            (Some("2026-01-01T00:00:00Z"), None),
+            (Some("2026-01-01T00:00:00Z"), Some("invalid")),
+            (None, None),
+            (Some("invalid"), Some("2026-01-01T00:00:00Z")),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let home = TempDir::new().unwrap();
+            let store = OfficialAccountStore::new(dir.path());
+            let mut saved_auth = chatgpt_auth("acct_1", "a@example.com", "unused");
+            saved_auth["last_refresh"] = json!(saved_refresh);
+            let mut saved = OfficialAccountRecord::from_auth(saved_auth, 1).unwrap();
+            saved.route_name = Some("saved route".into());
+            saved.mark_invalid("old credentials rejected");
+            store.upsert(&saved).unwrap();
+            store.set_default_account_id(Some(&saved.id)).unwrap();
+            let mut current = saved.auth.clone();
+            current["tokens"]["access_token"] = json!("new-login-access");
+            current["tokens"]["refresh_token"] = json!("new-login-refresh");
+            if let Some(refresh) = current_refresh {
+                current["last_refresh"] = json!(refresh);
+            } else {
+                current.as_object_mut().unwrap().remove("last_refresh");
+            }
+            fs::write(
+                home.path().join("auth.json"),
+                serde_json::to_vec(&current).unwrap(),
+            )
+            .unwrap();
+
+            for _ in 0..2 {
+                assert_eq!(
+                    store.resolve_launch_login(home.path()).unwrap(),
+                    LaunchLoginResolution::Available {
+                        account_id: saved.id.clone()
+                    }
+                );
+                let stored = store.default_account().unwrap().unwrap();
+                assert_eq!(stored.auth, current);
+                assert!(!stored.invalid());
+                assert_eq!(stored.route_name, saved.route_name);
+                assert_eq!(
+                    OfficialAccountStore::read_codex_login(home.path())
+                        .unwrap()
+                        .unwrap()
+                        .auth,
+                    current
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn launch_resolution_compares_refresh_times_as_instants() {
+        for (current_refresh, use_current) in [
+            ("2026-01-01T08:00:00+08:00", false),
+            ("2025-12-31T23:00:00-03:00", true),
+            ("2026-01-01T09:00:00+08:00", true),
+        ] {
+            let dir = TempDir::new().unwrap();
+            let home = TempDir::new().unwrap();
+            let store = OfficialAccountStore::new(dir.path());
+            let saved = OfficialAccountRecord::from_auth(
+                chatgpt_auth("acct_1", "a@example.com", "2026-01-01T01:00:00Z"),
+                1,
+            )
+            .unwrap();
+            store.upsert(&saved).unwrap();
+            store.set_default_account_id(Some(&saved.id)).unwrap();
+            let mut current = saved.auth.clone();
+            current["last_refresh"] = json!(current_refresh);
+            current["tokens"]["access_token"] = json!("current-access");
+            fs::write(
+                home.path().join("auth.json"),
+                serde_json::to_vec(&current).unwrap(),
+            )
+            .unwrap();
+
+            store.resolve_launch_login(home.path()).unwrap();
+            let expected = if use_current { current } else { saved.auth };
+            assert_eq!(store.default_account().unwrap().unwrap().auth, expected);
+            assert_eq!(
+                OfficialAccountStore::read_codex_login(home.path())
+                    .unwrap()
+                    .unwrap()
+                    .auth,
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn launch_resolution_restores_missing_auth_but_preserves_unreadable_auth() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let saved = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&saved).unwrap();
+        store.set_default_account_id(Some(&saved.id)).unwrap();
+        store.resolve_launch_login(home.path()).unwrap();
+        let path = home.path().join("auth.json");
+        let restored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(restored, saved.auth);
+
+        fs::write(&path, b"{unfinished").unwrap();
+        let error = store.resolve_launch_login(home.path()).unwrap_err();
+        assert!(error.to_string().contains("Codex 登录信息格式无效"));
+        assert_eq!(fs::read(&path).unwrap(), b"{unfinished");
+
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let error = store.resolve_launch_login(home.path()).unwrap_err();
+        assert!(error.to_string().contains("读取 Codex 登录信息失败"));
+        assert!(path.is_dir());
+        assert_eq!(store.default_account().unwrap().unwrap().auth, saved.auth);
+    }
+
+    #[test]
+    fn launch_resolution_adopts_existing_codex_login_once() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec(&chatgpt_auth(
+                "acct_9",
+                "z@example.com",
+                "2026-01-01T00:00:00Z",
+            ))
+            .unwrap(),
+        )
+        .unwrap();
+        let resolution = store.resolve_launch_login(home.path()).unwrap();
+        assert_eq!(
+            resolution,
+            LaunchLoginResolution::Available {
+                account_id: "acct_9".into()
+            }
+        );
+        assert_eq!(
+            store.default_account_id().unwrap().as_deref(),
+            Some("acct_9")
+        );
+
+        // Removing the account must not re-adopt while other accounts exist.
+        let other = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_2", "b@example.com", "2026-01-01T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&other).unwrap();
+        store.remove("acct_9").unwrap();
+        let resolution = store.resolve_launch_login(home.path()).unwrap();
+        assert!(matches!(
+            resolution,
+            LaunchLoginResolution::Unavailable { .. }
+        ));
+    }
+
+    #[test]
+    fn launch_resolution_without_accounts_or_login_is_unavailable() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        fs::write(
+            home.path().join("auth.json"),
+            br#"{"auth_mode":"apikey","OPENAI_API_KEY":"sk"}"#,
+        )
+        .unwrap();
+        let resolution = store.resolve_launch_login(home.path()).unwrap();
+        assert!(matches!(
+            resolution,
+            LaunchLoginResolution::Unavailable { .. }
+        ));
+        assert!(store.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn codex_refreshed_tokens_flow_back_into_the_store() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store.set_default_account_id(Some("acct_1")).unwrap();
+        let mut refreshed = chatgpt_auth("acct_1", "a@example.com", "2026-02-01T00:00:00Z");
+        refreshed["tokens"]["access_token"] = json!("access-new");
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec(&refreshed).unwrap(),
+        )
+        .unwrap();
+
+        store.sync_default_from_codex_home(home.path()).unwrap();
+        let stored = store.get("acct_1").unwrap().unwrap();
+        assert_eq!(stored.auth["tokens"]["access_token"], json!("access-new"));
+
+        // A different account in the Codex home is left alone.
+        let foreign = chatgpt_auth("acct_7", "q@example.com", "2026-03-01T00:00:00Z");
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec(&foreign).unwrap(),
+        )
+        .unwrap();
+        store.sync_default_from_codex_home(home.path()).unwrap();
+        let stored = store.get("acct_1").unwrap().unwrap();
+        assert_eq!(stored.auth["tokens"]["access_token"], json!("access-new"));
+    }
+
+    #[test]
+    fn token_refresh_updates_the_recorded_plan() {
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_plan", "plan@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(record.plan_type.as_deref(), Some("plus"));
+        // 刷新回来的令牌写的是当前套餐：降级后账号记录不能停在 plus。
+        let downgraded = unsigned_jwt(json!({
+            "email": "plan@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_plan",
+                "chatgpt_plan_type": "free",
+            }
+        }));
+        apply_token_response(
+            &mut record,
+            &json!({"access_token": "access-acct_plan-refreshed", "id_token": downgraded}),
+        )
+        .unwrap();
+        assert_eq!(record.plan_type.as_deref(), Some("free"));
+    }
+
+    #[test]
+    fn usage_plan_write_back_only_touches_the_plan() {
+        let directory = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(directory.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_live", "live@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+
+        assert!(store.update_plan_type(&record.id, Some("Pro")).unwrap());
+        // 大小写不同是同一套餐，不重复落盘。
+        assert!(!store.update_plan_type(&record.id, Some("pro")).unwrap());
+        // 空值表示这次没有解析出套餐，保留已有结果。
+        assert!(!store.update_plan_type(&record.id, Some("  ")).unwrap());
+        assert!(
+            !store
+                .update_plan_type("acct_missing", Some("free"))
+                .unwrap()
+        );
+
+        let stored = store.get(&record.id).unwrap().unwrap();
+        assert_eq!(stored.plan_type.as_deref(), Some("Pro"));
+        assert_eq!(stored.auth, record.auth, "凭据不受套餐回写影响");
+    }
+
+    #[test]
+    fn stale_credential_update_does_not_restore_an_old_plan() {
+        let directory = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(directory.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_race", "race@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        // 额度接口先写入了当前套餐。
+        assert!(store.update_plan_type(&record.id, Some("free")).unwrap());
+        // 随后到达的令牌刷新用的是刷新前的快照，套餐还是 plus。
+        let mut refreshed = record.clone();
+        apply_token_response(&mut refreshed, &json!({"access_token": "access-race-new"})).unwrap();
+        assert_eq!(refreshed.plan_type.as_deref(), Some("plus"));
+        let committed = store
+            .update_credentials_if_current(&record, &refreshed)
+            .unwrap()
+            .unwrap();
+        assert_eq!(committed.auth, refreshed.auth);
+        assert_eq!(committed.plan_type.as_deref(), Some("free"));
+    }
+
+    #[test]
+    fn codex_refresh_adopts_the_current_plan() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_sync", "sync@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store.set_default_account_id(Some("acct_sync")).unwrap();
+        // Codex 自己重登之后账号已经换成免费套餐。
+        let mut downgraded = chatgpt_auth("acct_sync", "sync@example.com", "2026-02-01T00:00:00Z");
+        downgraded["tokens"]["access_token"] = json!("access-synced");
+        downgraded["tokens"]["id_token"] = json!(unsigned_jwt(json!({
+            "email": "sync@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_sync",
+                "chatgpt_plan_type": "free",
+            }
+        })));
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec(&downgraded).unwrap(),
+        )
+        .unwrap();
+
+        store.sync_default_from_codex_home(home.path()).unwrap();
+        let stored = store.get("acct_sync").unwrap().unwrap();
+        assert_eq!(stored.plan_type.as_deref(), Some("free"));
+        assert_eq!(stored.summary(None).plan_type.as_deref(), Some("free"));
+    }
+
+    #[tokio::test]
+    async fn callback_listener_rejects_occupied_port() {
+        let occupied = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = occupied.local_addr().unwrap().port();
+        let error = bind_callback_listener(port).await.unwrap_err();
+        assert!(error.to_string().contains("已被占用"));
+        assert!(error.to_string().contains("固定回调地址"));
+        assert!(error.to_string().contains(&format!("127.0.0.1:{port}")));
+    }
+
+    #[test]
+    fn authorize_url_and_callback_parsing_follow_codex_conventions() {
+        let pkce = pkce_pair();
+        assert!(pkce.verifier.len() >= 43 && pkce.verifier.len() <= 128);
+        let url = build_authorize_url("state123", &pkce.challenge);
+        assert!(url.starts_with(OAUTH_AUTHORIZE_URL));
+        assert!(url.contains("client_id=app_EMoamEEZ73f0CkXaXp7hrann"));
+        assert!(url.contains("code_challenge_method=S256"));
+        assert!(url.contains("redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback"));
+        assert!(url.contains("state=state123"));
+
+        let target = request_target(
+            "GET /auth/callback?code=abc&state=state123 HTTP/1.1\r\nHost: x\r\n\r\n",
+        )
+        .unwrap();
+        let params = query_params(target.strip_prefix("/auth/callback?").unwrap());
+        assert_eq!(params.get("code").unwrap(), "abc");
+        assert_eq!(params.get("state").unwrap(), "state123");
+        assert!(request_target("POST /auth/callback HTTP/1.1").is_none());
+    }
+
+    #[test]
+    fn token_response_becomes_a_chatgpt_auth_document() {
+        let payload = json!({
+            "id_token": unsigned_jwt(json!({
+                "email": "c@example.com",
+                "https://api.openai.com/auth": { "chatgpt_account_id": "acct_c", "chatgpt_plan_type": "pro" }
+            })),
+            "access_token": "access-c",
+            "refresh_token": "refresh-c",
+        });
+        let record = record_from_token_response(&payload).unwrap();
+        assert_eq!(record.id, "acct_c");
+        assert_eq!(record.auth["auth_mode"], json!("chatgpt"));
+        assert_eq!(record.auth["tokens"]["account_id"], json!("acct_c"));
+        assert!(record.auth["last_refresh"].as_str().is_some());
+        assert!(record.last_refresh_age(SystemTime::now()).unwrap() < Duration::from_secs(60));
+    }
+
+    fn manual_record(input: &str) -> OfficialAccountRecord {
+        match parse_manual_official_credential(input).unwrap() {
+            ManualOfficialCredential::Record(record) => *record,
+            ManualOfficialCredential::RefreshToken(_) => panic!("应直接保存登录文档"),
+        }
+    }
+
+    fn manual_refresh(input: &str) -> String {
+        match parse_manual_official_credential(input).unwrap() {
+            ManualOfficialCredential::RefreshToken(token) => token,
+            ManualOfficialCredential::Record(_) => panic!("应保留 Refresh Token 以便换票"),
+        }
+    }
+
+    fn manual_error(input: &str) -> String {
+        match parse_manual_official_credential(input) {
+            Err(error) => error.to_string(),
+            Ok(_) => panic!("应拒绝这份输入"),
+        }
+    }
+
+    #[test]
+    fn manual_input_keeps_oauth_json_and_exchanges_only_a_refresh_token() {
+        let mut auth = chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z");
+        auth["custom_flag"] = json!(true);
+        let stored = manual_record(&serde_json::to_string(&auth).unwrap());
+        assert_eq!(stored.id, "acct_1");
+        assert_eq!(stored.auth["custom_flag"], json!(true));
+        assert_eq!(
+            stored.auth["tokens"]["access_token"],
+            json!("access-acct_1")
+        );
+        assert_eq!(
+            stored.auth["tokens"]["refresh_token"],
+            json!("refresh-acct_1")
+        );
+        assert_eq!(stored.auth["last_refresh"], json!("2026-01-01T00:00:00Z"));
+
+        let token = "rt_abcdefghijklmnopqrstuvwxyz";
+        assert_eq!(manual_refresh(token), token);
+        assert_eq!(manual_refresh(&format!("Bearer\n{token}  ")), token);
+        assert_eq!(manual_refresh(&format!("\"{token}\"")), token);
+        assert_eq!(
+            manual_refresh(&json!({ "tokens": { "refreshToken": token } }).to_string()),
+            token
+        );
+        assert_eq!(
+            refresh_token_grant(token)["grant_type"],
+            json!("refresh_token")
+        );
+        assert_eq!(
+            refresh_token_grant(token)["client_id"],
+            json!(OAUTH_CLIENT_ID)
+        );
+    }
+
+    #[test]
+    fn manual_oauth_json_accepts_flat_token_and_wrapped_account_files() {
+        let live_exp = unix_timestamp() + 7_200;
+        let access = unsigned_jwt(json!({
+            "exp": live_exp,
+            "email": "flat@example.com",
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acct_flat",
+                "chatgpt_plan_type": "pro",
+            }
+        }));
+        let flat = manual_record(
+            &json!({
+                "access_token": access,
+                "refresh_token": "refresh-flat",
+                "id_token": access,
+                "account_id": "acct_flat",
+            })
+            .to_string(),
+        );
+        assert_eq!(flat.id, "acct_flat");
+        assert_eq!(flat.email.as_deref(), Some("flat@example.com"));
+        assert_eq!(flat.plan_type.as_deref(), Some("pro"));
+        assert_eq!(flat.auth["tokens"]["refresh_token"], json!("refresh-flat"));
+        assert!(flat.last_refresh().is_some());
+
+        let wrapped_access = unsigned_jwt(json!({ "exp": live_exp }));
+        let wrapped = format!(
+            "```json\n{}\n```",
+            json!({
+                "email": "wrap@example.com",
+                "accountId": "acct_wrap",
+                "planType": "team",
+                "auth": {
+                    "tokens": {
+                        "access_token": wrapped_access,
+                        "refresh_token": "refresh-wrap",
+                    }
+                }
+            })
+        );
+        let wrapped = manual_record(&wrapped);
+        assert_eq!(wrapped.id, "acct_wrap");
+        assert_eq!(wrapped.email.as_deref(), Some("wrap@example.com"));
+        assert_eq!(wrapped.plan_type.as_deref(), Some("team"));
+        assert_eq!(wrapped.auth["tokens"]["account_id"], json!("acct_wrap"));
+        assert_eq!(
+            wrapped.auth["tokens"]["refresh_token"],
+            json!("refresh-wrap")
+        );
+        assert!(wrapped.last_refresh().is_some());
+    }
+
+    #[test]
+    fn manual_input_rejects_secrets_that_are_not_refresh_tokens_without_echoing_them() {
+        let secret = "rt_super_secret_value_should_not_leak";
+        let broken = format!("{{\"refresh_token\":\"{secret}\"");
+        let message = manual_error(&broken);
+        assert!(message.contains("格式无效"));
+        assert!(!message.contains(secret));
+
+        let jwt = unsigned_jwt(json!({"sub": "user"}));
+        assert!(manual_error(&jwt).contains("Access Token"));
+        assert!(manual_error("sk-abcdefghijklmnopqrstuvwxyz").contains("API Key"));
+        assert!(manual_error("[]").contains("对象"));
+        assert!(manual_error("   ").contains("请粘贴"));
+        assert!(manual_error(&"x".repeat(MAX_MANUAL_CREDENTIAL_BYTES + 1)).contains("过长"));
+        let expired = unsigned_jwt(json!({
+            "exp": unix_timestamp().saturating_sub(30),
+            "https://api.openai.com/auth": { "chatgpt_account_id": "acct_old" }
+        }));
+        let expired = manual_record(
+            &json!({
+                "access_token": expired,
+                "refresh_token": "refresh-old",
+            })
+            .to_string(),
+        );
+        assert!(expired.last_refresh().is_none());
+        assert!(
+            manual_error(
+                &json!({
+                    "auth_mode": "apikey",
+                    "tokens": {
+                        "access_token": "x",
+                        "refresh_token": "refresh-value-long-enough",
+                    }
+                })
+                .to_string(),
+            )
+            .contains("ChatGPT")
+        );
+    }
+
+    #[test]
+    fn refresh_response_updates_tokens_and_timestamp() {
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        apply_token_response(
+            &mut record,
+            &json!({ "access_token": "access-2", "refresh_token": "refresh-2" }),
+        )
+        .unwrap();
+        assert_eq!(record.auth["tokens"]["access_token"], json!("access-2"));
+        assert_eq!(record.auth["tokens"]["refresh_token"], json!("refresh-2"));
+        assert_ne!(record.auth["last_refresh"], json!("2026-01-01T00:00:00Z"));
+    }
+
+    #[test]
+    fn only_invalid_grant_marks_the_account_invalid() {
+        let invalid = official_account_invalid_from_body(
+            br#"{"error":"invalid_grant","error_description":"refresh token revoked"}"#,
+        )
+        .expect("invalid_grant 表示刷新令牌已被撤销");
+        assert!(invalid.reason().contains("已撤销"));
+        assert_eq!(invalid.detail(), Some("refresh token revoked"));
+
+        // 请求错误、限流、服务端故障和网络错误都不代表账号失效。
+        for body in [
+            br#"{"error":"invalid_request","error_description":"missing scope"}"#.as_slice(),
+            br#"{"error":"temporarily_unavailable"}"#.as_slice(),
+            br#"{"status":500}"#.as_slice(),
+            b"<html>bad gateway</html>".as_slice(),
+        ] {
+            assert!(
+                official_account_invalid_from_body(body).is_none(),
+                "非 invalid_grant 响应不得标记账号失效：{}",
+                String::from_utf8_lossy(body)
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_state_round_trips_through_the_store_and_clears_on_refresh() {
+        let dir = TempDir::new().unwrap();
+        let home = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        assert!(!record.summary(None).invalid);
+
+        record.mark_invalid("官方已撤销该账号的登录凭据，需要重新添加账号");
+        store.upsert(&record).unwrap();
+        let summary = store.summaries().unwrap().remove(0);
+        assert!(summary.invalid);
+        assert_eq!(
+            summary.invalid_reason.as_deref(),
+            Some("官方已撤销该账号的登录凭据，需要重新添加账号")
+        );
+
+        // Codex 用同一个账号成功刷新后，失效标记随之清除。
+        let mut refreshed = chatgpt_auth("acct_1", "a@example.com", "2026-02-01T00:00:00Z");
+        refreshed["tokens"]["access_token"] = json!("access-new");
+        fs::write(
+            home.path().join("auth.json"),
+            serde_json::to_vec(&refreshed).unwrap(),
+        )
+        .unwrap();
+        store.set_default_account_id(Some("acct_1")).unwrap();
+        store.sync_default_from_codex_home(home.path()).unwrap();
+        let stored = store.get("acct_1").unwrap().unwrap();
+        assert!(!stored.invalid());
+        assert!(stored.invalid_since.is_none());
+    }
+
+    #[test]
+    fn live_access_token_check_excludes_expired_and_opaque_tokens() {
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        record.auth["tokens"]["access_token"] = json!("opaque-token");
+        assert!(!record.has_live_access_token());
+
+        record.auth["tokens"]["access_token"] = json!(unsigned_jwt(json!({
+            "exp": unix_timestamp() + 3600
+        })));
+        assert!(record.has_live_access_token());
+
+        record.auth["tokens"]["access_token"] = json!(unsigned_jwt(json!({
+            "exp": unix_timestamp().saturating_sub(3600)
+        })));
+        assert!(!record.has_live_access_token());
+    }
+
+    #[test]
+    fn only_the_default_account_reads_the_codex_home_credential() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let home = dir.path().join("codex-home");
+        for id in ["acct_1", "acct_2"] {
+            store
+                .upsert(
+                    &OfficialAccountRecord::from_auth(
+                        chatgpt_auth(id, "a@example.com", "2026-01-01T00:00:00Z"),
+                        1,
+                    )
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+        store.set_default_account_id(Some("acct_2")).unwrap();
+
+        assert_eq!(
+            store.credential_path(&home, "acct_2"),
+            home.join(CODEX_AUTH_FILE_NAME),
+            "Codex refreshes the default account copy in place"
+        );
+        assert_eq!(
+            store.credential_path(&home, "acct_1"),
+            store.account_path("acct_1"),
+            "idle accounts read the document Codey stored"
+        );
+    }
+
+    #[test]
+    fn stored_account_credentials_read_back_from_the_account_record() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let home = dir.path().join("codex-home");
+        let first = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        let second = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_2", "b@example.com", "2026-01-01T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&first).unwrap();
+        store.upsert(&second).unwrap();
+        store.set_default_account_id(Some("acct_1")).unwrap();
+
+        let auth =
+            crate::account_usage::read_official_auth(&store.credential_path(&home, "acct_2"))
+                .expect("非默认账号的线路与额度都从自己的账号记录读取凭据");
+        assert_eq!(auth.access_token, "access-acct_2");
+        assert_eq!(auth.account_id.as_deref(), Some("acct_2"));
+    }
+
+    #[test]
+    fn tokens_inside_the_expiry_margin_are_refreshed() {
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", &rfc3339_now()),
+            1,
+        )
+        .unwrap();
+        record.auth["tokens"]["access_token"] =
+            json!(unsigned_jwt(json!({ "exp": unix_timestamp() + 60 })));
+        assert!(
+            needs_token_refresh(&record),
+            "a token that lapses inside the margin is refreshed"
+        );
+
+        record.auth["tokens"]["access_token"] = json!(unsigned_jwt(
+            json!({ "exp": unix_timestamp() + 12 * 60 * 60 })
+        ));
+        assert!(
+            !needs_token_refresh(&record),
+            "a freshly stored long-lived token is left alone"
+        );
+    }
+
+    // ------------------------------------------------------------------
+    // SIWC（官方直连）
+    // ------------------------------------------------------------------
+
+    fn siwc_credential(client_id: &str, scopes: &[&str]) -> SiwcCredential {
+        SiwcCredential {
+            client_id: client_id.to_string(),
+            scopes: scopes.iter().map(ToString::to_string).collect(),
+            access_token: "siwc-access".to_string(),
+            refresh_token: format!("siwc-refresh-{client_id}"),
+            id_token: Some("siwc-id-token".to_string()),
+            expires_at: unix_timestamp() + 3600,
+            earliest_refresh_at: None,
+            saved_at: unix_timestamp(),
+            email: Some("a@example.com".to_string()),
+            sub: Some("sub-1".to_string()),
+            invalid_reason: None,
+            invalid_since: None,
+        }
+    }
+
+    #[test]
+    fn siwc_callback_client_id_rules() {
+        // 首次注册：回调必须带回签发的 client_id。
+        assert!(siwc_client_id_from_callback(None, None).is_err());
+        assert_eq!(
+            siwc_client_id_from_callback(None, Some(" oaiapp_abc ")).unwrap(),
+            "oaiapp_abc"
+        );
+        // 重授权：可省略，但带回时必须与已保存注册一致。
+        assert_eq!(
+            siwc_client_id_from_callback(Some("oaiapp_abc"), None).unwrap(),
+            "oaiapp_abc"
+        );
+        assert_eq!(
+            siwc_client_id_from_callback(Some("oaiapp_abc"), Some("oaiapp_abc")).unwrap(),
+            "oaiapp_abc"
+        );
+        assert!(siwc_client_id_from_callback(Some("oaiapp_abc"), Some("oaiapp_other")).is_err());
+    }
+
+    #[test]
+    fn siwc_plan_scope_controls_activation() {
+        let full = siwc_credential(
+            "oaiapp_1",
+            &[
+                "openid",
+                "profile",
+                "email",
+                "offline_access",
+                "resource.invoke",
+                "chatgpt.tokens.use.direct",
+            ],
+        );
+        assert!(full.plan_scope_granted());
+
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        record.siwc = Some(full);
+        assert!(record.siwc_active());
+        assert_eq!(record.summary(None).siwc_status, "active");
+
+        // 缺 scope：凭据保留但标记不可用，summary 落到 invalid。
+        record.siwc = Some(siwc_credential("oaiapp_1", &["openid", "profile", "email"]));
+        record
+            .siwc
+            .as_mut()
+            .unwrap()
+            .mark_invalid(SIWC_PLAN_SCOPE_MISSING_REASON, unix_timestamp());
+        assert!(!record.siwc_active());
+        let summary = record.summary(None);
+        assert_eq!(summary.siwc_status, "invalid");
+        assert_eq!(
+            summary.siwc_invalid_reason.as_deref(),
+            Some(SIWC_PLAN_SCOPE_MISSING_REASON)
+        );
+        // 确认凭据槽不存在时状态是 none。
+        record.siwc = None;
+        assert_eq!(record.summary(None).siwc_status, "none");
+    }
+
+    #[test]
+    fn siwc_attach_writes_materialized_file_and_rejects_cross_account_reuse() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let first = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        let second = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_2", "b@example.com", "2026-01-01T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&first).unwrap();
+        store.upsert(&second).unwrap();
+
+        let credential = siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]);
+        store.attach_siwc(&first.id, &credential).unwrap();
+        let materialized = read_siwc_credential_file(&store.siwc_path(&first.id))
+            .unwrap()
+            .expect("attach must write the router-facing credential file");
+        assert_eq!(materialized.client_id, "oaiapp_a");
+        assert_eq!(materialized.access_token, "siwc-access");
+
+        // 同一 ChatGPT 身份不能挂到第二个账号条目上。
+        let duplicate = siwc_credential("oaiapp_other", &[SIWC_PLAN_SCOPE]);
+        assert!(store.attach_siwc(&second.id, &duplicate).is_err());
+        let same_client = SiwcCredential {
+            sub: Some("sub-other".to_string()),
+            ..siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE])
+        };
+        assert!(store.attach_siwc(&second.id, &same_client).is_err());
+    }
+
+    #[test]
+    fn siwc_invalidation_stays_off_the_codex_plane() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+        store
+            .mark_siwc_invalid(&record.id, "官方直连授权已被撤销")
+            .unwrap();
+        let stored = store.get(&record.id).unwrap().unwrap();
+        // 直连失效不改变 Codex 凭据的有效性，账号本身不标红。
+        assert!(!stored.invalid());
+        assert!(stored.invalid_reason.is_none());
+        assert!(!stored.siwc_active());
+        // 物化文件携带失效原因，路由据此跳过注定失败的上游请求。
+        let file = read_siwc_credential_file(&store.siwc_path(&record.id))
+            .unwrap()
+            .unwrap();
+        assert!(file.invalid_reason.is_some());
+    }
+
+    #[test]
+    fn siwc_update_requires_current_refresh_token() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+
+        // 期望的 refresh token 与存储不符（另一个刷新已轮换）时不写回。
+        let stale_expected = SiwcCredential {
+            refresh_token: "rotated-away".to_string(),
+            ..siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE])
+        };
+        let rotated = SiwcCredential {
+            access_token: "rotated-access".to_string(),
+            ..siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE])
+        };
+        let current = store
+            .update_siwc_if_current(&record.id, Some(&stale_expected), &rotated)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.access_token, "siwc-access");
+
+        // 期望匹配时才轮换；写回后物化文件跟着新令牌走。
+        let expected = store.get(&record.id).unwrap().unwrap().siwc.unwrap();
+        let current = store
+            .update_siwc_if_current(&record.id, Some(&expected), &rotated)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.access_token, "rotated-access");
+        let file = read_siwc_credential_file(&store.siwc_path(&record.id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(file.access_token, "rotated-access");
+    }
+
+    #[test]
+    fn siwc_clear_keeps_codex_credentials_and_drops_the_file() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path());
+        let record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&record).unwrap();
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+        assert!(store.siwc_path(&record.id).exists());
+        store.clear_siwc(&record.id).unwrap();
+        assert!(!store.siwc_path(&record.id).exists());
+        let stored = store.get(&record.id).unwrap().unwrap();
+        assert!(stored.siwc.is_none());
+        // Codex 凭据不动。
+        assert_eq!(
+            stored.auth["tokens"]["access_token"].as_str(),
+            Some("access-acct_1")
+        );
+        // 移除整个账号时物化文件一并删除。
+        store
+            .attach_siwc(&record.id, &siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]))
+            .unwrap();
+        store.remove(&record.id).unwrap();
+        assert!(!store.siwc_path(&record.id).exists());
+    }
+
+    #[test]
+    fn siwc_refresh_needed_near_expiry_and_after_earliest() {
+        let mut credential = siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]);
+        let now = unix_timestamp();
+        credential.expires_at = now + 24 * 3600;
+        assert!(!credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.expires_at = now + SIWC_REFRESH_MARGIN_SECONDS - 1;
+        assert!(credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.expires_at = now + 24 * 3600;
+        credential.earliest_refresh_at = Some(now - 1);
+        assert!(credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.earliest_refresh_at = Some(now + 3600);
+        assert!(!credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+        credential.expires_at = 0;
+        assert!(credential.needs_refresh(now, SIWC_REFRESH_MARGIN_SECONDS));
+    }
+
+    #[test]
+    fn siwc_authorize_url_registration_vs_reauth() {
+        let registration = build_siwc_authorize_url(
+            SIWC_DYNAMIC_CLIENT_ID,
+            "state-1",
+            "nonce-1",
+            "challenge-1",
+            "urn:uuid:host-1",
+            true,
+            None,
+            None,
+        );
+        let url = reqwest::Url::parse(&registration).unwrap();
+        let params: HashMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(url.as_str().split('?').next(), Some(SIWC_AUTHORIZE_URL));
+        assert_eq!(params["client_id"], SIWC_DYNAMIC_CLIENT_ID);
+        assert_eq!(params["redirect_uri"], SIWC_REDIRECT_URI);
+        assert_eq!(params["resource"], SIWC_RESOURCE);
+        assert_eq!(params["scope"], SIWC_SCOPE);
+        assert_eq!(params["state"], "state-1");
+        assert_eq!(params["nonce"], "nonce-1");
+        assert_eq!(params["code_challenge"], "challenge-1");
+        assert_eq!(params["code_challenge_method"], "S256");
+        assert_eq!(params["ext_agent_host_id"], "urn:uuid:host-1");
+        assert_eq!(params["agent_name_hint"], SIWC_AGENT_NAME_HINT);
+        assert!(!params.contains_key("id_token_hint"));
+        assert!(SIWC_REDIRECT_URI.starts_with("http://127.0.0.1:"));
+
+        let reauth = build_siwc_authorize_url(
+            "oaiapp_abc",
+            "state-2",
+            "nonce-2",
+            "challenge-2",
+            "urn:uuid:host-1",
+            false,
+            Some("id-token-hint"),
+            Some("a@example.com"),
+        );
+        let params: HashMap<_, _> = reqwest::Url::parse(&reauth)
+            .unwrap()
+            .query_pairs()
+            .into_owned()
+            .collect();
+        assert_eq!(params["client_id"], "oaiapp_abc");
+        assert_eq!(params["id_token_hint"], "id-token-hint");
+        assert_eq!(params["login_hint"], "a@example.com");
+        // 重授权不再重复注册客户端名。
+        assert!(!params.contains_key("agent_name_hint"));
+    }
+
+    #[test]
+    fn siwc_refresh_error_mapping_only_marks_terminal_codes() {
+        for code in [
+            "invalid_grant",
+            "invalid_refresh_token",
+            "token_expired",
+            "refresh_token_expired",
+            "refresh_token_invalidated",
+            "refresh_token_reused",
+            "invalid_client",
+        ] {
+            let body =
+                serde_json::to_vec(&json!({"error": code, "error_description": "d"})).unwrap();
+            assert!(
+                siwc_invalid_from_body(&body).is_some(),
+                "{code} must mark the credential unusable"
+            );
+        }
+        for body in [
+            serde_json::to_vec(&json!({"error": "temporarily_unavailable"})).unwrap(),
+            serde_json::to_vec(&json!({"error": "server_error"})).unwrap(),
+            serde_json::to_vec(&json!({"error": "slow_down"})).unwrap(),
+            serde_json::to_vec(&json!({"detail": "not-an-oauth-error"})).unwrap(),
+            b"not json".to_vec(),
+        ] {
+            assert!(siwc_invalid_from_body(&body).is_none());
+        }
+    }
+
+    #[test]
+    fn siwc_summary_never_carries_tokens() {
+        let mut record = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        record.siwc = Some(siwc_credential("oaiapp_a", &[SIWC_PLAN_SCOPE]));
+        let payload = serde_json::to_value(record.summary(None)).unwrap();
+        let text = payload.to_string();
+        assert!(!text.contains("siwc-access"));
+        assert!(!text.contains("siwc-refresh"));
+        assert!(!text.contains("siwc-id-token"));
+        assert!(payload.get("siwc").is_none());
+    }
+}

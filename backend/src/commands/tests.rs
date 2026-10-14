@@ -1,0 +1,2103 @@
+use std::collections::BTreeMap;
+
+use super::*;
+use crate::config::ProviderProfile;
+
+#[tokio::test]
+async fn context_recovery_preserves_other_settings_and_backs_up_the_budget() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = CodeyConfig::default();
+    config.model_context_by_provider.insert(
+        "route".into(),
+        BTreeMap::from([(
+            "gpt-5.6-sol".into(),
+            crate::config::ModelContextConfig {
+                context_window_tokens: 256_000,
+                auto_compact_token_limit: None,
+                reserve_output_tokens: None,
+            },
+        )]),
+    );
+    let state = AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config.clone()),
+        ..AppState::default()
+    };
+    state.store.save(&config).unwrap();
+    let original = std::fs::read(state.store.path()).unwrap();
+    restore_default_context_budgets(&state).await.unwrap();
+    config.model_context_by_provider.clear();
+    assert_eq!(*state.config.read().await, config);
+    let saved: CodeyConfig =
+        serde_json::from_slice(&std::fs::read(state.store.path()).unwrap()).unwrap();
+    assert_eq!(saved, config);
+    assert_eq!(
+        std::fs::read(directory.path().join("config.json.bak.1")).unwrap(),
+        original
+    );
+
+    // A failed write must not report recovery or change the in-memory settings.
+    let failed = AppState {
+        store: ConfigStore::new(directory.path()),
+        config: RwLock::new(serde_json::from_slice(&original).unwrap()),
+        ..AppState::default()
+    };
+    assert!(restore_default_context_budgets(&failed).await.is_err());
+    assert!(
+        !failed
+            .config
+            .read()
+            .await
+            .model_context_by_provider
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn launch_context_recovery_clears_budgets_only_after_confirmation() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut profile = ProviderProfile::new("Custom");
+    profile.id = "custom".into();
+    profile.source_provider_id = Some("custom".into());
+    profile.base_url = "https://example.test/v1".into();
+    profile.api_key = "unused-test-key".into();
+    profile.normalize();
+    let mut config = CodeyConfig {
+        local_router_enabled: true,
+        active_profile_id: profile.id.clone(),
+        profiles: vec![profile],
+        selected_models_by_provider: BTreeMap::from([(
+            "custom".into(),
+            vec!["gpt-6-astra".into(), "z-model".into()],
+        )]),
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    let budget = crate::config::ModelContextConfig {
+        context_window_tokens: 256_000,
+        auto_compact_token_limit: None,
+        reserve_output_tokens: None,
+    };
+    config.model_context_by_provider.insert(
+        "custom".into(),
+        BTreeMap::from([
+            ("gpt-6-astra".into(), budget.clone()),
+            ("z-model".into(), budget.clone()),
+        ]),
+    );
+    config.model_context_by_provider.insert(
+        "other-route".into(),
+        BTreeMap::from([("other-model".into(), budget)]),
+    );
+    let codex_config = b"model_catalog_json = 'custom.json'\n";
+    std::fs::write(directory.path().join("config.toml"), codex_config).unwrap();
+    let catalog =
+        serde_json::to_vec(&codey_runtime_core::model_suffix::bundled_model_catalog().unwrap())
+            .unwrap();
+    let source = directory.path().join("custom.json");
+    std::fs::write(&source, &catalog).unwrap();
+    let error = crate::codex_config::runtime_model_catalog_path(
+        directory.path(),
+        true,
+        Some(&config.runtime_enabled_model_contexts()),
+    )
+    .unwrap_err()
+    .context("准备运行时模型目录失败");
+    assert!(error.is::<crate::model_catalog::ContextBudgetCatalogError>());
+    let reason = format!("{error:#}");
+    assert!(reason.contains("custom/gpt-6-astra"), "{reason}");
+    assert!(reason.contains(source.to_str().unwrap()), "{reason}");
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config.clone()),
+        ..AppState::default()
+    });
+    state.store.save(&config).unwrap();
+    let original = std::fs::read(state.store.path()).unwrap();
+    let saved_budgets = |state: &Arc<AppState>| {
+        let path = state.store.path().to_path_buf();
+        let saved: CodeyConfig = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        saved.model_context_by_provider
+    };
+
+    // 拒绝恢复时保留预算，也不改写已保存的配置。
+    let declined = recover_default_context_budgets_with_prompt(
+        &state,
+        crate::native_update_ui::ContextRecoveryPurpose::Launch,
+        &reason,
+        |_| async { Ok(false) },
+    )
+    .await
+    .unwrap();
+    assert!(!declined);
+    assert_eq!(saved_budgets(&state), config.model_context_by_provider);
+    assert_eq!(*state.config.read().await, config);
+    assert_eq!(std::fs::read(state.store.path()).unwrap(), original);
+
+    // 对话框不可用时按未确认处理，同样保留预算。
+    let unanswered = recover_default_context_budgets_with_prompt(
+        &state,
+        crate::native_update_ui::ContextRecoveryPurpose::Launch,
+        &reason,
+        |_| async { Err("原生提示不可用".to_string()) },
+    )
+    .await
+    .unwrap();
+    assert!(!unanswered);
+    assert_eq!(saved_budgets(&state), config.model_context_by_provider);
+    assert_eq!(*state.config.read().await, config);
+    assert_eq!(std::fs::read(state.store.path()).unwrap(), original);
+
+    // 确认后清空预算并写回配置，其他设置保持不变。
+    let restored = recover_default_context_budgets_with_prompt(
+        &state,
+        crate::native_update_ui::ContextRecoveryPurpose::Launch,
+        &reason,
+        |purpose| async move {
+            assert_eq!(
+                purpose,
+                crate::native_update_ui::ContextRecoveryPurpose::Launch
+            );
+            Ok(true)
+        },
+    )
+    .await
+    .unwrap();
+    assert!(restored);
+    assert!(
+        state
+            .config
+            .read()
+            .await
+            .model_context_by_provider
+            .is_empty()
+    );
+    assert!(saved_budgets(&state).is_empty());
+    config.model_context_by_provider.clear();
+    assert_eq!(*state.config.read().await, config);
+    assert_eq!(
+        std::fs::read(directory.path().join("config.json.bak.1")).unwrap(),
+        original
+    );
+    assert_eq!(
+        crate::codex_config::runtime_model_catalog_path(
+            directory.path(),
+            true,
+            Some(&config.runtime_enabled_model_contexts()),
+        )
+        .unwrap(),
+        Some(source.clone())
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), catalog);
+    assert_eq!(
+        std::fs::read(directory.path().join("config.toml")).unwrap(),
+        codex_config
+    );
+    assert!(
+        !recover_default_context_budgets_with_prompt(
+            &state,
+            crate::native_update_ui::ContextRecoveryPurpose::Launch,
+            &reason,
+            |_| async { panic!("没有自定义预算时不应再次请求恢复") },
+        )
+        .await
+        .unwrap()
+    );
+}
+
+#[tokio::test]
+async fn model_save_routes_accept_missing_or_null_ids_without_weakening_required_routes() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(CodeyConfig {
+            local_router_enabled: true,
+            profiles: Vec::new(),
+            active_profile_id: "missing-route".into(),
+            ..CodeyConfig::default()
+        }),
+        ..AppState::default()
+    });
+    for (command, payload, expected_message) in [
+        (
+            "save_selected_models",
+            json!({ "officialModels": [], "thirdPartyModels": ["model-a"] }),
+            "找不到要配置模型的线路",
+        ),
+        (
+            "save_default_model",
+            json!({ "model": "model-a" }),
+            "找不到要设置默认模型的线路",
+        ),
+    ] {
+        for route_id in [None, Some(Value::Null), Some(json!("missing-route"))] {
+            let mut args = payload.clone();
+            if let Some(route_id) = route_id {
+                args["routeId"] = route_id;
+            }
+            let result = invoke_api(&state, command, args).await;
+            assert_eq!(result["status"], "failed");
+            // Reaching route lookup proves the request passed argument parsing;
+            // a missing fixture route prevents any configuration writes.
+            assert_eq!(result["message"], expected_message, "{command}");
+        }
+        for route_id in [json!(7), json!(false), json!([]), json!({})] {
+            let mut args = payload.clone();
+            args["routeId"] = route_id;
+            let result = invoke_api(&state, command, args).await;
+            assert_eq!(result["status"], "failed");
+            assert!(
+                result["message"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("参数 routeId 无效")
+            );
+        }
+    }
+    let result = invoke_api(
+        &state,
+        "delete_route",
+        json!({ "routeId": null, "expectedRevision": 0 }),
+    )
+    .await;
+    assert_eq!(result["message"], "缺少参数：routeId");
+}
+
+#[tokio::test]
+async fn request_log_query_api_reports_ndjson_as_not_queryable() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut config = CodeyConfig::default();
+    config.route_request_log.backend = crate::config::RouteRequestLogBackend::Ndjson;
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config),
+        ..AppState::default()
+    });
+
+    let result = invoke_api(
+        &state,
+        "query_route_request_logs",
+        json!({"page": 1, "pageSize": 25}),
+    )
+    .await;
+
+    assert_eq!(result["status"], "unavailable");
+    assert_eq!(result["backend"], "ndjson");
+    assert_eq!(result["queryable"], false);
+    assert_eq!(result["reason"], "ndjson_not_queryable");
+}
+
+#[tokio::test]
+async fn route_toggle_api_persists_once_and_rejects_stale_requests() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut profile = ProviderProfile::new("测试线路");
+    profile.id = "test-route".into();
+    profile.base_url = "https://route.example/v1".into();
+    profile.api_key = "test-key".into();
+    let config = CodeyConfig {
+        profiles: vec![profile],
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config.clone()),
+        ..AppState::default()
+    });
+    let result = invoke_api(
+        &state,
+        "set_route_enabled",
+        json!({
+            "routeId": "test-route", "enabled": false, "expectedRevision": 0,
+        }),
+    )
+    .await;
+    assert_eq!(result["status"], "ok", "{result}");
+    assert_eq!(result["config"]["profiles"][0]["enabled"], false);
+    assert_eq!(result["config"]["settingsRevision"], 1);
+    assert!(directory.path().join("config.json").is_file());
+    let saved = state.config.read().await.clone();
+    assert_eq!(saved.profiles[0].api_key, config.profiles[0].api_key);
+    let stale = invoke_api(
+        &state,
+        "set_route_enabled",
+        json!({
+            "routeId": "test-route", "enabled": true, "expectedRevision": 0,
+        }),
+    )
+    .await;
+    assert_eq!(stale["status"], "failed");
+    let malformed = invoke_api(
+        &state,
+        "set_route_enabled",
+        json!({
+            "routeId": "test-route", "enabled": "true", "expectedRevision": 1,
+        }),
+    )
+    .await;
+    assert_eq!(malformed["status"], "failed");
+    assert_eq!(*state.config.read().await, saved);
+}
+
+#[tokio::test]
+async fn request_log_query_api_rejects_excessive_page_sizes() {
+    let state = Arc::new(AppState::default());
+
+    let result = invoke_api(
+        &state,
+        "query_route_request_logs",
+        json!({"page": 1, "pageSize": 101}),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert!(result["message"].as_str().unwrap().contains("每页条数"));
+}
+
+#[test]
+fn bridge_field_helpers_preserve_existing_payload_semantics() {
+    let payload = json!({
+        "text": "  value  ",
+        "offset": 42,
+        "wrongText": 7,
+        "wrongOffset": "42",
+        "items": [" first ", 7, "", "second", "third"],
+    });
+
+    assert_eq!(bridge_string(&payload, "text"), "  value  ");
+    assert_eq!(bridge_string(&payload, "missing"), "");
+    assert_eq!(bridge_string(&payload, "wrongText"), "");
+    assert_eq!(bridge_u64(&payload, "offset"), Some(42));
+    assert_eq!(bridge_u64(&payload, "missing"), None);
+    assert_eq!(bridge_u64(&payload, "wrongOffset"), None);
+    assert_eq!(
+        bridge_string_array(&payload, "items", 2),
+        vec!["first".to_string(), "second".to_string()]
+    );
+    assert!(bridge_string_array(&payload, "missing", 2).is_empty());
+}
+
+#[test]
+fn user_fastctx_prevents_enabling_the_embedded_tools() {
+    let available = FastContextToolsStatus::default();
+    assert!(embedded_fast_context_tools_enabled(true, &available));
+    assert!(!embedded_fast_context_tools_enabled(false, &available));
+
+    let user_configured = FastContextToolsStatus {
+        user_configured: true,
+        detection_failed: false,
+        server_id: Some("fastctx".to_string()),
+    };
+    assert!(!embedded_fast_context_tools_enabled(true, &user_configured));
+
+    let detection_failed = FastContextToolsStatus {
+        user_configured: false,
+        detection_failed: true,
+        server_id: None,
+    };
+    assert!(!embedded_fast_context_tools_enabled(
+        true,
+        &detection_failed
+    ));
+    assert_eq!(
+        fast_context_tools_status_or_blocked::<&str>(Err("invalid config")),
+        detection_failed
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn session_metadata_cache_operations_are_serialized_in_blocking_workers() {
+    let state = Arc::new(AppState::default());
+    let first_started = Arc::new(AtomicBool::new(false));
+    let second_started = Arc::new(AtomicBool::new(false));
+    let release = Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+
+    let first = tokio::spawn({
+        let state = Arc::clone(&state);
+        let first_started = Arc::clone(&first_started);
+        let release = Arc::clone(&release);
+        async move {
+            with_session_metadata_cache(&state, "first cache operation", move |_| {
+                first_started.store(true, Ordering::Release);
+                let (released, signal) = &*release;
+                let guard = released
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let guard = signal
+                    .wait_while(guard, |released| !*released)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                drop(guard);
+                1
+            })
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !first_started.load(Ordering::Acquire) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the first cache operation should start");
+
+    let second_contended = state.session_metadata_cache_contended.notified();
+    let second = tokio::spawn({
+        let state = Arc::clone(&state);
+        let second_started = Arc::clone(&second_started);
+        async move {
+            with_session_metadata_cache(&state, "second cache operation", move |_| {
+                second_started.store(true, Ordering::Release);
+                2
+            })
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(1), second_contended)
+        .await
+        .expect("the second cache operation did not contend for exclusive ownership");
+    assert!(
+        !second_started.load(Ordering::Acquire),
+        "the second operation must wait for exclusive cache ownership"
+    );
+
+    let (released, signal) = &*release;
+    *released
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+    signal.notify_all();
+
+    assert_eq!(first.await.unwrap().unwrap(), 1);
+    assert_eq!(second.await.unwrap().unwrap(), 2);
+    assert!(second_started.load(Ordering::Acquire));
+}
+
+#[test]
+fn renderer_settings_keep_editable_credentials_but_clear_clawbot_tokens() {
+    let mut config = CodeyConfig::default();
+    config.profiles[0].api_key = "renderer-secret".to_string();
+    config.prompt_optimization.api_key = "optimizer-secret".to_string();
+    config.hide_full_access_warning = true;
+    config.webhook.url = "https://open.feishu.cn/legacy-secret".to_string();
+    config.webhook.channels.push(NotificationChannelConfig {
+        id: "feishu-1".to_string(),
+        url: "https://open.feishu.cn/open-apis/bot/v2/hook/feishu-secret".to_string(),
+        ..NotificationChannelConfig::default()
+    });
+    config.webhook.channels.push(NotificationChannelConfig {
+        id: "telegram-1".to_string(),
+        kind: crate::notifications::NotificationChannelKind::Telegram,
+        bot_token: "telegram-secret".to_string(),
+        chat_id: "-100123".to_string(),
+        ..NotificationChannelConfig::default()
+    });
+    config.webhook.channels.push(NotificationChannelConfig {
+        id: "wecom-1".to_string(),
+        kind: crate::notifications::NotificationChannelKind::Wecom,
+        url: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=wecom-secret".to_string(),
+        ..NotificationChannelConfig::default()
+    });
+    config.webhook.channels.push(NotificationChannelConfig {
+        id: "wechat-claw-1".to_string(),
+        kind: crate::notifications::NotificationChannelKind::WechatClaw,
+        url: "https://ilinkai.weixin.qq.com".to_string(),
+        bot_token: "wechat-claw-secret".to_string(),
+        context_token: "wechat-context-secret".to_string(),
+        chat_id: "user@im.wechat".to_string(),
+        ..NotificationChannelConfig::default()
+    });
+    config.webhook.channels.push(NotificationChannelConfig {
+        id: "ntfy-1".to_string(),
+        kind: crate::notifications::NotificationChannelKind::Ntfy,
+        url: "https://ntfy.example.com".to_string(),
+        bot_token: "ntfy-access-secret".to_string(),
+        chat_id: "codey-topic".to_string(),
+        ..NotificationChannelConfig::default()
+    });
+
+    let public = serde_json::to_value(redacted_config(&config)).unwrap();
+
+    assert_eq!(public["profiles"][0]["apiKey"], "renderer-secret");
+    assert_eq!(public["profiles"][0]["apiKeyConfigured"], true);
+    assert_eq!(public["promptOptimization"]["apiKey"], "optimizer-secret");
+    assert_eq!(public["promptOptimization"]["apiKeyConfigured"], true);
+    assert!(public["profiles"][0].get("clearApiKey").is_none());
+    assert_eq!(public["hideFullAccessWarning"], true);
+    assert!(public["webhook"].get("url").is_none());
+    assert_eq!(
+        public["webhook"]["channels"][0]["url"],
+        config.webhook.channels[0].url
+    );
+    assert_eq!(public["webhook"]["channels"][0]["urlConfigured"], true);
+    assert_eq!(
+        public["webhook"]["channels"][1]["botToken"],
+        "telegram-secret"
+    );
+    assert_eq!(public["webhook"]["channels"][1]["chatId"], "-100123");
+    assert_eq!(public["webhook"]["channels"][3]["chatId"], "user@im.wechat");
+    assert_eq!(public["webhook"]["channels"][1]["botTokenConfigured"], true);
+    assert_eq!(
+        public["webhook"]["channels"][2]["url"],
+        config.webhook.channels[2].url
+    );
+    assert_eq!(public["webhook"]["channels"][2]["urlConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][3]["botToken"], "");
+    assert_eq!(public["webhook"]["channels"][3]["botTokenConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][3]["contextToken"], "");
+    assert_eq!(
+        public["webhook"]["channels"][3]["contextTokenConfigured"],
+        true
+    );
+    assert_eq!(
+        public["webhook"]["channels"][4]["url"],
+        "https://ntfy.example.com"
+    );
+    assert_eq!(public["webhook"]["channels"][4]["urlConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][4]["botToken"], "");
+    assert_eq!(public["webhook"]["channels"][4]["botTokenConfigured"], true);
+    assert_eq!(public["webhook"]["channels"][4]["chatId"], "codey-topic");
+    assert!(public.to_string().contains("renderer-secret"));
+    assert!(public.to_string().contains("optimizer-secret"));
+    assert!(public.to_string().contains("feishu-secret"));
+    assert!(public.to_string().contains("telegram-secret"));
+    assert!(public.to_string().contains("wecom-secret"));
+    assert!(!public.to_string().contains("ntfy-access-secret"));
+    assert!(!public.to_string().contains("wechat-claw-secret"));
+    assert!(!public.to_string().contains("wechat-context-secret"));
+    assert!(!public.to_string().contains("legacy-secret"));
+}
+
+#[test]
+fn provider_secret_merge_allows_changing_official_routes_to_api_key() {
+    let mut official = crate::config::ProviderProfile::new("OpenAI 官方直登");
+    official.id = "official-route".to_string();
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.source_provider_id = Some("local-official".to_string());
+    official.normalize();
+
+    let previous = CodeyConfig {
+        active_profile_id: official.id.clone(),
+        profiles: vec![official.clone()],
+        ..CodeyConfig::default()
+    };
+    let mut input = official;
+    input.auth_mode = crate::config::AUTH_MODE_API_KEY.to_string();
+    input.upstream_protocol = crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES.to_string();
+    input.base_url = "https://relay.example/v1".to_string();
+    input.api_key = "sk-relay".to_string();
+    input.api_key_configured = false;
+    input.official_account = false;
+    input.short_name = "中转".to_string();
+
+    let merged = merge_profile_secrets(vec![input], &previous).unwrap();
+    let route = &merged[0];
+
+    assert_eq!(route.auth_mode, crate::config::AUTH_MODE_API_KEY);
+    assert_eq!(
+        route.upstream_protocol,
+        crate::config::UPSTREAM_PROTOCOL_OPENAI_RESPONSES
+    );
+    assert_eq!(route.base_url, "https://relay.example/v1");
+    assert_eq!(route.api_key, "sk-relay");
+    assert_eq!(route.short_name, "中转");
+    assert!(!route.official_account);
+    assert!(route.source_provider_id.is_none());
+    assert!(!route.supports_remote_compaction);
+    assert!(!route.supports_websockets);
+}
+
+#[test]
+fn provider_secret_merge_preserves_user_remote_compaction_setting() {
+    let mut saved = ProviderProfile::new("Imported Relay");
+    saved.id = "relay-route".into();
+    saved.base_url = "https://relay.example/v1".into();
+    saved.api_key = "saved-secret".into();
+    saved.supports_remote_compaction = true;
+    saved.normalize();
+    let previous = CodeyConfig {
+        active_profile_id: saved.id.clone(),
+        profiles: vec![saved.clone()],
+        ..CodeyConfig::default()
+    };
+
+    let mut disabled = saved.clone();
+    disabled.supports_remote_compaction = false;
+    disabled.remote_compaction_protocol = crate::config::RemoteCompactionProtocol::CompactEndpoint;
+    disabled.api_key.clear();
+    let merged = merge_profile_secrets(vec![disabled], &previous).unwrap();
+    assert!(!merged[0].supports_remote_compaction);
+    assert_eq!(
+        merged[0].remote_compaction_protocol,
+        crate::config::RemoteCompactionProtocol::CompactEndpoint
+    );
+    assert_eq!(merged[0].api_key, "saved-secret");
+
+    let mut previous_disabled_profile = saved;
+    previous_disabled_profile.supports_remote_compaction = false;
+    let previous_disabled = CodeyConfig {
+        active_profile_id: previous_disabled_profile.id.clone(),
+        profiles: vec![previous_disabled_profile.clone()],
+        ..CodeyConfig::default()
+    };
+    let mut enabled = previous_disabled_profile;
+    enabled.supports_remote_compaction = true;
+    let merged = merge_profile_secrets(vec![enabled], &previous_disabled).unwrap();
+    assert!(merged[0].supports_remote_compaction);
+}
+
+#[test]
+fn route_name_limit_matches_the_renderer_and_legacy_names_stay_saveable() {
+    let mut legacy = ProviderProfile::new("一条长度超过十五个字符限制的旧线路名称");
+    legacy.id = "legacy-route".to_string();
+    legacy.base_url = "https://relay.example/v1".to_string();
+    legacy.api_key = "sk-relay".to_string();
+    legacy.normalize();
+    assert!(legacy.name.chars().count() > crate::config::MAX_ROUTE_NAME_CHARS);
+    let previous = CodeyConfig {
+        active_profile_id: legacy.id.clone(),
+        profiles: vec![legacy.clone()],
+        ..CodeyConfig::default()
+    };
+
+    // 旧配置里的超限名称只要这次没有改动,保存其他设置仍然成功。
+    let mut updated = legacy.clone();
+    updated.api_key = "sk-relay-updated".to_string();
+    let merged = merge_profile_secrets(vec![updated], &previous).unwrap();
+    assert_eq!(merged[0].name, legacy.name);
+    assert_eq!(merged[0].api_key, "sk-relay-updated");
+
+    let mut at_limit = legacy.clone();
+    at_limit.name = "名".repeat(15);
+    at_limit.short_name = "旧".to_string();
+    let merged = merge_profile_secrets(vec![at_limit.clone()], &previous).unwrap();
+    assert_eq!(merged[0].name, at_limit.name);
+
+    // 改名以后超过上限会被拒绝,直接调用后端接口也无法写进界面存不下的名称。
+    let mut renamed = legacy.clone();
+    renamed.name = "名".repeat(16);
+    renamed.short_name = "旧".to_string();
+    let error = merge_profile_secrets(vec![renamed], &previous).unwrap_err();
+    assert!(error.contains("最多 15 个字符"), "{error}");
+}
+
+#[test]
+fn account_usage_stays_enabled_when_an_official_route_exists_but_a_third_party_route_is_active() {
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.id = "official-route".to_string();
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.normalize();
+
+    let mut third_party = ProviderProfile::new("第三方线路");
+    third_party.id = "third-party-route".to_string();
+    third_party.base_url = "https://relay.example/v1".to_string();
+    third_party.api_key = "sk-relay".to_string();
+    third_party.normalize();
+
+    let config = CodeyConfig {
+        active_profile_id: third_party.id.clone(),
+        profiles: vec![official, third_party],
+        show_account_usage_in_header: true,
+        ..CodeyConfig::default()
+    };
+
+    assert!(account_usage_enabled_for_config(&config));
+}
+
+#[test]
+fn account_usage_requires_both_the_display_setting_and_an_official_route() {
+    let mut third_party = ProviderProfile::new("第三方线路");
+    third_party.id = "third-party-route".to_string();
+    third_party.base_url = "https://relay.example/v1".to_string();
+    third_party.api_key = "sk-relay".to_string();
+    third_party.normalize();
+
+    let without_official = CodeyConfig {
+        active_profile_id: third_party.id.clone(),
+        profiles: vec![third_party],
+        show_account_usage_in_header: true,
+        ..CodeyConfig::default()
+    };
+    assert!(!account_usage_enabled_for_config(&without_official));
+
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.normalize();
+    let disabled = CodeyConfig {
+        active_profile_id: official.id.clone(),
+        profiles: vec![official],
+        show_account_usage_in_header: false,
+        ..CodeyConfig::default()
+    };
+    assert!(!account_usage_enabled_for_config(&disabled));
+    assert!(official_account_available_for_usage(&disabled));
+}
+
+#[test]
+fn native_account_usage_follows_the_current_official_provider_without_a_saved_route() {
+    let native_official = CodeyConfig {
+        local_router_enabled: false,
+        profiles: Vec::new(),
+        show_account_usage_in_header: true,
+        official_account_available_this_launch: true,
+        ..CodeyConfig::default()
+    };
+    assert!(account_usage_enabled_for_config(&native_official));
+
+    let native_third_party = CodeyConfig {
+        official_account_available_this_launch: false,
+        ..native_official.clone()
+    };
+    assert!(!account_usage_enabled_for_config(&native_third_party));
+
+    let router_enabled_without_official_route = CodeyConfig {
+        local_router_enabled: true,
+        official_account_available_this_launch: true,
+        ..native_official
+    };
+    assert!(!account_usage_enabled_for_config(
+        &router_enabled_without_official_route
+    ));
+}
+
+#[test]
+fn official_probe_migrates_legacy_account_route_to_current_provider() {
+    let previous = serde_json::from_value::<CodeyConfig>(json!({
+        "activeProfileId": "codey_global",
+        "profiles": [{
+            "id": "codey_global",
+            "name": "OpenAI 官方直登",
+            "baseUrl": "https://chatgpt.com/backend-api/codex",
+            "apiKey": ""
+        }],
+        "selectedModelsByProvider": { "codey_global": ["gpt-5.6-sol"] },
+        "defaultModel": "codey_global/gpt-5.6-sol"
+    }))
+    .unwrap()
+    .normalize();
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.source_provider_id = Some("openai".into());
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.into();
+    official.normalize();
+    for available in [true, false] {
+        let status = if available {
+            OfficialAccountProfileStatus::Available(official.clone())
+        } else {
+            OfficialAccountProfileStatus::Unknown {
+                profile: official.clone(),
+                reason: "WindowsApps access denied".into(),
+            }
+        };
+        let launch = crate::codex_provider::OfficialAccountLaunch {
+            status,
+            profiles: vec![official.clone()],
+            has_stored_accounts: false,
+        };
+        let next = route_config_for_official_probe(&previous, launch).unwrap();
+        assert_eq!(next.profiles.len(), 1);
+        assert!(next.profiles[0].official_account);
+        assert_eq!(next.profiles[0].provider_id(), "openai");
+        assert!(next.profiles[0].validate().is_ok());
+        assert!(!next.has_third_party_route());
+        assert!(next.official_account_available_this_launch);
+        assert_eq!(next.selected_models_by_provider["openai"], ["gpt-5.6-sol"]);
+        assert_eq!(next.default_model, "openai/gpt-5.6-sol");
+    }
+    assert!(
+        route_config_for_official_probe(
+            &previous,
+            crate::codex_provider::OfficialAccountLaunch {
+                status: OfficialAccountProfileStatus::Unavailable {
+                    reason: "not logged in".into()
+                },
+                profiles: Vec::new(),
+                has_stored_accounts: false,
+            },
+        )
+        .unwrap_err()
+        .contains("设为默认")
+    );
+}
+
+#[test]
+fn inconclusive_official_auth_probe_keeps_active_third_party_route() {
+    let mut third_party = ProviderProfile::new("第三方线路");
+    third_party.id = "custom".to_string();
+    third_party.base_url = "https://relay.example/v1".to_string();
+    third_party.api_key = "sk-relay".to_string();
+    third_party.normalize();
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.source_provider_id = Some("openai".to_string());
+    official.normalize();
+    let previous = CodeyConfig {
+        active_profile_id: third_party.id.clone(),
+        profiles: vec![third_party.clone()],
+        default_model: "custom/gpt-5.6-sol".to_string(),
+        initial_route_import_completed: true,
+        ..CodeyConfig::default()
+    }
+    .normalize();
+
+    let next = route_config_for_official_probe(
+        &previous,
+        crate::codex_provider::OfficialAccountLaunch {
+            status: OfficialAccountProfileStatus::Unknown {
+                profile: official,
+                reason: "probe unavailable".to_string(),
+            },
+            profiles: Vec::new(),
+            has_stored_accounts: false,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(next.active_profile_id, third_party.id);
+    assert!(
+        next.profiles
+            .iter()
+            .all(|profile| !profile.official_account)
+    );
+    assert!(!next.official_account_available_this_launch);
+    assert_eq!(
+        next.official_account_status_this_launch,
+        LaunchOfficialAccountStatus::Unknown
+    );
+    assert_eq!(next.default_model, "custom/gpt-5.6-sol");
+}
+
+#[test]
+fn unavailable_official_auth_ignores_disabled_official_routes() {
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.source_provider_id = Some("openai".to_string());
+    official.enabled = false;
+    official.normalize();
+    let config = CodeyConfig {
+        active_profile_id: official.id.clone(),
+        profiles: vec![official],
+        ..CodeyConfig::default()
+    };
+
+    let next = apply_unavailable_official_probe(config, "not logged in".into(), Vec::new(), false)
+        .unwrap();
+
+    assert!(!next.official_account_available_this_launch);
+    assert_eq!(
+        next.official_account_status_this_launch,
+        LaunchOfficialAccountStatus::Unauthenticated
+    );
+    assert_eq!(next.profiles.len(), 1);
+    assert!(!next.profiles[0].enabled);
+}
+
+#[test]
+fn unavailable_official_auth_keeps_stored_account_routes() {
+    let mut account = ProviderProfile::new("主力账号");
+    account.source_provider_id = Some("openai".to_string());
+    account.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    account.official_account_id = Some("acct-one".to_string());
+    account.normalize();
+    let mut config = CodeyConfig {
+        local_router_enabled: true,
+        official_account_available_this_launch: true,
+        ..CodeyConfig::default()
+    };
+    config.apply_launch_official_profiles(vec![account.clone()]);
+    let config = config.normalize();
+    let provider_id = config.profiles[0].provider_id().to_string();
+
+    let next =
+        apply_unavailable_official_probe(config, "not logged in".into(), vec![account], true)
+            .unwrap();
+
+    assert!(!next.official_account_available_this_launch);
+    assert_eq!(
+        next.official_account_status_this_launch,
+        LaunchOfficialAccountStatus::Unauthenticated
+    );
+    // 存储账号的线路自带凭据，默认登录缺失时仍然保留。
+    let routes = next
+        .usable_official_routes()
+        .map(|profile| profile.provider_id().to_string())
+        .collect::<Vec<_>>();
+    assert_eq!(routes, vec![provider_id]);
+}
+
+#[test]
+fn saving_a_route_keeps_the_official_account_id_when_the_form_omits_it() {
+    let mut saved = ProviderProfile::new("pro");
+    saved.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    saved.official_account_id = Some("acct-one".to_string());
+    saved.normalize();
+    let mut incoming = saved.clone();
+    incoming.official_account_id = None;
+    incoming.name = "主力".to_string();
+    incoming.short_name = "主".to_string();
+    let previous = CodeyConfig {
+        profiles: vec![saved],
+        ..CodeyConfig::default()
+    };
+
+    let merged = merge_profile_secrets(vec![incoming], &previous).unwrap();
+
+    assert_eq!(merged[0].name, "主力");
+    assert_eq!(merged[0].official_account_id.as_deref(), Some("acct-one"));
+}
+
+#[test]
+fn unavailable_official_auth_drops_routes_of_missing_accounts() {
+    // 配置里留着已删除账号的线路，而账号列表已经没有这个账号。
+    let mut stale = ProviderProfile::new("已删除的账号");
+    stale.id = crate::config::official_profile_id("acct-gone");
+    stale.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    stale.official_account_id = Some("acct-gone".to_string());
+    stale.normalize();
+    let mut relay = ProviderProfile::new("中转线路");
+    relay.base_url = "https://relay.example/v1".to_string();
+    relay.api_key = "relay-key".to_string();
+    relay.normalize();
+    let stale_id = stale.provider_id().to_string();
+    let config = CodeyConfig {
+        active_profile_id: stale_id,
+        profiles: vec![stale, relay],
+        local_router_enabled: true,
+        official_account_available_this_launch: false,
+        ..CodeyConfig::default()
+    }
+    .normalize();
+    // 没有账号记录时派生出来的是 Codex 登录自己的兼容线路。
+    let mut legacy = ProviderProfile::new("OpenAI 官方直登");
+    legacy.source_provider_id = Some("openai".to_string());
+    legacy.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    legacy.normalize();
+
+    let next =
+        apply_unavailable_official_probe(config, "not logged in".into(), vec![legacy], false)
+            .unwrap();
+
+    assert!(
+        next.profiles
+            .iter()
+            .all(|profile| !profile.official_account)
+    );
+    assert!(
+        next.profiles
+            .iter()
+            .any(|profile| profile.name == "中转线路")
+    );
+}
+
+#[test]
+fn unavailable_official_auth_drops_routes_of_invalid_accounts() {
+    // 账号都还在，但凭据已经被官方拒绝：线路要移除，且不能报成需要重新登录。
+    let mut invalid = ProviderProfile::new("已失效的账号");
+    invalid.id = crate::config::official_profile_id("acct-invalid");
+    invalid.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    invalid.official_account_id = Some("acct-invalid".to_string());
+    invalid.normalize();
+    let invalid_id = invalid.provider_id().to_string();
+    let config = CodeyConfig {
+        active_profile_id: invalid_id,
+        profiles: vec![invalid],
+        local_router_enabled: true,
+        official_account_available_this_launch: true,
+        ..CodeyConfig::default()
+    }
+    .normalize();
+
+    let next =
+        apply_unavailable_official_probe(config, "not logged in".into(), Vec::new(), true).unwrap();
+
+    assert!(
+        next.profiles
+            .iter()
+            .all(|profile| !profile.official_account)
+    );
+    assert!(!next.official_account_available_this_launch);
+    assert_eq!(
+        next.official_account_status_this_launch,
+        LaunchOfficialAccountStatus::Unauthenticated
+    );
+}
+
+#[test]
+fn unavailable_official_auth_returns_the_placeholder_to_initial_import() {
+    let mut official = ProviderProfile::new("OpenAI 官方直登");
+    official.id = crate::config::DERIVED_OFFICIAL_PROFILE_ID.to_string();
+    official.source_provider_id = Some("openai".to_string());
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.normalize();
+
+    let mut config = CodeyConfig {
+        local_router_enabled: true,
+        initial_route_import_completed: true,
+        ..CodeyConfig::default()
+    };
+    config.active_profile_id = official.id.clone();
+    config.profiles.push(official.clone());
+    config
+        .selected_models_by_provider
+        .insert("openai".to_string(), vec!["gpt-5.6-sol".to_string()]);
+
+    let next =
+        apply_unavailable_official_probe(config, "not logged in".into(), vec![official], false)
+            .unwrap();
+
+    assert!(next.profiles[0].is_unconfigured_default());
+    assert!(!next.initial_route_import_completed);
+    assert!(next.needs_initial_route_import());
+}
+
+#[test]
+fn unavailable_official_auth_does_not_treat_empty_default_as_a_third_party_route() {
+    let next = apply_unavailable_official_probe(
+        CodeyConfig::default(),
+        "not logged in".into(),
+        Vec::new(),
+        false,
+    )
+    .unwrap();
+
+    assert!(next.profiles[0].is_unconfigured_default());
+    assert!(!next.has_third_party_route());
+    assert!(next.needs_initial_route_import());
+    assert!(!next.official_account_available_this_launch);
+}
+
+#[tokio::test]
+async fn dropping_derived_official_routes_persists_the_route_removal() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut account = ProviderProfile::new("主力账号");
+    account.source_provider_id = Some("openai".to_string());
+    account.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    account.official_account_id = Some("acct-one".to_string());
+    account.normalize();
+    let mut relay = ProviderProfile::new("中转线路");
+    relay.base_url = "https://relay.example/v1".to_string();
+    relay.api_key = "relay-key".to_string();
+    relay.normalize();
+    let mut config = CodeyConfig {
+        local_router_enabled: true,
+        ..CodeyConfig::default()
+    };
+    config.apply_launch_official_profiles(vec![account]);
+    config.profiles.push(relay);
+    let config = config.normalize();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(config.clone()),
+        ..AppState::default()
+    });
+    state.store.save(&config).unwrap();
+
+    crate::commands::official_accounts::drop_derived_official_routes(&state)
+        .await
+        .unwrap();
+
+    let next = state.config.read().await.clone();
+    assert!(
+        next.profiles
+            .iter()
+            .all(|profile| !profile.official_account)
+    );
+    assert!(
+        next.profiles
+            .iter()
+            .any(|profile| profile.name == "中转线路")
+    );
+    assert!(next.settings_revision > config.settings_revision);
+    let saved: CodeyConfig =
+        serde_json::from_slice(&std::fs::read(state.store.path()).unwrap()).unwrap();
+    assert!(
+        saved
+            .profiles
+            .iter()
+            .all(|profile| !profile.official_account)
+    );
+
+    // 没有官方线路时重复调用不再改写配置。
+    let revision = next.settings_revision;
+    crate::commands::official_accounts::drop_derived_official_routes(&state)
+        .await
+        .unwrap();
+    assert_eq!(state.config.read().await.settings_revision, revision);
+}
+
+fn stored_official_account(
+    id: &str,
+    added_at: u64,
+) -> crate::official_accounts::OfficialAccountRecord {
+    serde_json::from_value(json!({
+        "id": id,
+        "email": format!("{id}@example.com"),
+        "planType": "plus",
+        "accountId": id,
+        "addedAt": added_at,
+        "auth": {
+            "OPENAI_API_KEY": null,
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": format!("access-{id}"),
+                "account_id": id,
+            },
+            "last_refresh": "2026-01-01T00:00:00Z",
+        }
+    }))
+    .expect("可反序列化的官方账号记录")
+}
+
+#[tokio::test]
+async fn official_account_short_names_follow_the_derived_route_namespace() {
+    let directory = tempfile::tempdir().unwrap();
+    let store =
+        crate::official_accounts::OfficialAccountStore::new(directory.path().join("accounts"));
+    let mut record = stored_official_account("acct-one", 1);
+    record.route_name = Some("官方账号1".to_string());
+    record.route_short_name = Some("中转".to_string());
+    store.upsert(&record).unwrap();
+
+    // 账号先保存了「中转」,之后又有第三方线路占用同名短名称,派生时官方线路
+    // 只能改用「中1」。
+    let mut relay = ProviderProfile::new("第三方线路");
+    relay.id = "third-party-route".to_string();
+    relay.base_url = "https://relay.example/v1".to_string();
+    relay.api_key = "sk-relay".to_string();
+    relay.short_name = "中转".to_string();
+    relay.normalize();
+    let mut official = ProviderProfile::new("官方账号1");
+    official.auth_mode = crate::config::AUTH_MODE_OFFICIAL_ACCOUNT.to_string();
+    official.official_account_id = Some("acct-one".to_string());
+    official.short_name = "中转".to_string();
+    official.normalize();
+    let mut config = CodeyConfig {
+        local_router_enabled: true,
+        profiles: vec![relay],
+        ..CodeyConfig::default()
+    };
+    config.apply_launch_official_profiles(vec![official]);
+
+    let derived = config
+        .profiles
+        .iter()
+        .find(|profile| profile.official_account_id.as_deref() == Some("acct-one"))
+        .expect("官方线路应该已经派生")
+        .short_name
+        .clone();
+    assert_eq!(derived, "中1");
+    assert_ne!(
+        record.route_short_name.as_deref(),
+        Some(derived.as_str()),
+        "用例需要账号记录与派生结果不一致"
+    );
+
+    crate::commands::official_accounts::reconcile_official_account_short_names(&store, &config)
+        .await
+        .unwrap();
+
+    // 回写以后面板显示和编辑的短名称与线路列表、模型前缀一致。
+    assert_eq!(
+        store
+            .get("acct-one")
+            .unwrap()
+            .unwrap()
+            .route_short_name
+            .as_deref(),
+        Some("中1")
+    );
+}
+
+#[tokio::test]
+async fn header_usage_follows_the_default_account_and_falls_back_without_one() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+    // 账号列表为空时保留读取 Codex 登录本身的旧路径。
+    assert_eq!(header_official_account_id(&state).await, None);
+
+    let store = state.official_accounts();
+    store.upsert(&stored_official_account("acct_2", 2)).unwrap();
+    store.upsert(&stored_official_account("acct_1", 1)).unwrap();
+    assert_eq!(
+        header_official_account_id(&state).await.as_deref(),
+        Some("acct_1"),
+        "没有默认账号时页头额度回落到最早的账号"
+    );
+
+    store.set_default_account_id(Some("acct_2")).unwrap();
+    assert_eq!(
+        header_official_account_id(&state).await.as_deref(),
+        Some("acct_2")
+    );
+
+    // 默认账号已经从列表里删除时，同样回落到现存最早的账号。
+    store.set_default_account_id(Some("acct_gone")).unwrap();
+    assert_eq!(
+        header_official_account_id(&state).await.as_deref(),
+        Some("acct_1")
+    );
+}
+
+#[tokio::test]
+async fn settings_bridge_matches_the_redacted_config_contract() {
+    let state = Arc::new(AppState::default());
+    let mut config = state.config.read().await.clone();
+    config.profiles[0].api_key = "bridge-provider-secret".to_string();
+    config.webhook.channels = vec![NotificationChannelConfig {
+        id: "bridge-feishu".to_string(),
+        url: "https://open.feishu.cn/open-apis/bot/v2/hook/bridge-secret".to_string(),
+        ..NotificationChannelConfig::default()
+    }];
+    let expected = serde_json::to_value(redacted_config(&config)).unwrap();
+    *state.config.write().await = config;
+
+    let actual = state
+        .bridge_request("/settings/get".to_string(), json!({}))
+        .await;
+
+    assert_eq!(actual, expected);
+    assert!(actual.to_string().contains("bridge-provider-secret"));
+    assert_eq!(
+        actual["webhook"]["channels"][0]["url"],
+        "https://open.feishu.cn/open-apis/bot/v2/hook/bridge-secret"
+    );
+}
+
+#[tokio::test]
+async fn backend_health_bridge_avoids_runtime_status_collection() {
+    let state = Arc::new(AppState::default());
+
+    let actual = state
+        .bridge_request("/backend/health".to_string(), json!({}))
+        .await;
+
+    assert_eq!(actual, json!({"status": "ok"}));
+}
+
+#[tokio::test]
+async fn renderer_api_keeps_notification_secrets_without_reveal_commands() {
+    let state = Arc::new(AppState::default());
+    state.config.write().await.prompt_optimization.api_key = "optimizer-secret".to_string();
+    state
+        .config
+        .write()
+        .await
+        .webhook
+        .channels
+        .push(NotificationChannelConfig {
+            id: "telegram-1".to_string(),
+            kind: crate::notifications::NotificationChannelKind::Telegram,
+            bot_token: "telegram-secret".to_string(),
+            chat_id: "-100123".to_string(),
+            ..NotificationChannelConfig::default()
+        });
+
+    let result = invoke_api(
+        &state,
+        "reveal_notification_channel",
+        json!({ "channelId": "telegram-1" }),
+    )
+    .await;
+    assert_eq!(result["status"], "failed");
+    assert!(
+        result["message"]
+            .as_str()
+            .unwrap()
+            .contains("未知 Codey API 命令")
+    );
+    assert!(!result.to_string().contains("optimizer-secret"));
+    assert!(!result.to_string().contains("telegram-secret"));
+}
+
+#[tokio::test]
+async fn testing_an_incomplete_notification_draft_does_not_save_it() {
+    let state = Arc::new(AppState::default());
+    let before = state.config.read().await.clone();
+
+    let result = invoke_api(
+        &state,
+        "test_notification_channel",
+        json!({
+            "channel": {
+                "id": "incomplete-telegram",
+                "kind": "telegram",
+                "enabled": true,
+                "botToken": "",
+                "chatId": ""
+            }
+        }),
+    )
+    .await;
+
+    assert_eq!(result["status"], "failed");
+    assert_eq!(*state.config.read().await, before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn stale_concurrent_config_saves_are_rejected_without_diverging_disk_and_memory() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let save_count = 8;
+    let barrier = Arc::new(tokio::sync::Barrier::new(save_count + 1));
+    let tasks = (0..save_count)
+        .map(|index| {
+            let state = Arc::clone(&state);
+            let barrier = Arc::clone(&barrier);
+            let mut input = initial.clone();
+            input.user_scripts = vec![format!("// concurrent save {index}")];
+            tokio::spawn(async move {
+                barrier.wait().await;
+                save_codey_config(&state, input).await
+            })
+        })
+        .collect::<Vec<_>>();
+
+    barrier.wait().await;
+    let mut successes = 0;
+    let mut conflicts = 0;
+    for task in tasks {
+        match task.await.unwrap() {
+            Ok(_) => successes += 1,
+            Err(error) => {
+                assert!(error.contains("已被其他操作更新"));
+                conflicts += 1;
+            }
+        }
+    }
+
+    assert_eq!(successes, 1);
+    assert_eq!(conflicts, save_count - 1);
+    let memory = state.config.read().await.clone();
+    let disk = state.store.load().unwrap();
+    assert_eq!(disk, memory);
+    assert_eq!(memory.settings_revision, 1);
+    assert_eq!(memory.user_scripts.len(), 1);
+}
+
+#[tokio::test]
+async fn request_log_save_without_a_running_router_reports_not_applicable_without_restart() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut input = initial;
+    input.route_request_log.enabled = true;
+    input.route_request_log.backend = crate::config::RouteRequestLogBackend::Sqlite;
+
+    let response = save_codey_config(&state, input).await.unwrap();
+
+    assert_eq!(response["status"], "ok");
+    assert_eq!(response["restartRequired"], false);
+    assert_eq!(response["routeRequestLogHotReloaded"], false);
+    assert_eq!(response["routeRequestLogHealth"], "not_applicable");
+    assert!(response["routeRequestLogHotReloadError"].is_null());
+}
+
+#[tokio::test]
+async fn disabled_local_router_keeps_route_config_read_only_without_blocking_other_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = ConfigStore::new(directory.path().join("config.json"));
+    let initial = CodeyConfig {
+        local_router_enabled: false,
+        ..CodeyConfig::default()
+    };
+    store.save(&initial).unwrap();
+    let state = Arc::new(AppState {
+        store,
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+
+    let mut unrelated = initial;
+    unrelated.slim_codex_pet = !unrelated.slim_codex_pet;
+    save_codey_config_locked(&state, CodeyConfigSaveInput::complete(unrelated))
+        .await
+        .unwrap();
+    let saved = state.config.read().await.clone();
+    assert!(!saved.local_router_enabled);
+    assert!(!saved.slim_codex_pet);
+    assert_eq!(state.store.load().unwrap(), saved);
+
+    let mut route_edit = saved.clone();
+    route_edit.active_profile_id = "must-not-persist".to_string();
+    let error =
+        match save_codey_config_locked(&state, CodeyConfigSaveInput::complete(route_edit)).await {
+            Ok(_) => panic!("read-only route edit unexpectedly succeeded"),
+            Err(error) => error,
+        };
+    assert!(error.contains("只读"));
+    assert_eq!(*state.config.read().await, saved);
+    assert_eq!(state.store.load().unwrap(), saved);
+
+    let mut reenabled = saved.clone();
+    reenabled.local_router_enabled = true;
+    save_codey_config_locked(&state, CodeyConfigSaveInput::complete(reenabled))
+        .await
+        .unwrap();
+    let reenabled = state.config.read().await.clone();
+    assert!(reenabled.local_router_enabled);
+    assert_eq!(reenabled.profiles[0].name, saved.profiles[0].name);
+    assert_eq!(state.store.load().unwrap(), reenabled);
+}
+
+#[tokio::test]
+async fn disabled_local_router_skips_automatic_route_import_without_writing() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig {
+        local_router_enabled: false,
+        ..CodeyConfig::default()
+    };
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+
+    assert!(!ensure_default_route_imported(&state).await);
+    let error = mark_initial_route_import_completed(&state)
+        .await
+        .unwrap_err();
+    assert!(error.contains("只读"));
+    assert_eq!(*state.config.read().await, initial);
+    assert!(!state.store.path().exists());
+}
+
+#[tokio::test]
+async fn native_model_cache_without_saved_route_does_not_block_settings_or_reenable() {
+    for provider_id in ["external-provider", "openai"] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut initial = CodeyConfig {
+            local_router_enabled: false,
+            ..CodeyConfig::default()
+        };
+        initial.upstream_models_by_provider.insert(
+            provider_id.into(),
+            vec!["gpt-5.5".into(), "native-model".into()],
+        );
+        initial
+            .selected_models_by_provider
+            .insert(provider_id.into(), vec!["gpt-5.5".into()]);
+        let initial = initial.normalize();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            config: RwLock::new(initial.clone()),
+            ..AppState::default()
+        });
+        let mut unrelated = initial.clone();
+        unrelated.slim_codex_pet = !unrelated.slim_codex_pet;
+        save_codey_config_locked(&state, CodeyConfigSaveInput::complete(unrelated))
+            .await
+            .unwrap();
+        let saved = state.config.read().await.clone();
+        assert_eq!(saved.profiles, initial.profiles);
+        assert_eq!(
+            saved.selected_models_by_provider,
+            initial.selected_models_by_provider
+        );
+        assert_eq!(
+            saved.upstream_models_by_provider,
+            initial.upstream_models_by_provider
+        );
+        assert_eq!(state.store.load().unwrap(), saved);
+
+        let mut reenabled = saved;
+        reenabled.local_router_enabled = true;
+        save_codey_config_locked(&state, CodeyConfigSaveInput::complete(reenabled))
+            .await
+            .unwrap();
+        let reenabled = state.config.read().await.clone();
+        assert!(reenabled.local_router_enabled);
+        assert_eq!(reenabled.profiles, initial.profiles);
+        assert_eq!(state.store.load().unwrap(), reenabled);
+    }
+}
+
+#[tokio::test]
+async fn codey_update_policy_save_persists_explicit_and_legacy_values() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        ..AppState::default()
+    });
+
+    for enabled in [false, true] {
+        let mut payload = serde_json::to_value(state.config.read().await.clone()).unwrap();
+        payload.as_object_mut().unwrap().remove("codeyUpdatePolicy");
+        payload["autoCheckCodeyUpdates"] = json!(enabled);
+        let input = codey_config_save_input(&json!({ "config": payload })).unwrap();
+        save_codey_config_locked(&state, input).await.unwrap();
+        let expected = if enabled {
+            crate::config::CodeyUpdatePolicy::Stable
+        } else {
+            crate::config::CodeyUpdatePolicy::Off
+        };
+        assert_eq!(state.config.read().await.codey_update_policy, expected);
+    }
+    for policy in [
+        crate::config::CodeyUpdatePolicy::Off,
+        crate::config::CodeyUpdatePolicy::Stable,
+        crate::config::CodeyUpdatePolicy::Experimental,
+    ] {
+        let mut payload = serde_json::to_value(state.config.read().await.clone()).unwrap();
+        payload["codeyUpdatePolicy"] = json!(policy);
+        let input = codey_config_save_input(&json!({ "config": payload })).unwrap();
+        save_codey_config_locked(&state, input).await.unwrap();
+        assert_eq!(state.config.read().await.codey_update_policy, policy);
+        assert_eq!(state.store.load().unwrap().codey_update_policy, policy);
+
+        let mut legacy = serde_json::to_value(state.config.read().await.clone()).unwrap();
+        legacy.as_object_mut().unwrap().remove("codeyUpdatePolicy");
+        legacy["slimCodexPet"] = json!(false);
+        let input = codey_config_save_input(&json!({ "config": legacy })).unwrap();
+        save_codey_config_locked(&state, input).await.unwrap();
+        let saved = state.config.read().await.clone();
+        assert_eq!(saved.codey_update_policy, policy);
+        assert!(!saved.slim_codex_pet);
+        assert_eq!(state.store.load().unwrap(), saved);
+    }
+}
+
+#[tokio::test]
+async fn legacy_save_without_local_router_field_preserves_disabled_state() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig {
+        local_router_enabled: false,
+        ..CodeyConfig::default()
+    };
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut payload = serde_json::to_value(initial).unwrap();
+    payload
+        .as_object_mut()
+        .unwrap()
+        .remove("localRouterEnabled");
+    payload["slimCodexPet"] = json!(false);
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    let saved = state.config.read().await;
+    assert!(!saved.local_router_enabled);
+    assert!(!saved.slim_codex_pet);
+}
+
+#[tokio::test]
+async fn legacy_save_without_subagent_roles_preserves_differentiated_roles() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut initial = CodeyConfig::default();
+    initial
+        .subagent_roles
+        .get_mut("codey_worker")
+        .unwrap()
+        .model = "worker-specialized".to_string();
+    initial
+        .subagent_roles
+        .get_mut("codey_deep_research")
+        .unwrap()
+        .reasoning_effort = "ultra".to_string();
+    let expected_roles = initial.subagent_roles.clone();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut payload = serde_json::to_value(initial).unwrap();
+    payload.as_object_mut().unwrap().remove("subagentRoles");
+    payload["slimCodexPet"] = json!(false);
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    let saved = state.config.read().await;
+    assert_eq!(saved.subagent_roles, expected_roles);
+    assert!(!saved.slim_codex_pet);
+}
+
+#[tokio::test]
+async fn legacy_subagent_scalars_update_only_the_default_role() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut initial = CodeyConfig::default();
+    initial
+        .subagent_roles
+        .get_mut("codey_worker")
+        .unwrap()
+        .model = "worker-specialized".to_string();
+    let expected_worker = initial.subagent_roles["codey_worker"].clone();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut payload = serde_json::to_value(initial).unwrap();
+    let fields = payload.as_object_mut().unwrap();
+    fields.remove("subagentRoles");
+    fields.insert("subagentModel".to_string(), json!("legacy-default"));
+    fields.insert("subagentReasoningEffort".to_string(), json!("high"));
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    let saved = state.config.read().await;
+    assert_eq!(saved.subagent_roles["codey_worker"], expected_worker);
+    assert_eq!(
+        saved.subagent_roles[SUBAGENT_ROLE_DEFAULT].model,
+        "legacy-default"
+    );
+    assert_eq!(
+        saved.subagent_roles[SUBAGENT_ROLE_DEFAULT].reasoning_effort,
+        "high"
+    );
+    assert_eq!(saved.subagent_model, "legacy-default");
+    assert_eq!(saved.subagent_reasoning_effort, "high");
+}
+
+#[tokio::test]
+async fn codex_launch_proxy_saves_after_validation() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut payload = serde_json::to_value(&initial).unwrap();
+    payload["codexLaunchProxy"] = json!(" http://user:pass@127.0.0.1:7890 ");
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "failed");
+    assert!(result["message"].as_str().unwrap().contains("启动代理"));
+
+    let mut payload = serde_json::to_value(&initial).unwrap();
+    payload["codexLaunchProxy"] = json!(" socks5h://127.0.0.1:1080 ");
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(
+        state.config.read().await.codex_launch_proxy,
+        "socks5h://127.0.0.1:1080"
+    );
+}
+
+#[tokio::test]
+async fn partial_subagent_role_payload_merges_with_existing_roles() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut initial = CodeyConfig::default();
+    initial
+        .subagent_roles
+        .get_mut("codey_deep_research")
+        .unwrap()
+        .model = "research-specialized".to_string();
+    let expected_research = initial.subagent_roles["codey_deep_research"].clone();
+    let expected_default = initial.subagent_roles[SUBAGENT_ROLE_DEFAULT].clone();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut payload = serde_json::to_value(initial).unwrap();
+    payload["subagentRoles"] = json!({
+        "codey_worker": {
+            "model": "worker-updated",
+            "reasoningEffort": "max"
+        }
+    });
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    let saved = state.config.read().await;
+    assert_eq!(
+        saved.subagent_roles["codey_deep_research"],
+        expected_research
+    );
+    assert_eq!(
+        saved.subagent_roles[SUBAGENT_ROLE_DEFAULT],
+        expected_default
+    );
+    assert_eq!(saved.subagent_roles["codey_worker"].model, "worker-updated");
+    assert_eq!(saved.subagent_roles["codey_worker"].reasoning_effort, "max");
+}
+
+#[tokio::test]
+async fn custom_role_matrix_persists_official_models_for_the_current_provider() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let provider_id = initial.current_provider_id().unwrap().to_string();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let mut payload = serde_json::to_value(initial).unwrap();
+    payload["subagentRoles"] = json!({
+        "codey_quick_scan": {
+            "model": "gpt-5.6-luna",
+            "reasoningEffort": "low"
+        },
+        "codey_deep_research": {
+            "model": "gpt-5.6-luna",
+            "reasoningEffort": "high"
+        },
+        "codey_visual_analysis": {
+            "model": "gpt-5.6-terra",
+            "reasoningEffort": "high"
+        },
+        "codey_worker": {
+            "model": "gpt-5.6-terra",
+            "reasoningEffort": "max"
+        },
+        "codey_visual_worker": {
+            "model": "gpt-5.6-terra",
+            "reasoningEffort": "max"
+        },
+        "default": {
+            "model": "gpt-5.6-terra",
+            "reasoningEffort": "low"
+        }
+    });
+
+    let result = invoke_api(&state, "save_codey_config", json!({ "config": payload })).await;
+
+    assert_eq!(result["status"], "ok");
+    let saved = state.config.read().await.clone();
+    assert_eq!(
+        saved.subagent_roles["codey_quick_scan"],
+        SubagentRoleConfig::new(
+            crate::local_router::model_alias(&provider_id, "gpt-5.6-luna"),
+            "low",
+        )
+    );
+    assert_eq!(
+        saved.subagent_roles["codey_worker"],
+        SubagentRoleConfig::new(
+            crate::local_router::model_alias(&provider_id, "gpt-5.6-terra"),
+            "max",
+        )
+    );
+    assert_eq!(
+        saved.declared_official_models_by_provider[&provider_id],
+        ["gpt-5.6-luna", "gpt-5.6-terra"]
+    );
+    assert_eq!(
+        saved.upstream_models_by_provider[&provider_id],
+        ["gpt-5.6-luna", "gpt-5.6-terra"]
+    );
+    assert!(!saved.selected_models_by_provider.contains_key(&provider_id));
+    assert!(
+        !saved
+            .manual_third_party_models_by_provider
+            .contains_key(&provider_id)
+    );
+    assert_eq!(state.store.load().unwrap(), saved);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn watcher_join_does_not_hold_the_config_write_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    let (shutdown_seen_tx, shutdown_seen_rx) = oneshot::channel();
+    let release = Arc::new(Notify::new());
+    let watcher_release = Arc::clone(&release);
+    let watcher_task = tokio::spawn(async move {
+        let _ = shutdown_rx.await;
+        let _ = shutdown_seen_tx.send(());
+        watcher_release.notified().await;
+    });
+    *state.waiting_watcher_shutdown.lock().await = Some(shutdown_tx);
+    *state.waiting_watcher_task.lock().await = Some(watcher_task);
+
+    let mut input = initial;
+    input.slim_codex_pet = !input.slim_codex_pet;
+    let save_state = Arc::clone(&state);
+    let save_task = tokio::spawn(async move { save_codey_config(&save_state, input).await });
+    tokio::time::timeout(Duration::from_secs(1), shutdown_seen_rx)
+        .await
+        .expect("watcher shutdown should start")
+        .unwrap();
+
+    let config_guard =
+        tokio::time::timeout(Duration::from_millis(100), state.config_write_lock.lock())
+            .await
+            .expect("watcher join must happen after releasing the config write lock");
+    drop(config_guard);
+    release.notify_one();
+    save_task.await.unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn provider_sync_does_not_block_config_writes_or_commit_a_stale_result() {
+    let directory = tempfile::tempdir().unwrap();
+    let initial = CodeyConfig::default();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(initial.clone()),
+        ..AppState::default()
+    });
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let sync_state = Arc::clone(&state);
+    let sync_task = tokio::spawn(async move {
+        sync_provider_state_with(&sync_state, move |mut config| {
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            config.profiles[0].name = "stale provider".to_string();
+            let mut status = codex_provider::status_from_config(&config);
+            status.changed = true;
+            Ok((config, status))
+        })
+        .await
+    });
+    started_rx.await.unwrap();
+
+    let mut settings = initial;
+    settings.slim_codex_pet = !settings.slim_codex_pet;
+    let config_guard =
+        tokio::time::timeout(Duration::from_millis(500), state.config_write_lock.lock())
+            .await
+            .expect("provider inspection must not hold the config write lock");
+    save_codey_config_locked(&state, CodeyConfigSaveInput::complete(settings))
+        .await
+        .unwrap();
+    drop(config_guard);
+    release_tx.send(()).unwrap();
+
+    let error = sync_task.await.unwrap().unwrap_err();
+    assert!(error.contains("已忽略过期"));
+    let memory = state.config.read().await.clone();
+    let disk = state.store.load().unwrap();
+    assert_eq!(disk, memory);
+    assert_ne!(memory.profiles[0].name, "stale provider");
+    assert_eq!(memory.settings_revision, 1);
+}
+
+#[test]
+fn model_sync_can_defer_catalog_refresh_until_a_model_is_selectable() {
+    assert!(!should_refresh_model_catalog(
+        &model_catalog::ModelSelectionState::default()
+    ));
+
+    let mut state = model_catalog::ModelSelectionState::default();
+    state.third_party_models.push("provider-model".to_string());
+    assert!(should_refresh_model_catalog(&state));
+}
+
+#[cfg(windows)]
+#[test]
+fn selected_codex_app_path_requires_a_desktop_executable() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(validate_codex_app_path(directory.path().to_str().unwrap()).is_err());
+
+    let executable = directory.path().join("Codex.exe");
+    fs::write(&executable, []).unwrap();
+    assert_eq!(
+        validate_codex_app_path(directory.path().to_str().unwrap()).unwrap(),
+        directory.path()
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn selected_codex_app_path_accepts_a_custom_install_root() {
+    let directory = tempfile::tempdir().unwrap();
+    let install_root = directory.path().join("D drive").join("OpenAI Codex");
+    let current = install_root.join("versions").join("current");
+    fs::create_dir_all(&current).unwrap();
+    fs::write(current.join("ChatGPT.exe"), []).unwrap();
+
+    assert_eq!(
+        validate_codex_app_path(install_root.to_str().unwrap()).unwrap(),
+        current
+    );
+}
+
+#[test]
+fn update_manifest_reports_a_newer_https_release() {
+    let manifest = serde_json::from_value::<UpdateManifest>(json!({
+        "schema_version": 1,
+        "version": "0.2.0",
+        "tag": "v0.2.0",
+        "assets": [{
+            "platform": "windows",
+            "arch": "x64",
+            "package_type": "nsis",
+            "file_name": "Codey-0.2.0-windows-x64-setup.exe",
+            "url": "https://updates.example.com/releases/v0.2.0/Codey-0.2.0-windows-x64-setup.exe",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "size": 1024
+        }]
+    }))
+    .unwrap();
+
+    let result = assess_update_manifest("0.1.0", &manifest).unwrap();
+
+    assert_eq!(result.current_version, "0.1.0");
+    assert_eq!(result.latest_version, "0.2.0");
+    assert!(result.update_available);
+}
+
+#[test]
+fn update_manifest_selects_only_a_supported_current_platform_installer() {
+    let platform = current_update_platform();
+    let arch = current_update_arch();
+    let (package_type, file_name, expected_package_type) = match platform {
+        "windows" => (
+            "nsis",
+            format!("Codey-0.2.0-windows-{arch}-setup.exe"),
+            Some("nsis"),
+        ),
+        "macos" => (
+            "app-zip",
+            format!("Codey-0.2.0-macos-{arch}-unsigned.zip"),
+            Some("app-zip"),
+        ),
+        _ => (
+            "app-zip",
+            format!("Codey-0.2.0-{platform}-{arch}-unsupported.zip"),
+            None,
+        ),
+    };
+    let manifest = serde_json::from_value::<UpdateManifest>(json!({
+        "schema_version": 1,
+        "version": "0.2.0",
+        "tag": "v0.2.0",
+        "assets": [{
+            "platform": platform,
+            "arch": arch,
+            "package_type": package_type,
+            "file_name": &file_name,
+            "url": format!("https://updates.example.com/releases/v0.2.0/{file_name}"),
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "size": 2048
+        }]
+    }))
+    .unwrap();
+
+    let result = assess_update_manifest("0.1.0", &manifest).unwrap();
+
+    assert_eq!(
+        result
+            .selected_asset
+            .as_ref()
+            .map(|asset| asset.package_type.as_str()),
+        expected_package_type
+    );
+    assert_eq!(
+        result
+            .selected_asset
+            .as_ref()
+            .map(|asset| asset.arch.as_str()),
+        expected_package_type.map(|_| arch)
+    );
+    assert_eq!(
+        result
+            .selected_asset
+            .as_ref()
+            .map(|asset| asset.file_name.as_str()),
+        expected_package_type.map(|_| file_name.as_str())
+    );
+}
+
+#[tokio::test]
+async fn app_state_preserves_update_shutdown_reason() {
+    let state = AppState::default();
+
+    state.request_update_shutdown();
+    state.request_shutdown();
+
+    assert_eq!(
+        state.wait_for_shutdown().await,
+        AppShutdownReason::InstallUpdate
+    );
+}
+
+#[tokio::test]
+async fn shutdown_signal_wakes_every_waiter_without_losing_the_reason() {
+    let state = Arc::new(AppState::default());
+    let waiters = (0..8)
+        .map(|_| {
+            let state = state.clone();
+            tokio::spawn(async move { state.wait_for_shutdown().await })
+        })
+        .collect::<Vec<_>>();
+    tokio::task::yield_now().await;
+
+    state.request_update_shutdown();
+
+    for waiter in waiters {
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), waiter)
+                .await
+                .expect("shutdown waiter timed out")
+                .expect("shutdown waiter panicked"),
+            AppShutdownReason::InstallUpdate
+        );
+    }
+}
+
+#[test]
+fn update_manifest_rejects_insecure_asset_urls() {
+    let manifest = serde_json::from_value::<UpdateManifest>(json!({
+        "schema_version": 1,
+        "version": "0.2.0",
+        "tag": "v0.2.0",
+        "assets": [{
+            "platform": "windows",
+            "arch": "x64",
+            "package_type": "nsis",
+            "file_name": "Codey-0.2.0-windows-x64-setup.exe",
+            "url": "http://updates.example.com/Codey-0.2.0-windows-x64-setup.exe",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "size": 1024
+        }]
+    }))
+    .unwrap();
+
+    assert!(
+        assess_update_manifest("0.1.0", &manifest)
+            .unwrap_err()
+            .contains("必须使用 HTTPS")
+    );
+}
+
+#[test]
+fn update_manifest_rejects_asset_path_traversal() {
+    let manifest = serde_json::from_value::<UpdateManifest>(json!({
+        "schema_version": 1,
+        "version": "0.2.0",
+        "tag": "v0.2.0",
+        "assets": [{
+            "platform": "windows",
+            "arch": "x64",
+            "package_type": "nsis",
+            "file_name": "../Codey.exe",
+            "url": "https://updates.example.com/Codey.exe",
+            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "size": 1024
+        }]
+    }))
+    .unwrap();
+
+    assert!(
+        assess_update_manifest("0.1.0", &manifest)
+            .unwrap_err()
+            .contains("文件名无效")
+    );
+}

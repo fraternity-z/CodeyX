@@ -1,0 +1,156 @@
+/* ==========================================================================
+   Responsive Adaptations
+   ========================================================================== */
+
+@container settings-content (max-width: 680px) {
+  .settings-page .official-account-usage-container {
+    padding-left: 0;
+  }
+
+  .settings-page .official-account-usage-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-page .official-account-usage-cell-foot {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 680px) {
+  .prompt-optimization-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .prompt-optimization-toolbar-actions {
+    justify-content: flex-start;
+    margin-left: 0;
+    flex-wrap: wrap;
+  }
+
+  .operations-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .operations-heading {
+    min-width: 0;
+  }
+
+  .operations-heading > div {
+    min-width: 0;
+  }
+
+  .operations-actions {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .operations-status-chips {
+    margin-right: auto;
+    flex-wrap: wrap;
+  }
+
+  .route-editor-row-names {
+    grid-template-columns: 1fr;
+  }
+
+  .route-heading-actions,
+  .catalog-aggregate-heading,
+  .provider-model-empty {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .route-heading-actions .local-router-toggle {
+    justify-content: space-between;
+  }
+
+  .route-heading-actions .local-router-toggle-group .local-router-toggle-item {
+    flex: 1;
+    justify-content: space-between;
+  }
+
+  .route-catalog-pane {
+    padding: 12px;
+  }
+
+  .route-auxiliary-bar {
+    padding: 10px 12px;
+    gap: 10px;
+  }
+
+  .route-auxiliary-misc {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .route-auxiliary-combobox {
+    width: 100%;
+    flex: 1 1 100%;
+  }
+
+  .route-auxiliary-retry {
+    width: 100%;
+  }
+
+  .route-auxiliary-retry .local-router-toggle {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .provider-model-tags,
+  .route-manager-current .provider-model-tags,
+  .provider-model-group .provider-model-empty,
+  .route-manager-current .provider-model-group .provider-model-empty {
+    padding-left: 10px;
+  }
+
+  .section-title:has(+ .notification-channel-list),
+  .notification-card-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .notification-add-actions {
+    justify-content: flex-start;
+  }
+
+  .notification-channel-controls {
+    justify-content: flex-end;
+  }
+
+  .notification-dialog-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .notification-dialog-test {
+    border-top: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.08);
+    border-left: 0;
+  }
+
+}
+
+@media (max-width: 520px) {
+  .route-option-grid-row {
+    grid-template-columns: 1fr;
+  }
+
+  .route-option-grid-row .route-option-col + .route-option-col {
+    border-left: 0;
+    border-top: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+  }
+
+  .route-option-item {
+    padding: 8px 10px;
+  }
+
+  .route-option-item .route-field-hint {
+    padding-left: 0;
+  }
+
+  .route-option-subpanel {
+    margin-left: 0;
+  }
+}

@@ -1,0 +1,192 @@
+/* ==========================================================================
+   Diagnostic Storage Cleanup Notification
+   ========================================================================== */
+
+.cleanup-notice-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--codey-text, #1d1d1f);
+}
+
+.cleanup-hero-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  background: linear-gradient(180deg, rgba(var(--codey-ink-rgb, 0, 0, 0), 0.02) 0%, rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04) 100%);
+  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.06);
+  border-radius: 10px;
+}
+
+.cleanup-hero-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cleanup-stat-label {
+  font-size: 11px;
+  color: var(--codey-subtle, #86868b);
+  font-weight: 500;
+  letter-spacing: 0.01em;
+}
+
+.cleanup-stat-value-group {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.cleanup-stat-value {
+  font-size: 17px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.cleanup-stat-value.has-savings {
+  color: var(--codey-green, #15803d);
+}
+
+.cleanup-stat-value.no-savings {
+  color: var(--codey-text, #1d1d1f);
+}
+
+.cleanup-stat-subtag {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--codey-muted, #6e6e73);
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.04);
+  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.05);
+  border-radius: 4px;
+  padding: 1px 5px;
+  white-space: nowrap;
+}
+
+.cleanup-hero-change {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.cleanup-change-flow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.cleanup-change-from {
+  color: var(--codey-muted, #6e6e73);
+}
+
+.cleanup-arrow {
+  color: var(--codey-subtle, #8e8e93);
+  flex-shrink: 0;
+}
+
+.cleanup-change-to {
+  color: var(--codey-text, #1d1d1f);
+}
+
+.cleanup-details-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cleanup-details-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.cleanup-detail-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border-radius: 6px;
+  background: rgba(var(--codey-ink-rgb, 0, 0, 0), 0.03);
+  border: 1px solid rgba(var(--codey-ink-rgb, 0, 0, 0), 0.05);
+  font-size: 11px;
+  color: var(--codey-text-soft, #48484a);
+  font-variant-numeric: tabular-nums;
+}
+
+.cleanup-detail-pill strong {
+  font-weight: 600;
+  color: var(--codey-text, #1d1d1f);
+}
+
+.cleanup-pill-icon {
+  color: var(--codey-muted, #6e6e73);
+  flex-shrink: 0;
+}
+
+.cleanup-retained-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.cleanup-retained-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 7px;
+  border-radius: 5px;
+  background: rgba(0, 122, 255, 0.05);
+  border: 1px solid rgba(0, 122, 255, 0.12);
+  color: var(--codey-blue, #0066cc);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cleanup-incomplete-notice {
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: rgba(255, 149, 0, 0.08);
+  border: 1px solid rgba(255, 149, 0, 0.2);
+  color: var(--codey-amber, #9a5b0f);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.cleanup-errors-alert {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(255, 59, 48, 0.06);
+  border: 1px solid rgba(255, 59, 48, 0.18);
+  color: var(--codey-red, #c92a2a);
+  font-size: 11px;
+}
+
+.cleanup-errors-header {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-weight: 600;
+}
+
+.cleanup-errors-list {
+  margin: 0;
+  padding-left: 16px;
+  line-height: 1.4;
+}
