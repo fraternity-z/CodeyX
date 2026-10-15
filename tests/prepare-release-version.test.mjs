@@ -9,15 +9,15 @@ import { prepareReleaseVersion, validateReleaseVersion, validateSourceVersions }
 
 const execute = promisify(execFile);
 const localNames = ["codey", "codey-codex-extensions", "codey-runtime-core", "codey-runtime-data"];
-const thirdParty = '[[package]]\nname = "third-party"\nversion = "1.2.5"\nsource = "registry+https://example.com"\nchecksum = "abc"\ndependencies = [\n "codey-runtime-core 1.2.5 (registry+https://example.com)",\n]\n\n[[package]]\nname = "codey-runtime-core"\nversion = "1.2.5"\nsource = "registry+https://example.com"\nchecksum = "def"\n';
+const thirdParty = '[[package]]\nname = "third-party"\nversion = "1.0.0"\nsource = "registry+https://example.com"\nchecksum = "abc"\ndependencies = [\n "codey-runtime-core 1.0.0 (registry+https://example.com)",\n]\n\n[[package]]\nname = "codey-runtime-core"\nversion = "1.0.0"\nsource = "registry+https://example.com"\nchecksum = "def"\n';
 
-async function fixture(handler, { cargoVersion = "1.2.5", lockVersion = "1.2.5" } = {}) {
+async function fixture(handler, { cargoVersion = "1.0.0", lockVersion = "1.0.0" } = {}) {
   const root = await mkdtemp(join(tmpdir(), "codey-release-version-"));
   try {
     const files = {
-      "package.json": `${JSON.stringify({ name: "codey", version: "1.2.5", scripts: { build: "unchanged" } }, null, 2)}\n`,
-      "Cargo.toml": `[workspace]\nmembers = [${localNames.map((name) => `"${name}"`).join(", ")}, "sdk"]\n\n[workspace.package]\nedition = "2024"\nversion = "${cargoVersion}"\n\n[workspace.dependencies]\nthird-party = "1.2.5"\n`,
-      "Cargo.lock": `version = 4\n\n${localNames.map((name) => `[[package]]\nname = "${name}"\nversion = "${lockVersion}"\ndependencies = [\n "codey-runtime-core ${lockVersion}",\n "third-party 1.2.5",\n]\n\n`).join("")}[[package]]\nname = "sdk"\nversion = "0.1.0"\n\n${thirdParty}`,
+      "package.json": `${JSON.stringify({ name: "codey", version: "1.0.0", scripts: { build: "unchanged" } }, null, 2)}\n`,
+      "Cargo.toml": `[workspace]\nmembers = [${localNames.map((name) => `"${name}"`).join(", ")}, "sdk"]\n\n[workspace.package]\nedition = "2024"\nversion = "${cargoVersion}"\n\n[workspace.dependencies]\nthird-party = "1.0.0"\n`,
+      "Cargo.lock": `version = 4\n\n${localNames.map((name) => `[[package]]\nname = "${name}"\nversion = "${lockVersion}"\ndependencies = [\n "codey-runtime-core ${lockVersion}",\n "third-party 1.0.0",\n]\n\n`).join("")}[[package]]\nname = "sdk"\nversion = "0.1.0"\n\n${thirdParty}`,
       "sdk/Cargo.toml": '[package]\nname = "sdk"\nversion = "0.1.0"\n',
       ...Object.fromEntries(localNames.map((name) => [`${name}/Cargo.toml`, `[package]\nname = "${name}"\nversion.workspace = true\n`])),
     };
@@ -42,19 +42,19 @@ test("release version accepts strict SemVer and rejects unsafe or ambiguous inpu
 });
 
 test("source manifests must agree before injecting the chosen version", () => {
-  const cargo = '[workspace.package]\nversion = "1.2.5"\n[dependencies]\nversion = "2.0.0"\n';
-  assert.equal(validateSourceVersions('{"version":"1.2.5"}', cargo), "1.2.5");
+  const cargo = '[workspace.package]\nversion = "1.0.0"\n[dependencies]\nversion = "2.0.0"\n';
+  assert.equal(validateSourceVersions('{"version":"1.0.0"}', cargo), "1.0.0");
   assert.throws(() => validateSourceVersions('{"version":"2.0.0"}', cargo), /必须一致/);
-  assert.throws(() => validateSourceVersions('{"version":"1.2.5"}', '[workspace.package]\n[dependencies]\nversion = "1.2.5"\n'), /无法确定/);
+  assert.throws(() => validateSourceVersions('{"version":"1.0.0"}', '[workspace.package]\n[dependencies]\nversion = "1.0.0"\n'), /无法确定/);
 });
 
 test("version injection updates four inherited local packages and explicit lock references without touching dependencies", async () => {
   await fixture(async ({ root, files, git, build }) => {
     const result = await prepareReleaseVersion(build, root);
-    assert.deepEqual(result, { sourceVersion: "1.2.5", version: "2.0.0-beta.1", packages: localNames });
+    assert.deepEqual(result, { sourceVersion: "1.0.0", version: "2.0.0-beta.1", packages: localNames });
     assert.equal(JSON.parse(await readFile(join(root, "package.json"), "utf8")).version, build.version);
     const cargo = await readFile(join(root, "Cargo.toml"), "utf8");
-    assert.equal(cargo, files["Cargo.toml"].replace('version = "1.2.5"', `version = "${build.version}"`));
+    assert.equal(cargo, files["Cargo.toml"].replace('version = "1.0.0"', `version = "${build.version}"`));
     const lock = await readFile(join(root, "Cargo.lock"), "utf8");
     for (const name of localNames) assert.ok(lock.includes(`name = "${name}"\nversion = "${build.version}"`));
     assert.ok(lock.includes(`"codey-runtime-core ${build.version}"`));
@@ -92,7 +92,7 @@ test("Windows CRLF checkouts preserve their line endings and remain idempotent",
 });
 
 test("inconsistent source manifests or local lock versions fail before any writes", async () => {
-  for (const options of [{ cargoVersion: "1.2.4" }, { lockVersion: "1.2.4" }]) {
+  for (const options of [{ cargoVersion: "1.0.2" }, { lockVersion: "1.0.2" }]) {
     await fixture(async ({ root, git, build }) => {
       await assert.rejects(prepareReleaseVersion(build, root), /版本.*一致/);
       assert.equal(await git("status", "--porcelain"), "");

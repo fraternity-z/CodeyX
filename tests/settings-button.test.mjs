@@ -946,10 +946,10 @@ test("hydrates the passive update badge from startup backend state", async () =>
       return {
         status: "ok",
         availableUpdate: {
-          currentVersion: "0.3.9",
-          latestVersion: "0.4.0",
+          currentVersion: "1.0.0",
+          latestVersion: "1.0.1",
           updateAvailable: true,
-          selectedAsset: { fileName: "Codey-0.4.0.zip" },
+          selectedAsset: { fileName: "Codey-1.0.1.zip" },
         },
       };
     }
@@ -963,7 +963,7 @@ test("hydrates the passive update badge from startup backend state", async () =>
   assert.ok(button);
   assert.equal(button.getAttribute("data-codey-update-available"), "true");
   assert.equal(button.getAttribute("aria-label"), "打开 Codey 配置，有可用更新");
-  assert.equal(fixture.window.__codeyUpdateAvailability.latestVersion, "0.4.0");
+  assert.equal(fixture.window.__codeyUpdateAvailability.latestVersion, "1.0.1");
   const updateEvents = fixture.events.filter(
     (event) => event.type === "codey-update-availability-changed",
   );

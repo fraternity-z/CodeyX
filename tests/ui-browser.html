@@ -48,7 +48,7 @@
         "![功能预览](https://example.test/release-preview.png)",
         "## 优化与修复", "- 支持 ~~旧版纯文本~~ **Markdown 排版**。\n- [x] 表格、代码与折叠内容均可阅读。\n- 长公告在正文区域滚动，操作按钮始终可见。",
         "| 内容 | 展示方式 |\n| --- | --- |\n| 发布说明 | 与 Release 共用正文 |\n| 外部链接 | 在浏览器中打开 |",
-        "```json\n{\n  \"channel\": \"stable\",\n  \"release\": \"v1.2.6\"\n}\n```",
+        "```json\n{\n  \"channel\": \"stable\",\n  \"release\": \"v1.0.1\"\n}\n```",
         "> [!IMPORTANT]\n> 阅读升级须知后再安装更新。",
         "<details>\n<summary>完整变更</summary>\n\n这是折叠区域内的 **完整说明**，不会被摘要替换。\n\n</details>",
         "## 升级须知", "安装更新会退出当前实例，请先保存正在进行的工作。",
@@ -62,7 +62,7 @@
       function UpdateFixture() {
         const [open, setOpen] = React.useState(true);
         return React.createElement(ConfirmationDialog, {
-          confirmation: open ? { action: "download-update", title: "发现 Codey 新版本 v1.2.6", description: "当前版本为 v1.2.5，检测到新版本 v1.2.6。\n\n是否立即下载更新？", releaseNotes, releaseTitle: "CodeyX v1.2.6 · 更清楚的更新公告", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.2.6", confirmLabel: "立即更新", run() {} } : null,
+          confirmation: open ? { action: "download-update", title: "发现 Codey 新版本 v1.0.1", description: "当前版本为 v1.0.0，检测到新版本 v1.0.1。\n\n是否立即下载更新？", releaseNotes, releaseTitle: "CodeyX v1.0.1 · 更清楚的更新公告", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.0.1", confirmLabel: "立即更新", run() {} } : null,
           container: modalContainer,
           onClose() { window.updateFixture.dismissed = true; setOpen(false); },
           onConfirm() { window.updateFixture.confirmed = true; setOpen(false); },

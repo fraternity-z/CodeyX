@@ -1111,7 +1111,7 @@ mod tests {
             timestamp: format_beijing_timestamp(now),
             platform: "windows".to_string(),
             versions: ErrorVersions {
-                codey: Some("0.7.3".to_string()),
+                codey: Some("1.0.0".to_string()),
                 electron: Some("151.0.0".to_string()),
                 ..ErrorVersions::default()
             },
@@ -1128,7 +1128,7 @@ mod tests {
         assert_eq!(value["operation"], "inject_cdp_bridge");
         assert_eq!(value["error"], "renderer unavailable");
         assert_eq!(value["platform"], "windows");
-        assert_eq!(value["versions"]["codey"], "0.7.3");
+        assert_eq!(value["versions"]["codey"], "1.0.0");
         assert_eq!(value["versions"]["electron"], "151.0.0");
         assert_eq!(value["stage"], "startup.renderer_injection");
         assert_eq!(value["recoverable"], false);

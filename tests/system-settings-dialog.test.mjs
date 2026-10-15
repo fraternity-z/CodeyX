@@ -48,7 +48,7 @@ function renderDialog(overrides = {}) {
     open: true,
     onOpenChange: () => {},
     container: null,
-    appVersion: "1.1.1",
+    appVersion: "1.0.0",
     codexAppVersion: "0.4.0",
     codexAppPath: "/Applications/ChatGPT.app",
     isBusy: false,
@@ -98,7 +98,7 @@ test("复制路径、修复配置与更新策略都接到真实回调", async (t
   clipboardWrites.length = 0;
   const { calls, tree } = renderDialog();
   const text = textContent(tree);
-  assert.match(text, /v1\.1\.1/);
+  assert.match(text, /v1\.0\.0/);
   assert.match(text, /v0\.4\.0/);
   assert.match(text, /\/Applications\/ChatGPT\.app/);
 

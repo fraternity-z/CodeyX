@@ -95,7 +95,7 @@ function SystemSettingsDialogComponent({
               <div className="flex items-center justify-between pr-3 min-w-0">
                 <span className="text-xs font-medium text-[var(--codey-muted)] shrink-0">Codey 版本</span>
                 <span className="font-mono text-xs font-semibold tracking-tight text-[var(--codey-text)] truncate">
-                  v{appVersion || "0.0.1"}
+                  v{appVersion || "1.0.0"}
                 </span>
               </div>
               <div className="flex items-center justify-between pl-3 min-w-0">

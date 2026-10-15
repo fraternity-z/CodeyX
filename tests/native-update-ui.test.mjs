@@ -31,11 +31,11 @@ test("background updates hand the exact Release to the rendered client dialog wi
   const source = await readFile(new URL("backend/src/cdp.rs", root), "utf8");
   const match = source.match(/fn update_prompt_script\(check: &serde_json::Value\) -> String \{\s*format!\(\s*r#"(.*?)"#/s);
   assert.ok(match, "the update prompt script must be independently testable");
-  const update = { latestVersion: "1.2.6", releaseNotes: "## 完整公告\n\n</script><script>throw new Error('unsafe')</script>\n\n最后一段", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.2.6" };
+  const update = { latestVersion: "1.0.1", releaseNotes: "## 完整公告\n\n</script><script>throw new Error('unsafe')</script>\n\n最后一段", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.0.1" };
   const script = match[1].replaceAll("{{", "{").replaceAll("}}", "}").replace("{check}", JSON.stringify(update));
   let opened = 0;
   const events = [];
-  const currentUpdate = { latestVersion: "1.3.0" };
+  const currentUpdate = { latestVersion: "1.0.2" };
   const window = { __codeyUpdateAvailability: currentUpdate, __codeySettingsOverlay: { open() { opened++; } }, dispatchEvent(event) { events.push(event.type); } };
   assert.equal(vm.runInNewContext(script, { window, CustomEvent }), true);
   assert.equal(opened, 1);

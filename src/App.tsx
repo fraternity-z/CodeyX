@@ -1536,7 +1536,7 @@ export function App({
           <div className="sidebar-footer-bar">
             <div className="sidebar-footer-left">
               <span className="sidebar-footer-version font-mono">
-                v{status.appVersion || "0.0.1"}
+                v{status.appVersion || "1.0.0"}
                 {(updateCheck?.updateAvailable === true || Boolean(downloadedUpdate)) && (
                   <span
                     className="ml-1.5 inline-flex shrink-0"

@@ -758,7 +758,7 @@ if (import.meta.env.DEV) {
           ).length;
         return {
           running: true,
-          appVersion: "0.2.0",
+          appVersion: "1.0.0",
           codexAppVersion: "26.601.21317",
           clientPlatform: previewClientPlatform,
           officialAccountAvailable: previewOfficialAccounts.some(
@@ -1581,15 +1581,15 @@ if (import.meta.env.DEV) {
       }
       if (command === "check_for_updates") {
         return {
-          currentVersion: "0.1.0",
-          latestVersion: "0.2.0",
+          currentVersion: "1.0.0",
+          latestVersion: "1.0.1",
           updateAvailable: true,
           selectedAsset: {
             platform: "macos",
             arch: "arm64",
             packageType: "app-zip",
-            fileName: "Codey-0.2.0-macos-arm64-unsigned.zip",
-            url: "https://updates.example.com/releases/v0.2.0/Codey-0.2.0-macos-arm64-unsigned.zip",
+            fileName: "Codey-1.0.1-macos-arm64-unsigned.zip",
+            url: "https://updates.example.com/releases/v1.0.1/Codey-1.0.1-macos-arm64-unsigned.zip",
             sha256:
               "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             size: 31_911_421,
@@ -1598,9 +1598,9 @@ if (import.meta.env.DEV) {
       }
       if (command === "download_update") {
         return {
-          latestVersion: "0.2.0",
-          filePath: "/tmp/codey-updates/Codey-0.2.0-macos-arm64-unsigned.zip",
-          fileName: "Codey-0.2.0-macos-arm64-unsigned.zip",
+          latestVersion: "1.0.1",
+          filePath: "/tmp/codey-updates/Codey-1.0.1-macos-arm64-unsigned.zip",
+          fileName: "Codey-1.0.1-macos-arm64-unsigned.zip",
           size: 31_911_421,
           sha256:
             "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
@@ -1608,8 +1608,8 @@ if (import.meta.env.DEV) {
             platform: "macos",
             arch: "arm64",
             packageType: "app-zip",
-            fileName: "Codey-0.2.0-macos-arm64-unsigned.zip",
-            url: "https://updates.example.com/releases/v0.2.0/Codey-0.2.0-macos-arm64-unsigned.zip",
+            fileName: "Codey-1.0.1-macos-arm64-unsigned.zip",
+            url: "https://updates.example.com/releases/v1.0.1/Codey-1.0.1-macos-arm64-unsigned.zip",
             sha256:
               "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             size: 31_911_421,

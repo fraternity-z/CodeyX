@@ -1932,24 +1932,24 @@ fn selected_codex_app_path_accepts_a_custom_install_root() {
 fn update_manifest_reports_a_newer_https_release() {
     let manifest = serde_json::from_value::<UpdateManifest>(json!({
         "schema_version": 1,
-        "version": "0.2.0",
-        "tag": "v0.2.0",
+        "version": "1.0.1",
+        "tag": "v1.0.1",
         "assets": [{
             "platform": "windows",
             "arch": "x64",
             "package_type": "nsis",
-            "file_name": "Codey-0.2.0-windows-x64-setup.exe",
-            "url": "https://updates.example.com/releases/v0.2.0/Codey-0.2.0-windows-x64-setup.exe",
+            "file_name": "Codey-1.0.1-windows-x64-setup.exe",
+            "url": "https://updates.example.com/releases/v1.0.1/Codey-1.0.1-windows-x64-setup.exe",
             "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "size": 1024
         }]
     }))
     .unwrap();
 
-    let result = assess_update_manifest("0.1.0", &manifest).unwrap();
+    let result = assess_update_manifest("1.0.0", &manifest).unwrap();
 
-    assert_eq!(result.current_version, "0.1.0");
-    assert_eq!(result.latest_version, "0.2.0");
+    assert_eq!(result.current_version, "1.0.0");
+    assert_eq!(result.latest_version, "1.0.1");
     assert!(result.update_available);
 }
 
@@ -1960,37 +1960,37 @@ fn update_manifest_selects_only_a_supported_current_platform_installer() {
     let (package_type, file_name, expected_package_type) = match platform {
         "windows" => (
             "nsis",
-            format!("Codey-0.2.0-windows-{arch}-setup.exe"),
+            format!("Codey-1.0.1-windows-{arch}-setup.exe"),
             Some("nsis"),
         ),
         "macos" => (
             "app-zip",
-            format!("Codey-0.2.0-macos-{arch}-unsigned.zip"),
+            format!("Codey-1.0.1-macos-{arch}-unsigned.zip"),
             Some("app-zip"),
         ),
         _ => (
             "app-zip",
-            format!("Codey-0.2.0-{platform}-{arch}-unsupported.zip"),
+            format!("Codey-1.0.1-{platform}-{arch}-unsupported.zip"),
             None,
         ),
     };
     let manifest = serde_json::from_value::<UpdateManifest>(json!({
         "schema_version": 1,
-        "version": "0.2.0",
-        "tag": "v0.2.0",
+        "version": "1.0.1",
+        "tag": "v1.0.1",
         "assets": [{
             "platform": platform,
             "arch": arch,
             "package_type": package_type,
             "file_name": &file_name,
-            "url": format!("https://updates.example.com/releases/v0.2.0/{file_name}"),
+            "url": format!("https://updates.example.com/releases/v1.0.1/{file_name}"),
             "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "size": 2048
         }]
     }))
     .unwrap();
 
-    let result = assess_update_manifest("0.1.0", &manifest).unwrap();
+    let result = assess_update_manifest("1.0.0", &manifest).unwrap();
 
     assert_eq!(
         result
@@ -2056,14 +2056,14 @@ async fn shutdown_signal_wakes_every_waiter_without_losing_the_reason() {
 fn update_manifest_rejects_insecure_asset_urls() {
     let manifest = serde_json::from_value::<UpdateManifest>(json!({
         "schema_version": 1,
-        "version": "0.2.0",
-        "tag": "v0.2.0",
+        "version": "1.0.1",
+        "tag": "v1.0.1",
         "assets": [{
             "platform": "windows",
             "arch": "x64",
             "package_type": "nsis",
-            "file_name": "Codey-0.2.0-windows-x64-setup.exe",
-            "url": "http://updates.example.com/Codey-0.2.0-windows-x64-setup.exe",
+            "file_name": "Codey-1.0.1-windows-x64-setup.exe",
+            "url": "http://updates.example.com/Codey-1.0.1-windows-x64-setup.exe",
             "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             "size": 1024
         }]
@@ -2071,7 +2071,7 @@ fn update_manifest_rejects_insecure_asset_urls() {
     .unwrap();
 
     assert!(
-        assess_update_manifest("0.1.0", &manifest)
+        assess_update_manifest("1.0.0", &manifest)
             .unwrap_err()
             .contains("必须使用 HTTPS")
     );
@@ -2081,8 +2081,8 @@ fn update_manifest_rejects_insecure_asset_urls() {
 fn update_manifest_rejects_asset_path_traversal() {
     let manifest = serde_json::from_value::<UpdateManifest>(json!({
         "schema_version": 1,
-        "version": "0.2.0",
-        "tag": "v0.2.0",
+        "version": "1.0.1",
+        "tag": "v1.0.1",
         "assets": [{
             "platform": "windows",
             "arch": "x64",
@@ -2096,7 +2096,7 @@ fn update_manifest_rejects_asset_path_traversal() {
     .unwrap();
 
     assert!(
-        assess_update_manifest("0.1.0", &manifest)
+        assess_update_manifest("1.0.0", &manifest)
             .unwrap_err()
             .contains("文件名无效")
     );

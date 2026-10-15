@@ -975,7 +975,7 @@ mod tests {
     fn update_helper_report_path_matches_the_file_the_main_process_waits_for() {
         let mut update = PathBuf::from("config");
         update.push("updates");
-        update.push("v1.2.3");
+        update.push("v1.0.1");
         update.push("Codey-setup.exe");
         let config = PathBuf::from("config").join("config.json");
 
@@ -992,7 +992,7 @@ mod tests {
             OsString::from("helper.exe"),
             OsString::from(UPDATE_HELPER_FLAG),
             OsString::from(
-                r"C:\Users\Test User\config\updates\v1.2.3\Codey-1.2.3-windows-x64-setup.exe",
+                r"C:\Users\Test User\config\updates\v1.0.1\Codey-1.0.1-windows-x64-setup.exe",
             ),
             OsString::from(r"C:\Users\Test User\Programs\Codey\Codey.exe"),
             OsString::from(r"C:\Users\Test User\Programs\Codey"),
@@ -1065,16 +1065,16 @@ mod tests {
     #[test]
     fn installed_version_marker_accepts_plain_and_decorated_contents() {
         assert_eq!(
-            parse_installed_version_marker("1.2.3"),
-            Some("1.2.3".to_string())
+            parse_installed_version_marker("1.0.1"),
+            Some("1.0.1".to_string())
         );
         assert_eq!(
-            parse_installed_version_marker("v1.2.3\n"),
-            Some("1.2.3".to_string())
+            parse_installed_version_marker("v1.0.1\n"),
+            Some("1.0.1".to_string())
         );
         assert_eq!(
-            parse_installed_version_marker("Codey 1.2.3 windows-x64\n"),
-            Some("1.2.3".to_string())
+            parse_installed_version_marker("Codey 1.0.1 windows-x64\n"),
+            Some("1.0.1".to_string())
         );
         assert_eq!(parse_installed_version_marker(""), None);
         assert_eq!(parse_installed_version_marker("Codey"), None);
@@ -1084,16 +1084,16 @@ mod tests {
     #[test]
     fn installer_name_versions_are_parsed_without_arch_false_positives() {
         assert_eq!(
-            version_from_installer_name("Codey-1.2.3-windows-x64-setup.exe"),
-            Some("1.2.3".to_string())
+            version_from_installer_name("Codey-1.0.1-windows-x64-setup.exe"),
+            Some("1.0.1".to_string())
         );
         assert_eq!(
-            version_from_installer_name("Codey setup 1.2.3.exe"),
-            Some("1.2.3".to_string())
+            version_from_installer_name("Codey setup 1.0.1.exe"),
+            Some("1.0.1".to_string())
         );
         assert_eq!(
-            version_from_installer_name("Codey-v1.2.3-windows-x64-setup.EXE"),
-            Some("1.2.3".to_string())
+            version_from_installer_name("Codey-v1.0.1-windows-x64-setup.EXE"),
+            Some("1.0.1".to_string())
         );
         assert_eq!(version_from_installer_name("Codey setup.exe"), None);
         assert_eq!(
@@ -1107,7 +1107,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let config_path = directory.path().join("config.json");
         let report = UpdateInstallReport {
-            version: "1.2.3".to_string(),
+            version: "1.0.1".to_string(),
             status: "failed".to_string(),
             message: "安装没有生效".to_string(),
             written_at: 42,
@@ -1119,7 +1119,7 @@ mod tests {
         assert_eq!(path.parent(), Some(directory.path()));
         assert!(path.is_file());
         let loaded = read_update_install_report(&config_path).unwrap();
-        assert_eq!(loaded.version, "1.2.3");
+        assert_eq!(loaded.version, "1.0.1");
         assert_eq!(loaded.status, "failed");
         assert_eq!(loaded.message, "安装没有生效");
 
@@ -1132,17 +1132,17 @@ mod tests {
     fn install_outcome_requires_a_matching_marker_and_a_replaced_binary() {
         // 版本标记一致且文件确实被换过，才算安装成功。
         assert_eq!(
-            decide_install_outcome(Some("1.2.3"), Some("1.2.3"), true, true),
+            decide_install_outcome(Some("1.0.1"), Some("1.0.1"), true, true),
             UpdateInstallOutcome::Updated
         );
         // 目标目录里根本没有可执行文件：安装没落地。
         assert_eq!(
-            decide_install_outcome(Some("1.2.3"), Some("1.2.3"), true, false),
+            decide_install_outcome(Some("1.0.1"), Some("1.0.1"), true, false),
             UpdateInstallOutcome::Failed
         );
         // 装到了别处：目标目录还是旧版本标记。
         assert_eq!(
-            decide_install_outcome(Some("1.2.2"), Some("1.2.3"), true, true),
+            decide_install_outcome(Some("1.0.0"), Some("1.0.1"), true, true),
             UpdateInstallOutcome::Failed
         );
     }
@@ -1151,26 +1151,26 @@ mod tests {
     fn install_outcome_without_a_marker_never_claims_certainty() {
         // 旧版本目录没有版本标记，只换过文件时按成功处理。
         assert_eq!(
-            decide_install_outcome(None, Some("1.2.3"), true, true),
+            decide_install_outcome(None, Some("1.0.1"), true, true),
             UpdateInstallOutcome::Updated
         );
         // 没有任何证据时不谎报成功，也不硬判失败。
         assert_eq!(
-            decide_install_outcome(None, Some("1.2.3"), false, true),
+            decide_install_outcome(None, Some("1.0.1"), false, true),
             UpdateInstallOutcome::Unverified
         );
         // 标记一致但目标文件既没换过、当前也不在：无法证明装成功。
         assert_eq!(
-            decide_install_outcome(Some("1.2.3"), Some("1.2.3"), false, false),
+            decide_install_outcome(Some("1.0.1"), Some("1.0.1"), false, false),
             UpdateInstallOutcome::Unverified
         );
         // 文件名解析不出期望版本时退化为指纹判断。
         assert_eq!(
-            decide_install_outcome(Some("1.2.3"), None, true, true),
+            decide_install_outcome(Some("1.0.1"), None, true, true),
             UpdateInstallOutcome::Updated
         );
         assert_eq!(
-            decide_install_outcome(Some("1.2.3"), None, false, true),
+            decide_install_outcome(Some("1.0.1"), None, false, true),
             UpdateInstallOutcome::Unverified
         );
     }
@@ -1178,7 +1178,7 @@ mod tests {
     #[test]
     fn stale_install_reports_are_recognised() {
         let fresh = UpdateInstallReport {
-            version: "1.2.3".to_string(),
+            version: "1.0.1".to_string(),
             status: "failed".to_string(),
             message: String::new(),
             written_at: 1_000,

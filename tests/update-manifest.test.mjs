@@ -11,8 +11,8 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const manifestScript = fileURLToPath(new URL("../scripts/generate-update-manifest.mjs", import.meta.url));
 
 const artifacts = [
-  ["Codey-1.2.3-macos-arm64-unsigned.zip", "macos-arm64"],
-  ["Codey-1.2.3-windows-x64-setup.exe", "windows-setup"],
+  ["Codey-1.0.1-macos-arm64-unsigned.zip", "macos-arm64"],
+  ["Codey-1.0.1-windows-x64-setup.exe", "windows-setup"],
 ];
 
 test("generates a public update manifest with checksummed platform assets", async () => {
@@ -29,9 +29,9 @@ test("generates a public update manifest with checksummed platform assets", asyn
     process.execPath,
     [
       manifestScript,
-      "--version", "1.2.3",
-      "--tag", "v1.2.3",
-      "--download-base-url", "https://updates.example.com/releases/v1.2.3",
+      "--version", "1.0.1",
+      "--tag", "v1.0.1",
+      "--download-base-url", "https://updates.example.com/releases/v1.0.1",
       "--output", output,
       ...paths,
     ],
@@ -41,8 +41,8 @@ test("generates a public update manifest with checksummed platform assets", asyn
   assert.equal(result.status, 0, result.stderr);
   const manifest = JSON.parse(await readFile(output, "utf8"));
   assert.equal(manifest.schema_version, 1);
-  assert.equal(manifest.version, "1.2.3");
-  assert.equal(manifest.tag, "v1.2.3");
+  assert.equal(manifest.version, "1.0.1");
+  assert.equal(manifest.tag, "v1.0.1");
   assert.equal(manifest.assets.length, 2);
 
   const windowsInstaller = manifest.assets.find((asset) => asset.package_type === "nsis");
@@ -52,8 +52,8 @@ test("generates a public update manifest with checksummed platform assets", asyn
       platform: "windows",
       arch: "x64",
       package_type: "nsis",
-      file_name: "Codey-1.2.3-windows-x64-setup.exe",
-      url: "https://updates.example.com/releases/v1.2.3/Codey-1.2.3-windows-x64-setup.exe",
+      file_name: "Codey-1.0.1-windows-x64-setup.exe",
+      url: "https://updates.example.com/releases/v1.0.1/Codey-1.0.1-windows-x64-setup.exe",
       sha256: createHash("sha256").update("windows-setup").digest("hex"),
       size: "windows-setup".length,
     },
@@ -66,9 +66,9 @@ test("rejects a release whose tag does not match its version", async () => {
     process.execPath,
     [
       manifestScript,
-      "--version", "1.2.3",
-      "--tag", "v1.2.4",
-      "--download-base-url", "https://example.invalid/releases/download/v1.2.4",
+      "--version", "1.0.1",
+      "--tag", "v1.0.2",
+      "--download-base-url", "https://example.invalid/releases/download/v1.0.2",
       "--output", join(directory, "latest.json"),
       join(directory, "placeholder"),
     ],
@@ -85,9 +85,9 @@ test("rejects non-HTTPS download URLs", async () => {
     process.execPath,
     [
       manifestScript,
-      "--version", "1.2.3",
-      "--tag", "v1.2.3",
-      "--download-base-url", "http://updates.example.com/releases/v1.2.3",
+      "--version", "1.0.1",
+      "--tag", "v1.0.1",
+      "--download-base-url", "http://updates.example.com/releases/v1.0.1",
       "--output", join(directory, "latest.json"),
       join(directory, "placeholder"),
     ],
@@ -105,9 +105,9 @@ test("rejects duplicate release asset basenames", async () => {
     process.execPath,
     [
       manifestScript,
-      "--version", "1.2.3",
-      "--tag", "v1.2.3",
-      "--download-base-url", "https://updates.example.com/releases/v1.2.3",
+      "--version", "1.0.1",
+      "--tag", "v1.0.1",
+      "--download-base-url", "https://updates.example.com/releases/v1.0.1",
       "--output", join(directory, "latest.json"),
       join(directory, "first", duplicateName),
       join(directory, "second", duplicateName),

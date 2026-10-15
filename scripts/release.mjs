@@ -13,8 +13,8 @@ function usage() {
   pnpm run release -- <version> [options]
 
 Examples:
-  pnpm run release -- 0.2.1
-  pnpm run release -- v0.2.1 --include-existing-changes
+  pnpm run release -- 1.0.0
+  pnpm run release -- v1.0.0 --include-existing-changes
 
 Options:
   --include-existing-changes  Commit all current working tree changes in the release commit.

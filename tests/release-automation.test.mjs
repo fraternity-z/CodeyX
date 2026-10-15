@@ -11,12 +11,12 @@ import { formatNoteResults } from "../scripts/release-note-batches.mjs";
 
 const environment = {
   RELEASE_BUILD_ID: "build_test-123", RELEASE_ATTEMPT: "2", GITHUB_RUN_ID: "456", RELEASE_ACTION: "build",
-  RELEASE_SOURCE_SHA: "a".repeat(40), RELEASE_VERSION: "1.2.3", RELEASE_BASE_SHA: "b".repeat(40), RELEASE_BASE_TAG: "v1.2.2",
+  RELEASE_SOURCE_SHA: "a".repeat(40), RELEASE_VERSION: "1.0.1", RELEASE_BASE_SHA: "b".repeat(40), RELEASE_BASE_TAG: "v1.0.0",
   GITHUB_REPOSITORY: "owner/codey", CODEY_RELEASE_ADMIN_URL: "https://admin.example.com", RELEASE_ADMIN_CALLBACK_SECRET: "s".repeat(40),
 };
 const build = {
-  id: environment.RELEASE_BUILD_ID, repository: environment.GITHUB_REPOSITORY, version: "1.2.3", tag: "v1.2.3",
-  source_sha: environment.RELEASE_SOURCE_SHA, base_sha: environment.RELEASE_BASE_SHA, base_tag: "v1.2.2", action: "build", attempt: 2,
+  id: environment.RELEASE_BUILD_ID, repository: environment.GITHUB_REPOSITORY, version: "1.0.1", tag: "v1.0.1",
+  source_sha: environment.RELEASE_SOURCE_SHA, base_sha: environment.RELEASE_BASE_SHA, base_tag: "v1.0.0", action: "build", attempt: 2,
 };
 
 test("callback signs the exact body and includes immutable execution identity", async () => {
@@ -60,11 +60,11 @@ test("claim data must match repository, version, source and comparison range", (
   }
   assert.throws(() => validateBuild({ ...build, artifact_run_id: 123 }, environment), /产物来源/);
   assert.equal(validateBuild({ ...build, artifact_run_id: 123 }, { ...environment, RELEASE_ARTIFACT_RUN_ID: '123' }).artifact_run_id, 123);
-  for (const version of ["01.2.3", "1.2.3-01", "1.2.3-rc..1", "1.2.3+build", "9007199254740992.2.3"]) assert.throws(() => validateBuild({ ...build, version, tag: `v${version}` }, { ...environment, RELEASE_VERSION: version }), /SemVer/);
+  for (const version of ["01.0.1", "1.0.1-01", "1.0.1-rc..1", "1.0.1+build", "9007199254740992.2.3"]) assert.throws(() => validateBuild({ ...build, version, tag: `v${version}` }, { ...environment, RELEASE_VERSION: version }), /SemVer/);
 });
 
 test("release ownership rejects collisions and unexpected IDs", () => {
-  const release = { id: 10, tag_name: "v1.2.3", body: "notes\n<!-- codey-build:build_test-123 -->" };
+  const release = { id: 10, tag_name: "v1.0.1", body: "notes\n<!-- codey-build:build_test-123 -->" };
   assert.equal(validateRelease(release, build), release);
   assert.throws(() => validateRelease({ ...release, body: "other release" }, build), /占用/);
   assert.throws(() => validateRelease(release, { ...build, release_id: 11 }), /占用/);
@@ -482,24 +482,24 @@ test("non-JSON GitHub error bodies are not logged and never hide the original HT
 
 test("claim accepts a platform-selected version different from valid consistent source manifests", async () => {
   for (const action of ["build", "notes", "delete"]) await sandboxBuild(action, async () => {
-    await writeFile("package.json", '{"version":"1.2.2"}');
-    await writeFile("Cargo.toml", '[workspace.package]\nversion = "1.2.2"\n');
+    await writeFile("package.json", '{"version":"1.0.0"}');
+    await writeFile("Cargo.toml", '[workspace.package]\nversion = "1.0.0"\n');
     globalThis.fetch = async () => Response.json({ ...build, action });
     await main("claim");
-    assert.equal(JSON.parse(await readFile(".release-build.json", "utf8")).version, "1.2.3");
-    assert.equal(JSON.parse(await readFile("package.json", "utf8")).version, "1.2.2");
+    assert.equal(JSON.parse(await readFile(".release-build.json", "utf8")).version, "1.0.1");
+    assert.equal(JSON.parse(await readFile("package.json", "utf8")).version, "1.0.0");
   });
 });
 
 test("claim rejects inconsistent or invalid source versions without writing a claimed context", async () => {
   await sandboxBuild("build", async () => {
     await rm(".release-build.json");
-    await writeFile("package.json", '{"version":"1.2.2"}');
-    await writeFile("Cargo.toml", '[workspace.package]\nversion = "1.2.1"\n');
+    await writeFile("package.json", '{"version":"1.0.0"}');
+    await writeFile("Cargo.toml", '[workspace.package]\nversion = "1.0.2"\n');
     globalThis.fetch = async () => Response.json(build);
     await assert.rejects(main("claim"), /必须一致/);
     await assert.rejects(readFile(".release-build.json"), { code: "ENOENT" });
-    await writeFile("package.json", '{"version":"01.2.2"}');
+    await writeFile("package.json", '{"version":"01.0.0"}');
     await assert.rejects(main("claim"), /SemVer/);
     await assert.rejects(readFile(".release-build.json"), { code: "ENOENT" });
   });
@@ -535,19 +535,19 @@ test("delete cleans the owned Release before tag and asks backend to clean R2 la
       if (method === "DELETE") {
         mutations.push(path);
         if (path.endsWith("/releases/10")) hasRelease = false;
-        else if (path.endsWith("/git/refs/tags/v1.2.3")) hasTag = false;
+        else if (path.endsWith("/git/refs/tags/v1.0.1")) hasTag = false;
         else assert.fail(`unexpected deletion ${path}`);
         return new Response(null, { status: 204 });
       }
-      if (path.endsWith("/git/ref/tags/v1.2.3")) return hasTag ? Response.json({ object: { type: "tag", sha: "tag-sha" } }) : new Response(null, { status: 404 });
+      if (path.endsWith("/git/ref/tags/v1.0.1")) return hasTag ? Response.json({ object: { type: "tag", sha: "tag-sha" } }) : new Response(null, { status: 404 });
       if (path.endsWith("/git/tags/tag-sha")) return Response.json({ object: { type: "commit", sha: build.source_sha }, message: `<!-- codey-build:${build.id} -->` });
-      if (path.endsWith("/releases/tags/v1.2.3")) return new Response(null, { status: 404 });
+      if (path.endsWith("/releases/tags/v1.0.1")) return new Response(null, { status: 404 });
       if (path === "/repos/owner/codey/releases") return Response.json(hasRelease ? [{ id: 10, draft: true, tag_name: build.tag, body: `<!-- codey-build:${build.id} -->` }] : []);
       if (path === "/repos/owner/codey") return Response.json({ id: 1 });
       assert.fail(`unexpected request ${url}`);
     };
     await main("delete");
-    assert.deepEqual(mutations, ["/repos/owner/codey/releases/10", "/repos/owner/codey/git/refs/tags/v1.2.3", "github_deleted", "clean_r2"]);
+    assert.deepEqual(mutations, ["/repos/owner/codey/releases/10", "/repos/owner/codey/git/refs/tags/v1.0.1", "github_deleted", "clean_r2"]);
     mutations.length = 0;
     await main("delete");
     assert.deepEqual(mutations, ["github_deleted", "clean_r2"]);
@@ -559,7 +559,7 @@ test("delete refuses a tag pointing at a different commit before any mutation", 
     globalThis.fetch = async (url, options = {}) => {
       assert.notEqual(options.method, "DELETE");
       const path = new URL(url).pathname;
-      if (path.endsWith("/git/ref/tags/v1.2.3")) return Response.json({ object: { type: "tag", sha: "tag-sha" } });
+      if (path.endsWith("/git/ref/tags/v1.0.1")) return Response.json({ object: { type: "tag", sha: "tag-sha" } });
       if (path.endsWith("/git/tags/tag-sha")) return Response.json({ object: { type: "commit", sha: "c".repeat(40) }, message: `<!-- codey-build:${build.id} -->` });
       if (path === "/repos/owner/codey") return Response.json({ id: 1 });
       assert.fail(`unexpected request ${url}`);
@@ -576,9 +576,9 @@ test("delete leaves remaining resources visible when GitHub deletion fails", asy
       const path = new URL(url).pathname;
       assert.ok(!path.endsWith("/events"));
       if (options.method === "DELETE") return new Response("permission denied", { status: 403 });
-      if (path.endsWith("/git/ref/tags/v1.2.3")) return Response.json({ object: { type: "tag", sha: "tag-sha" } });
+      if (path.endsWith("/git/ref/tags/v1.0.1")) return Response.json({ object: { type: "tag", sha: "tag-sha" } });
       if (path.endsWith("/git/tags/tag-sha")) return Response.json({ object: { type: "commit", sha: build.source_sha }, message: `<!-- codey-build:${build.id} -->` });
-      if (path.endsWith("/releases/tags/v1.2.3")) return Response.json({ id: 10, tag_name: build.tag, body: `<!-- codey-build:${build.id} -->` });
+      if (path.endsWith("/releases/tags/v1.0.1")) return Response.json({ id: 10, tag_name: build.tag, body: `<!-- codey-build:${build.id} -->` });
       if (path === "/repos/owner/codey") return Response.json({ id: 1 });
       assert.fail(`unexpected request ${url}`);
     };

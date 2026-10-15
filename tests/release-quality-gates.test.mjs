@@ -136,17 +136,17 @@ for (const scenario of [
     assert.ok(script);
     const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
     const execute = new AsyncFunction("appendFileSync", "writeFileSync", "join", "releaseIdentity", "readReleaseNotes", "fetch", "process", script);
-    const notes = parseReleaseNotes("# CodeyX v1.2.6-beta.1 · 公告排版\n\n## 本次亮点\n\n完整正文。\n", "1.2.6-beta.1");
+    const notes = parseReleaseNotes("# CodeyX v1.0.1-beta.1 · 公告排版\n\n## 本次亮点\n\n完整正文。\n", "1.0.1-beta.1");
     const writes = [];
     const record = (path, content) => writes.push({ path, content });
     const run = execute(record, record, join, releaseIdentity, version => {
-      assert.equal(version, "1.2.6-beta.1");
+      assert.equal(version, "1.0.1-beta.1");
       return notes;
     }, async (url, options) => {
-      assert.equal(url, "https://api.github.com/repos/fraternity-z/CodeyX/releases/tags/v1.2.6-beta.1");
+      assert.equal(url, "https://api.github.com/repos/fraternity-z/CodeyX/releases/tags/v1.0.1-beta.1");
       assert.equal(options.headers.Authorization, "Bearer unit-test-token");
       return { status: scenario.status, ok: scenario.status === 200, json: async () => ({ draft: scenario.draft }) };
-    }, { env: { GITHUB_REF_NAME: "v1.2.6-beta.1", GITHUB_REPOSITORY: "fraternity-z/CodeyX", GH_TOKEN: "unit-test-token", RUNNER_TEMP: "release-test", GITHUB_OUTPUT: "release-output" } });
+    }, { env: { GITHUB_REF_NAME: "v1.0.1-beta.1", GITHUB_REPOSITORY: "fraternity-z/CodeyX", GH_TOKEN: "unit-test-token", RUNNER_TEMP: "release-test", GITHUB_OUTPUT: "release-output" } });
     if (!scenario.allowed) {
       await assert.rejects(run, /already public|HTTP/);
       assert.deepEqual(writes, []);
@@ -155,8 +155,8 @@ for (const scenario of [
     await run;
     assert.deepEqual(writes[0], { path: join("release-test", "codeyx-release-notes.md"), content: notes.body });
     assert.equal(writes[1].path, "release-output");
-    assert.match(writes[1].content, /^name=CodeyX v1\.2\.6-beta\.1 · 公告排版\n/);
-    assert.match(writes[1].content, /\nprerelease=true\ntag=v1\.2\.6-beta\.1\n$/);
+    assert.match(writes[1].content, /^name=CodeyX v1\.0\.1-beta\.1 · 公告排版\n/);
+    assert.match(writes[1].content, /\nprerelease=true\ntag=v1\.0\.1-beta\.1\n$/);
   });
 }
 

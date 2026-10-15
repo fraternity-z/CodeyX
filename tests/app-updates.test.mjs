@@ -68,7 +68,7 @@ function harness(enabled, installReport = null, initialOptions = {}) {
   return { options, render, requests, timers, window, sessionStorage, storage };
 }
 
-const available = { currentVersion: "1.1.1", latestVersion: "1.2.0", updateAvailable: true };
+const available = { currentVersion: "1.0.0", latestVersion: "1.0.1", updateAvailable: true };
 const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
 
 test("嵌入页面不重复定时检查，仍可手动检查", async () => {
@@ -94,12 +94,12 @@ for (const automaticFirst of [true, false]) {
     assert.deepEqual(h.requests[1].args, { forceRefresh: true, manual: true });
     const oldUpdate = {
       ...available,
-      selectedAsset: { fileName: "Codey-1.2.0.dmg", size: 1048576, url: "https://example.com/old" },
+      selectedAsset: { fileName: "Codey-1.0.1.dmg", size: 1048576, url: "https://example.com/old" },
     };
     const newUpdate = {
       ...oldUpdate,
-      latestVersion: "1.3.0",
-      selectedAsset: { ...oldUpdate.selectedAsset, fileName: "Codey-1.3.0.dmg", url: "https://example.com/new" },
+      latestVersion: "1.0.2",
+      selectedAsset: { ...oldUpdate.selectedAsset, fileName: "Codey-1.0.2.dmg", url: "https://example.com/new" },
     };
     if (automaticFirst) {
       h.requests[0].resolve(oldUpdate);
@@ -115,7 +115,7 @@ for (const automaticFirst of [true, false]) {
     }
     assert.deepEqual(h.render().updateCheck, newUpdate);
     assert.deepEqual(h.window.__codeyUpdateAvailability, newUpdate);
-    assert.match(confirmation.title, /1\.3\.0/);
+    assert.match(confirmation.title, /1\.0\.2/);
   });
 }
 
@@ -127,7 +127,7 @@ test("手动重新检查可清除之前发现的更新", async () => {
   const second = h.render().checkForUpdates();
   assert.equal(h.requests.length, 2);
   assert.deepEqual(h.requests[1].args, { forceRefresh: true, manual: true });
-  const latest = { currentVersion: "1.1.1", latestVersion: "1.1.1", updateAvailable: false };
+  const latest = { currentVersion: "1.0.0", latestVersion: "1.0.0", updateAvailable: false };
   h.requests[1].resolve(latest);
   await second;
   assert.deepEqual(h.render().updateCheck, latest);
@@ -136,7 +136,7 @@ test("手动重新检查可清除之前发现的更新", async () => {
 
 for (const scenario of [
   { name: "版本与安装包一致", change: {}, action: "install-update" },
-  { name: "发布了更新版本", change: { latestVersion: "1.3.0" }, action: "download-update" },
+  { name: "发布了更新版本", change: { latestVersion: "1.0.2" }, action: "download-update" },
   { name: "同版本安装包已变更", change: { sha256: "b".repeat(64) }, action: "download-update" },
   { name: "Release 已重新创建", change: { releaseId: "release-2" }, action: "download-update" },
   { name: "安装包地址已变更", change: { url: "https://example.com/replaced.dmg" }, action: "download-update" },
@@ -147,7 +147,7 @@ for (const scenario of [
     h.options.setConfirmation = value => { confirmation = value; };
     const asset = {
       platform: "macos", arch: "aarch64", packageType: "dmg",
-      fileName: "Codey-1.2.0.dmg", size: 1048576,
+      fileName: "Codey-1.0.1.dmg", size: 1048576,
       url: "https://example.com/update.dmg", sha256: "a".repeat(64),
     };
     const update = { ...available, selectedAsset: asset, releaseId: "release-1" };
@@ -156,7 +156,7 @@ for (const scenario of [
     await first;
     const downloaded = {
       latestVersion: update.latestVersion, releaseId: update.releaseId,
-      filePath: "/updates/Codey-1.2.0.dmg", fileName: asset.fileName,
+      filePath: "/updates/Codey-1.0.1.dmg", fileName: asset.fileName,
       size: asset.size, sha256: asset.sha256, asset,
     };
     const download = h.render().downloadUpdate();
@@ -191,7 +191,7 @@ for (const scenario of [
 for (const releaseId of [undefined, null]) {
   test(`下载更新时将 ${releaseId} Release 标识转换为 null`, async () => {
     const h = harness(false);
-    const asset = { fileName: "Codey-1.2.0.dmg", size: 1048576, url: "https://example.com/update.dmg", sha256: "a".repeat(64) };
+    const asset = { fileName: "Codey-1.0.1.dmg", size: 1048576, url: "https://example.com/update.dmg", sha256: "a".repeat(64) };
     const update = { ...available, selectedAsset: asset, releaseId };
     const checking = h.render().checkForUpdates();
     h.requests[0].resolve(update);
@@ -201,7 +201,7 @@ for (const releaseId of [undefined, null]) {
     assert.deepEqual(h.requests[1].args, {
       expectedVersion: update.latestVersion, expectedReleaseId: null, expectedSha256: asset.sha256,
     });
-    const downloaded = { latestVersion: update.latestVersion, filePath: "/updates/Codey-1.2.0.dmg", ...asset };
+    const downloaded = { latestVersion: update.latestVersion, filePath: "/updates/Codey-1.0.1.dmg", ...asset };
     h.requests[1].resolve(downloaded);
     await download;
     assert.deepEqual(h.render().downloadedUpdate, downloaded);
@@ -243,7 +243,7 @@ test("detecting an update with an asset prompts the confirmation dialog", async 
   };
   const updateWithAsset = {
     ...available,
-    selectedAsset: { fileName: "Codey-1.2.0.dmg", size: 1048576, url: "https://example.com" },
+    selectedAsset: { fileName: "Codey-1.0.1.dmg", size: 1048576, url: "https://example.com" },
   };
   const checking = h.render().checkForUpdates();
   assert.equal(h.requests.length, 1);
@@ -251,7 +251,7 @@ test("detecting an update with an asset prompts the confirmation dialog", async 
   await checking;
   assert.ok(confirmation);
   assert.equal(confirmation.action, "download-update");
-  assert.match(confirmation.title, /1\.2\.0/);
+  assert.match(confirmation.title, /1\.0\.1/);
 });
 
 test("完整发布公告在弹窗显示，状态提示不再塞入 Markdown 源码", async () => {
@@ -261,7 +261,7 @@ test("完整发布公告在弹窗显示，状态提示不再塞入 Markdown 源�
   const update = {
     ...available,
     releaseNotes: "- 修复启动稳定性\n- 优化更新说明",
-    selectedAsset: { fileName: "Codey-1.2.0.dmg", size: 1048576, url: "https://example.com" },
+    selectedAsset: { fileName: "Codey-1.0.1.dmg", size: 1048576, url: "https://example.com" },
   };
   const checking = h.render().checkForUpdates();
   h.requests[0].resolve(update);
@@ -279,13 +279,13 @@ test("下载和安装确认使用同一份完整公告与发布页信息", async
   let confirmation;
   h.options.setConfirmation = value => { confirmation = value; };
   const asset = { fileName: "setup.exe", size: 100, url: "https://example.test/setup.exe", sha256: "a".repeat(64) };
-  const update = { ...available, releaseId: "42", selectedAsset: asset, releaseNotes: "    保留代码缩进\n\n## 完整公告\n\n**最后一段**\n", releaseTitle: "CodeyX v1.2.0 · 更新公告", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.2.0" };
+  const update = { ...available, releaseId: "42", selectedAsset: asset, releaseNotes: "    保留代码缩进\n\n## 完整公告\n\n**最后一段**\n", releaseTitle: "CodeyX v1.0.1 · 更新公告", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.0.1" };
   const checking = h.render().checkForUpdates();
   h.requests[0].resolve(update);
   await checking;
   for (const key of ["releaseNotes", "releaseTitle", "releaseUrl"]) assert.equal(confirmation[key], update[key]);
   confirmation.run();
-  h.requests[1].resolve({ ...asset, asset, latestVersion: "1.2.0", releaseId: "42", filePath: "/updates/setup.exe" });
+  h.requests[1].resolve({ ...asset, asset, latestVersion: "1.0.1", releaseId: "42", filePath: "/updates/setup.exe" });
   await settle();
   assert.equal(confirmation.action, "install-update");
   for (const key of ["releaseNotes", "releaseTitle", "releaseUrl"]) assert.equal(confirmation[key], update[key]);
@@ -333,7 +333,7 @@ test("首次加载实验版策略不会丢失启动时已发现的公告", () =>
   let confirmation = null;
   h.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
   h.render();
-  const update = { ...available, latestVersion: "1.2.0-beta.1", prerelease: true, selectedAsset: { fileName: "beta.exe" }, releaseNotes: "## 实验版公告\n\n完整正文" };
+  const update = { ...available, latestVersion: "1.0.1-beta.1", prerelease: true, selectedAsset: { fileName: "beta.exe" }, releaseNotes: "## 实验版公告\n\n完整正文" };
   h.window.__codeyPendingUpdatePrompt = update;
   h.window.dispatchEvent(new Event("codey-update-prompt"));
   assert.equal(confirmation, null);
@@ -361,7 +361,7 @@ test("用户手动检查后，迟到的后台公告不能替换新结果", async
   const h = harness(false);
   let confirmation = null;
   h.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
-  const current = { ...available, latestVersion: "1.3.0", selectedAsset: { fileName: "new.exe" } };
+  const current = { ...available, latestVersion: "1.0.2", selectedAsset: { fileName: "new.exe" } };
   const checking = h.render().checkForUpdates();
   h.requests[0].resolve(current);
   await checking;
@@ -396,7 +396,7 @@ test("发现更新后定时器链仍在，可用更新被清空后继续自动�
   assert.equal(h.timers.size, 1, "发现可用更新后仍要保留下一次检查");
 
   const manual = h.render().checkForUpdates();
-  h.requests[1].resolve({ currentVersion: "1.1.1", latestVersion: "1.1.1", updateAvailable: false });
+  h.requests[1].resolve({ currentVersion: "1.0.0", latestVersion: "1.0.0", updateAvailable: false });
   await manual;
   await settle();
   h.render();
@@ -434,7 +434,7 @@ test("点「稍后」会记下这个版本，自动检查不再重复弹窗", as
   await settle();
   const updateWithAsset = {
     ...available,
-    selectedAsset: { fileName: "Codey-1.2.0-setup.exe", size: 1048576, url: "https://example.com" },
+    selectedAsset: { fileName: "Codey-1.0.1-setup.exe", size: 1048576, url: "https://example.com" },
   };
 
   // 「稍后」按钮 = 对话框关闭回调，这里直接驱动它。
@@ -448,7 +448,7 @@ test("点「稍后」会记下这个版本，自动检查不再重复弹窗", as
   confirmation.onDismiss();
   assert.equal(
     h.window.sessionStorage.getItem("codey.deferredUpdateVersion"),
-    "1.2.0",
+    "1.0.1",
     "推迟必须被记录",
   );
 
@@ -458,7 +458,7 @@ test("点「稍后」会记下这个版本，自动检查不再重复弹窗", as
   h.render();
   assert.equal(
     h.window.sessionStorage.getItem("codey.deferredUpdateVersion"),
-    "1.2.0",
+    "1.0.1",
     "推迟必须被记录",
   );
 
@@ -478,9 +478,9 @@ test("点「稍后」会记下这个版本，自动检查不再重复弹窗", as
 test("上一次安装失败会在下次启动时提示而不是静默", async () => {
   const notices = [];
   const h = harness(false, {
-    version: "1.2.0",
+    version: "1.0.1",
     status: "failed",
-    message: "安装没有生效：Codey.exe 未更新到 v1.2.0",
+    message: "安装没有生效：Codey.exe 未更新到 v1.0.1",
     writtenAt: 100,
   });
   h.options.setNotice = (notice) => {
@@ -491,14 +491,14 @@ test("上一次安装失败会在下次启动时提示而不是静默", async ()
 
   assert.equal(notices.length, 1);
   assert.equal(notices[0].tone, "error");
-  assert.match(notices[0].text, /1\.2\.0/);
+  assert.match(notices[0].text, /1\.0\.1/);
   assert.match(notices[0].text, /安装没有生效/);
 });
 
 test("安装成功的报告不打扰用户，卡在 started 的报告按未完成提示", async () => {
   const installed = [];
   const installedHarness = harness(false, {
-    version: "1.2.0", status: "installed", message: "", writtenAt: 100,
+    version: "1.0.1", status: "installed", message: "", writtenAt: 100,
   });
   installedHarness.options.setNotice = (notice) => installed.push(notice);
   installedHarness.render();
@@ -507,7 +507,7 @@ test("安装成功的报告不打扰用户，卡在 started 的报告按未完�
 
   const started = [];
   const startedHarness = harness(false, {
-    version: "1.2.0", status: "started", message: "正在安装更新", writtenAt: 100,
+    version: "1.0.1", status: "started", message: "正在安装更新", writtenAt: 100,
   });
   startedHarness.options.setNotice = (notice) => started.push(notice);
   startedHarness.render();
@@ -523,17 +523,17 @@ test("Release 下载与安装仍需分别确认，下载携带版本和摘要", 
   let saved = false;
   h.options.setConfirmation = value => { confirmation = value; };
   h.options.beforeInstall = async () => { saved = true; };
-  const asset = { fileName: "CodeyX-1.2.0-windows-x64-setup.exe", size: 1024, sha256: "a".repeat(64) };
+  const asset = { fileName: "CodeyX-1.0.1-windows-x64-setup.exe", size: 1024, sha256: "a".repeat(64) };
   const update = { ...available, releaseId: "123", selectedAsset: asset };
   const checking = h.render().checkForUpdates();
   h.requests[0].resolve(update);
   await checking;
-  assert.equal(confirmation.title, "发现 Codey 新版本 v1.2.0");
+  assert.equal(confirmation.title, "发现 Codey 新版本 v1.0.1");
   assert.doesNotMatch(confirmation.description, /管理员|回退|授权/);
   confirmation.run();
   assert.equal(h.requests[1].command, "download_update");
   assert.deepEqual(h.requests[1].args, {
-    expectedVersion: "1.2.0", expectedReleaseId: "123", expectedSha256: asset.sha256,
+    expectedVersion: "1.0.1", expectedReleaseId: "123", expectedSha256: asset.sha256,
   });
   h.requests[1].resolve({ ...update, ...asset, asset, filePath: "/updates/setup.exe" });
   await settle();
@@ -593,15 +593,15 @@ test("不检查策略停止自动检查，仍可手动检查、下载和安装�
   const checking = fixture.render().checkForUpdates();
   assert.equal(fixture.requests.length, 1);
   assert.deepEqual(fixture.requests[0].args, { forceRefresh: true, manual: true });
-  const stable = { ...available, selectedAsset: { fileName: "Codey-1.2.0.dmg", size: 1024, sha256: "a".repeat(64) } };
+  const stable = { ...available, selectedAsset: { fileName: "Codey-1.0.1.dmg", size: 1024, sha256: "a".repeat(64) } };
   fixture.requests[0].resolve(stable);
   await checking;
   assert.deepEqual(fixture.render().updateCheck, stable);
   assert.equal(confirmation.action, "download-update");
   confirmation.run();
   assert.equal(fixture.requests[1].command, "download_update");
-  assert.deepEqual(fixture.requests[1].args, { expectedVersion: "1.2.0", expectedReleaseId: null, expectedSha256: stable.selectedAsset.sha256 });
-  const downloaded = { latestVersion: "1.2.0", filePath: "/updates/Codey-1.2.0.dmg", fileName: "Codey-1.2.0.dmg", size: 1024 };
+  assert.deepEqual(fixture.requests[1].args, { expectedVersion: "1.0.1", expectedReleaseId: null, expectedSha256: stable.selectedAsset.sha256 });
+  const downloaded = { latestVersion: "1.0.1", filePath: "/updates/Codey-1.0.1.dmg", fileName: "Codey-1.0.1.dmg", size: 1024 };
   fixture.requests[1].resolve(downloaded);
   await settle();
   assert.equal(confirmation.action, "install-update");
@@ -620,7 +620,7 @@ test("不检查策略的手动检查不接受实验版", async () => {
   fixture.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
   fixture.options.codeyUpdatePolicy = "off";
   const checking = fixture.render().checkForUpdates();
-  fixture.requests[0].resolve({ ...available, latestVersion: "1.2.0-beta.1", selectedAsset: { fileName: "beta.dmg" } });
+  fixture.requests[0].resolve({ ...available, latestVersion: "1.0.1-beta.1", selectedAsset: { fileName: "beta.dmg" } });
   await checking;
   assert.equal(fixture.render().updateCheck, null);
   assert.equal(confirmation, null);
