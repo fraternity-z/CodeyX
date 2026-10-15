@@ -1,6 +1,6 @@
 # 请求生命周期协议 v1
 
-此协议通过现有 ABI v1 的 `Plugin::invoke` 传递 JSON，宿主负责执行流程，插件负责自己的业务任务。适用于本地路由完成请求解析、线路选择和认证后的 Responses 请求及远程压缩；此前的输入校验失败不进入生命周期。
+本协议通过 ABI v1 的 `Plugin::invoke` 传递 JSON，基础约定见 [SDK](README.md)，自定义上游见[传输协议](PROVIDER_TRANSPORT.md)。适用于路由完成解析、线路选择和认证后的 Responses 请求及远程压缩；此前的输入校验失败不进入生命周期。
 
 ## 权限声明
 
@@ -73,6 +73,8 @@
 
 ## 控制动作
 
+### 继续与请求头
+
 使用 `codey_plugin_sdk::lifecycle::Action` 构造结果，或返回对应 JSON：
 
 ```json
@@ -81,7 +83,11 @@
 
 发送前可修改声明过的请求头，`value: null` 表示删除；后面的插件能看到已通过校验的修改。请求头值不能包含控制字符或 DEL，单项不超过 16384 字节，一次修改合计不超过 32768 字节。无法写入 HTTP 头的修改会拒绝本次动作，不会静默丢弃同一次已经通过校验的其他修改。响应头阶段的 `continue` 只能返回空头列表，不能修改已发出的请求。
 
+### API Key 选择
+
 已授权插件仅可在首次 `request.beforeSend` 的 `continue` 返回独立的 `apiKey` 字符串。值必须为非空可见 ASCII，最长 8192 字节。宿主在最终发送前安装敏感 Bearer HeaderValue，并移除竞争认证头；它不经过 HeaderPatch、插件广播或请求日志。同一插件实例的 SDK 回调互斥，Key 选择与轮询游标推进可在一个回调中完成。一个逻辑请求选定后固定，重试复用；再选、多个插件覆盖、未授权目标、官方线路、协议转换、响应头阶段及 resume 均拒绝，敏感校验失败不受 continue 失败策略放行。原生传输仍处理原始正文与 SSE，不提供转发网关或协议转换；上游客户端不跟随重定向。SDK Action 不实现 Debug，避免打印 Key。
+
+### 借用账号状态
 
 ```json
 {"action":"borrowTurnState","targetAccountEmail":"target@example.com","sourceAccountEmail":"source@example.com","model":"gpt-5.4","timeoutMs":15000}
@@ -89,17 +95,23 @@
 
 此动作仅允许首次 `request.beforeSend`，目标邮箱必须匹配当前官方账号，来源邮箱须唯一匹配另一个已保存账号。宿主发送独立的流式 ping，取得响应头后关闭流，仅提取 `X-Codex-Turn-State` 和有效的 `__cflb`、`__oailb` Cookie，发送前替换原有两个请求头；目标账号的认证信息保持不变。超时包含账号刷新和响应头等待，范围为 1000–30000 毫秒；失败终止原请求，不受 continue 策略放行。状态只存于当前逻辑请求，重试复用，结束释放；停用和可检测的下游取消会中断预请求。每个逻辑请求只能选择一次，不能与 API Key 动作混用。预请求增加来源账号用量和发送延迟，上游效果需自行确认。
 
+### 等待
+
 ```json
 {"action":"wait","token":"job-7","pollAfterMs":100}
 ```
 
 插件先创建自己的后台任务并迅速返回。宿主保留当前请求或未消费的响应，异步等待后调用同一实例的 `request.resume`，参数保留原事件并增加 `token`。默认轮询间隔为 100 毫秒，实际限制在 50–1000 毫秒。同一次等待不能更换 token；后续 `wait` 不刷新截止时间。token 最长 256 字节且不能包含控制字符，插件应结合 `requestId`、`stage` 和 `attempt` 查找任务，不能只凭 token 跨请求恢复。
 
+### 重发
+
 ```json
 {"action":"retry","headers":[{"name":"x-example-state","value":"ready"}]}
 ```
 
 仅响应头阶段可返回 `retry`。宿主丢弃当前响应，将头修改应用到下一次发送，再运行各插件的 `beforeSend`。正文复用原始编码字节；宿主既有的协议修复回退可调整其负责的正文，但与插件共享最多一次重发额度。达到额度或下游已经开始输出时拒绝重发。重发可能产生额外上游计费。
+
+### 终止
 
 ```json
 {"action":"abort","status":502,"code":"resource_unavailable","message":"当前资源不可用"}

@@ -1,12 +1,10 @@
 # 供应商传输协议 v1
 
-此协议供可信原生插件适配非标准上游。C ABI 仍为 v1，单次消息仍受 1 MiB 限制。插件须同时声明 `provider.route.v1`、`provider.transport.v1`、`provider.account.v1`；缺少任意一项都会拒绝安装。普通线路插件无需迁移。
+本协议供可信原生插件适配非标准上游；基础约定见 [SDK](README.md)，请求控制见[生命周期协议](REQUEST_LIFECYCLE.md)。C ABI 为 v1，单次消息最多 1 MiB；插件须同时声明 `provider.route.v1`、`provider.transport.v1`、`provider.account.v1`，缺少任意一项拒绝安装。
 
 ## 线路与账号
 
-`provider.describe` 沿用线路描述，协议须为 `openaiResponses`，`headers` 须为空，并增加 `transport`：
-
-线路也可以返回可选的 `modelReasoningEfforts`，将模型 ID 映射到允许的思考档位。宿主会把它作为线路能力上限，用户可配置范围内的档位并自定义上游取值，但不能借取值启用未声明的 `max` 或 `ultra`；缺省时保持原有自动适配。旧版宿主会拒绝描述中的未知字段，需升级宿主后才能启用带此字段的插件。
+`provider.describe` 沿用 [SDK 的线路描述](README.md#能力与调用边界)，协议须为 `openaiResponses`，`headers` 须为空，并增加 `transport` 字段。以下是该字段的值：
 
 ```json
 {
@@ -25,7 +23,7 @@
 
 ## 调用与帧
 
-管理接口拒绝 `provider.request.*`。同一实例的回调串行执行且须及时返回，网络等待应在后台完成。Rust 类型见 `transport.rs`，JSON 字段使用 camelCase。
+管理接口拒绝 `provider.request.*`。同一实例的回调串行执行且须及时返回，网络等待应在后台完成。Rust 类型见 [transport.rs](src/transport.rs)，JSON 字段使用 camelCase。
 
 1. `provider.request.start`：接受 requestId、accountEmail、operation、bodyBytes、credentials。operation 为 responses、image_generation 或 image_edit；credentials 只有 accessToken 和 upstreamAccountId。正文最多 64 MiB，插件须验证邮箱、标识、大小及并发容量。
 2. `provider.request.write`：接受 requestId、base64 data、布尔值 finish。每块解码后最多 64 KiB，总量须等于 bodyBytes；空正文也有结束块。finish 后开始后台请求，成功返回空对象。

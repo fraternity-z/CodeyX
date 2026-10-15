@@ -8,7 +8,6 @@ import {
   IconGitBranch as GitBranch,
   IconLayoutDashboard,
   IconLoader2 as LoaderCircle,
-  IconMessageCircleQuestion,
   IconRefresh as RefreshCw,
   IconSettings,
   IconX,
@@ -70,22 +69,12 @@ import { Badge, Button, Tooltip } from "./components/ui";
 const Check = IconCheck;
 const extensionRequest: ExtensionTransport = request => invoke("codex_extensions", { request });
 const X = IconX;
-const FEEDBACK_GROUP_QR_BASE_URL =
-  "https://pub-2d17a6a8bc22426a92e297a59f55ccc3.r2.dev/qr.png";
 const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
   userConfigured: false,
   detectionFailed: true,
 };
 const CONFIG_LOAD_TIMEOUT_MS = 30_000;
 const PLUGIN_MARKETPLACE_STATUS_TIMEOUT_MS = 15_000;
-
-function localDateCacheKey(date: Date) {
-  return [
-    date.getFullYear(),
-    String(date.getMonth() + 1).padStart(2, "0"),
-    String(date.getDate()).padStart(2, "0"),
-  ].join("");
-}
 
 function thirdPartyRouteModelState(
   config: Config,
@@ -120,8 +109,6 @@ export function App({
   onAfterClose,
   onClose,
 }: AppProps) {
-  const feedbackGroupQrUrl =
-    `${FEEDBACK_GROUP_QR_BASE_URL}?date=${localDateCacheKey(new Date())}`;
   const {
     config,
     setConfig,
@@ -1398,21 +1385,6 @@ export function App({
 
       {embedded && (
         <div className="flex items-center gap-3 justify-self-center max-[760px]:gap-2">
-          <div className="config-header-feedback">
-            <Button
-              aria-describedby="codey-feedback-qr-description"
-              aria-label="问题反馈群，鼠标悬停或键盘聚焦查看二维码"
-              className="h-8! whitespace-nowrap px-3.5 text-xs max-[760px]:w-8! max-[760px]:px-0!"
-              variant="brand-outline"
-            >
-              <IconMessageCircleQuestion aria-hidden="true" />
-              <span className="max-[760px]:hidden">问题反馈群</span>
-            </Button>
-            <div className="feedback-qr-popover" role="tooltip">
-              <img src={feedbackGroupQrUrl} alt="问题反馈群二维码" />
-              <span id="codey-feedback-qr-description">扫码加入问题反馈群</span>
-            </div>
-          </div>
           <Button
             aria-label="打开 CodeyX GitHub 仓库"
             className="h-8! w-8! min-w-8! px-0!"
