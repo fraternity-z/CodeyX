@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
   <key>CFBundleIdentifier</key><string>com.codey.computer-use</string>
-  <key>CFBundleName</key><string>Codey Computer Use</string>
-  <key>CFBundleDisplayName</key><string>Codey Computer Use</string>
+  <key>CFBundleName</key><string>CodeyX Computer Use</string>
+  <key>CFBundleDisplayName</key><string>CodeyX Computer Use</string>
   <key>CFBundleExecutable</key><string>codey-computer-use</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleVersion</key><string>1.0.0</string>

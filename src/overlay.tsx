@@ -117,12 +117,12 @@ function installBrowserBridge() {
     } catch {
       throw new Error(
         response.ok
-          ? "Codey 返回了无法解析的响应"
-          : `Codey 请求失败（${response.status}）`,
+          ? "CodeyX 返回了无法解析的响应"
+          : `CodeyX 请求失败（${response.status}）`,
       );
     }
     if (!response.ok) {
-      throw new Error(value?.error?.message || value?.message || `Codey 请求失败（${response.status}）`);
+      throw new Error(value?.error?.message || value?.message || `CodeyX 请求失败（${response.status}）`);
     }
     return value;
   };
@@ -135,7 +135,7 @@ function getOverlayMountTarget() {
 if (window.location.pathname === REQUEST_LOG_PATH) {
   installRequestLogTheme();
   installBrowserBridge();
-  document.title = "Codey 请求日志";
+  document.title = "CodeyX 请求日志";
   const style = document.createElement("style");
   style.textContent = [
     utilityStyles,
@@ -156,7 +156,7 @@ if (window.location.pathname === REQUEST_LOG_PATH) {
 } else {
   window.__codeyInvokeApi = async (command, args) => {
     if (typeof window.__codexSessionDeleteBridge !== "function") {
-      throw new Error("Codey bridge 尚未就绪");
+      throw new Error("CodeyX bridge 尚未就绪");
     }
     return window.__codexSessionDeleteBridge(codeyApiPath(command), args);
   };

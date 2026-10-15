@@ -59,7 +59,7 @@ fn ntfy_body(event: &NotificationEvent, topic: &str) -> Value {
         "session.completed" => ("✅", "Codex 会话完成", 3, "white_check_mark"),
         "session.failed" => ("❌", "Codex 会话失败", 4, "warning"),
         "session.waiting" => ("⏳", "Codex 会话等待介入", 4, "hourglass"),
-        "codey.test" => ("🔔", "Codey 通知测试", 3, "bell"),
+        "codey.test" => ("🔔", "CodeyX 通知测试", 3, "bell"),
         _ => ("🔔", "Codex 会话通知", 3, "bell"),
     };
     let session_name = plain_text_value(&event.session_name, "未命名会话");
@@ -167,7 +167,7 @@ mod tests {
             .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
             .unwrap();
         assert_eq!(body["topic"], "codey-topic");
-        assert!(body["title"].as_str().unwrap().contains("Codey 通知测试"));
+        assert!(body["title"].as_str().unwrap().contains("CodeyX 通知测试"));
     }
 
     #[test]

@@ -67,7 +67,7 @@ fn wecom_markdown(event: &NotificationEvent) -> String {
         "session.completed" => ("✅", "Codex 会话完成", "info"),
         "session.failed" => ("❌", "Codex 会话失败", "warning"),
         "session.waiting" => ("⏳", "Codex 会话等待介入", "warning"),
-        "codey.test" => ("🔔", "Codey 通知测试", "info"),
+        "codey.test" => ("🔔", "CodeyX 通知测试", "info"),
         _ => ("🔔", "Codex 会话通知", "comment"),
     };
     let session_name = markdown_text_value(&event.session_name, "未命名会话");
@@ -156,7 +156,7 @@ mod tests {
             body["markdown"]["content"]
                 .as_str()
                 .unwrap()
-                .contains("Codey 通知测试")
+                .contains("CodeyX 通知测试")
         );
     }
 
@@ -165,7 +165,7 @@ mod tests {
         for (kind, title) in [
             ("session.failed", "Codex 会话失败"),
             ("session.waiting", "Codex 会话等待介入"),
-            ("codey.test", "Codey 通知测试"),
+            ("codey.test", "CodeyX 通知测试"),
         ] {
             let event = NotificationEvent::new(kind, "s1", "p1", "Codex", 0, None);
             assert!(wecom_markdown(&event).contains(title));

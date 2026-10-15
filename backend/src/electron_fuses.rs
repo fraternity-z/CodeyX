@@ -735,16 +735,16 @@ pub(crate) fn run_node_options_repair_if_requested() -> Result<bool> {
         ),
         "--restore-codex-node-options" => true,
         "--help-codex-node-options" => {
-            let help = "Codey Windows 旧版修改恢复
+            let help = "CodeyX Windows 旧版修改恢复
 
 --restore-codex-node-options [Codex 安装目录]
 校验备份与当前运行时一致后恢复原始字节，不请求提权。
 
-请先退出 Codex。备份缺失、损坏或版本已变化时停止修改，请通过官方安装程序修复客户端。Codey 不再启用被关闭的 Electron 安全开关。";
+请先退出 Codex。备份缺失、损坏或版本已变化时停止修改，请通过官方安装程序修复客户端。CodeyX 不再启用被关闭的 Electron 安全开关。";
             println!("{help}");
             #[cfg(windows)]
             rfd::MessageDialog::new()
-                .set_title("Codey 帮助")
+                .set_title("CodeyX 帮助")
                 .set_description(help)
                 .show();
             return Ok(true);
@@ -781,7 +781,7 @@ pub(crate) fn run_node_options_repair_if_requested() -> Result<bool> {
                         && ["chatgpt.exe", "codex.exe", "codey.exe"]
                             .iter()
                             .any(|name| process.exe_file.eq_ignore_ascii_case(name))),
-                "请先退出 Codex 和其他 Codey 进程，再执行 NODE_OPTIONS 修复或恢复"
+                "请先退出 Codex 和其他 CodeyX 进程，再执行 NODE_OPTIONS 修复或恢复"
             );
             let (binary, backup) = repair_target(&directory)?;
             let changed = change_node_options(&binary, &backup, &cache_path(), restore)?;
@@ -791,7 +791,7 @@ pub(crate) fn run_node_options_repair_if_requested() -> Result<bool> {
                 String::new()
             };
             Ok(format!(
-                "{}。请重新从 Codey 启动 Codex。\n运行时：{}{backup_note}",
+                "{}。请重新从 CodeyX 启动 Codex。\n运行时：{}{backup_note}",
                 if !changed {
                     "NODE_OPTIONS 已处于目标状态"
                 } else {
@@ -803,7 +803,7 @@ pub(crate) fn run_node_options_repair_if_requested() -> Result<bool> {
     })();
     #[cfg(windows)]
     rfd::MessageDialog::new()
-        .set_title("Codey 主进程注入修复")
+        .set_title("CodeyX 主进程注入修复")
         .set_description(match &result {
             Ok(message) => message.clone(),
             Err(error) => format!("{error:#}"),
@@ -994,8 +994,8 @@ mod tests {
         );
     }
 
-    /// A backup as an older Codey build would have recorded it: the byte the
-    /// fuse had before Codey enabled it, plus the runtime fingerprint.
+    /// A backup as an older CodeyX build would have recorded it: the byte the
+    /// fuse had before CodeyX enabled it, plus the runtime fingerprint.
     fn recorded_node_options_backup(binary: &Path) -> NodeOptionsBackup {
         let mut file = open_runtime_exclusive(binary).unwrap();
         let inspection = inspect_node_options(&mut file).unwrap();
@@ -1028,13 +1028,13 @@ mod tests {
         cached_fuse_wire(&binary, &cache).unwrap();
         assert!(cache.exists());
 
-        // Enabling the fuse is no longer something Codey does.
+        // Enabling the fuse is no longer something CodeyX does.
         let error = change_node_options(&binary, &backup, &cache, false).unwrap_err();
         assert!(format!("{error:#}").contains("不再修改 Codex 安全开关"));
         assert_eq!(std::fs::read(&binary).unwrap(), edited);
         assert!(!backup.exists());
 
-        // A runtime an older Codey build already edited is restored from the
+        // A runtime an older CodeyX build already edited is restored from the
         // recorded original byte, and the stale fuse cache goes with it.
         write_node_options_backup(&backup, &recorded_node_options_backup(&binary));
         assert!(change_node_options(&binary, &backup, &cache, true).unwrap());

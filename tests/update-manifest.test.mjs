@@ -12,7 +12,7 @@ const manifestScript = fileURLToPath(new URL("../scripts/generate-update-manifes
 
 const artifacts = [
   ["Codey-1.0.1-macos-arm64-unsigned.zip", "macos-arm64"],
-  ["Codey-1.0.1-windows-x64-setup.exe", "windows-setup"],
+  ["CodeyX-1.0.1-windows-x64-setup.exe", "windows-setup"],
 ];
 
 test("generates a public update manifest with checksummed platform assets", async () => {
@@ -52,8 +52,8 @@ test("generates a public update manifest with checksummed platform assets", asyn
       platform: "windows",
       arch: "x64",
       package_type: "nsis",
-      file_name: "Codey-1.0.1-windows-x64-setup.exe",
-      url: "https://updates.example.com/releases/v1.0.1/Codey-1.0.1-windows-x64-setup.exe",
+      file_name: "CodeyX-1.0.1-windows-x64-setup.exe",
+      url: "https://updates.example.com/releases/v1.0.1/CodeyX-1.0.1-windows-x64-setup.exe",
       sha256: createHash("sha256").update("windows-setup").digest("hex"),
       size: "windows-setup".length,
     },

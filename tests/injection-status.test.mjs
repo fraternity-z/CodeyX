@@ -109,17 +109,17 @@ test("runtime feature presentation exposes only confirmed user-facing behavior",
       {
         id: "subagent-optimization",
         icon: "subagent",
-        sourceLabel: "Codey",
+        sourceLabel: "CodeyX",
       },
       {
         id: "notification-channels",
         icon: "notifications",
-        sourceLabel: "Codey",
+        sourceLabel: "CodeyX",
       },
       {
         id: "disk-write-protection",
         icon: "database",
-        sourceLabel: "Codey",
+        sourceLabel: "CodeyX",
       },
     ],
   );

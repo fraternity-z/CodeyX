@@ -76,7 +76,7 @@ export function buildEnabledOptimizationFeatures(
       icon: "subagent",
       name: "子代理优化",
       detail: "子代理优化已随当前运行实例加载",
-      sourceLabel: "Codey",
+      sourceLabel: "CodeyX",
     });
   }
 
@@ -91,7 +91,7 @@ export function buildEnabledOptimizationFeatures(
       icon: "notifications",
       name: "消息通知",
       detail: `已启用 ${activeNotificationChannelCount} 个通知渠道`,
-      sourceLabel: "Codey",
+      sourceLabel: "CodeyX",
     });
   }
 
@@ -111,7 +111,7 @@ export function buildEnabledOptimizationFeatures(
       icon: "database",
       name: "写盘保护",
       detail: protectionDetail,
-      sourceLabel: "Codey",
+      sourceLabel: "CodeyX",
     });
   }
 
@@ -132,8 +132,8 @@ export function buildEnabledOptimizationFeatures(
               ? `（${fastContextToolsStatus.serverId}）`
               : ""
           }`
-        : "Codey 内置 FastCtx 已随当前运行实例加载",
-      sourceLabel: externalFastContextTools ? "外部配置" : "Codey",
+        : "CodeyX 内置 FastCtx 已随当前运行实例加载",
+      sourceLabel: externalFastContextTools ? "外部配置" : "CodeyX",
     },
     ...appliedFeatures,
   ];

@@ -23,7 +23,7 @@ export function remoteCompactionStatusText(status?: RuntimeStatus | null) {
         ? "当前按线路选择压缩方式"
         : activeMode === "remote"
           ? "当前已启用远程压缩"
-          : "当前由 Codey 网关生成压缩摘要";
+          : "当前由 CodeyX 网关生成压缩摘要";
   const saved = configuredMode === "mixed"
     ? "已保存配置中，原生支持的线路透传上游压缩，其余线路由网关生成摘要"
     : compaction.configured
@@ -74,7 +74,7 @@ export function getRouteCompactionStatus(
       mode: "remote",
       badgeText: "网关压缩",
       badgeVariant: "success",
-      tooltip: "由 Codey 网关生成等价摘要（插件传输不支持上游原生压缩）",
+      tooltip: "由 CodeyX 网关生成等价摘要（插件传输不支持上游原生压缩）",
       reason: "插件传输不支持原生压缩",
     };
   }
@@ -84,7 +84,7 @@ export function getRouteCompactionStatus(
       mode: "remote",
       badgeText: "网关压缩",
       badgeVariant: "success",
-      tooltip: "由 Codey 网关生成等价摘要（上游协议不支持原生压缩）",
+      tooltip: "由 CodeyX 网关生成等价摘要（上游协议不支持原生压缩）",
       reason: "上游协议不支持原生压缩",
     };
   }
@@ -95,8 +95,8 @@ export function getRouteCompactionStatus(
       badgeText: "网关压缩",
       badgeVariant: "success",
       tooltip: blocker
-        ? `由 Codey 网关生成等价摘要（${blocker.reason}）`
-        : "由 Codey 网关生成等价摘要（未声明原生远程压缩）",
+        ? `由 CodeyX 网关生成等价摘要（${blocker.reason}）`
+        : "由 CodeyX 网关生成等价摘要（未声明原生远程压缩）",
       reason: "未开启远程压缩",
     };
   }

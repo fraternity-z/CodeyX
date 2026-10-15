@@ -201,7 +201,7 @@ export function ExtensionFilters({
               ]
             : [
                 { value: "all", label: "全部来源" },
-                { value: "managed", label: "Codey 托管" },
+                { value: "managed", label: "CodeyX 托管" },
                 { value: "external", label: "外部安装" },
                 { value: "builtin", label: "系统内置" },
               ]

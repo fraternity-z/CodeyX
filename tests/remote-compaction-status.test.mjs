@@ -11,7 +11,7 @@ test("saving remote compaction reports gateway handling without claiming activat
   const local = remoteCompactionStatusText({ running: true, remoteCompaction: {
     configured: true, active: false, restartRequired: true, blockingRoutes: [],
   } });
-  assert.equal(local.title, "当前由 Codey 网关生成压缩摘要");
+  assert.equal(local.title, "当前由 CodeyX 网关生成压缩摘要");
   assert.match(local.detail, /已保存配置声明了原生远程压缩.*压缩方式随所选线路自动生效/);
   assert.doesNotMatch(local.detail, /重启|新建任务/);
   const remote = remoteCompactionStatusText({ running: true, remoteCompaction: {

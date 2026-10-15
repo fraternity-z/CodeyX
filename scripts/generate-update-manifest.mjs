@@ -4,8 +4,8 @@ import { mkdir, stat, writeFile } from "node:fs/promises";
 import { basename, dirname, resolve } from "node:path";
 
 const artifactDefinitions = [
-  { platform: "macos", arch: "arm64", package_type: "app-zip", suffix: "macos-arm64-unsigned.zip" },
-  { platform: "windows", arch: "x64", package_type: "nsis", suffix: "windows-x64-setup.exe" },
+  { brand: "Codey", platform: "macos", arch: "arm64", package_type: "app-zip", suffix: "macos-arm64-unsigned.zip" },
+  { brand: "CodeyX", platform: "windows", arch: "x64", package_type: "nsis", suffix: "windows-x64-setup.exe" },
 ];
 
 function fail(message) {
@@ -75,7 +75,7 @@ async function buildManifest({ version, tag, downloadBaseUrl, assetPaths }) {
   }
   const expectedByName = new Map(
     artifactDefinitions.map((definition) => [
-      `Codey-${version}-${definition.suffix}`,
+      `${definition.brand}-${version}-${definition.suffix}`,
       definition,
     ]),
   );
@@ -94,7 +94,7 @@ async function buildManifest({ version, tag, downloadBaseUrl, assetPaths }) {
 
   const assets = await Promise.all(
     artifactDefinitions.map(async (definition) => {
-      const fileName = `Codey-${version}-${definition.suffix}`;
+      const fileName = `${definition.brand}-${version}-${definition.suffix}`;
       const filePath = providedPaths.get(fileName);
       const metadata = await stat(filePath);
       if (!metadata.isFile()) fail(`Release asset is not a file: ${filePath}`);

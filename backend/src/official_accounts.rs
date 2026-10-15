@@ -148,7 +148,7 @@ pub struct OfficialAccountRecord {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
     pub added_at: u64,
-    /// Route overrides Codey keeps for this account. They shape the derived
+    /// Route overrides CodeyX keeps for this account. They shape the derived
     /// official route while the account is the default; `None` keeps the value
     /// derived from the Codex configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -956,7 +956,7 @@ impl OfficialAccountStore {
 
     /// Credential document the runtime reads for one account. Codex refreshes
     /// the default account's copy in place, so it keeps using the Codex home
-    /// `auth.json`; every other account reads the document Codey stored.
+    /// `auth.json`; every other account reads the document CodeyX stored.
     pub fn credential_path(&self, codex_home: &Path, account_id: &str) -> PathBuf {
         let is_default = self
             .default_account_id()
@@ -1067,7 +1067,7 @@ impl OfficialAccountStore {
             });
         }
         Ok(LaunchLoginResolution::Unavailable {
-            reason: "Codey 中没有设为默认的官方账号；请在线路设置中添加官方账号并设为默认"
+            reason: "CodeyX 中没有设为默认的官方账号；请在线路设置中添加官方账号并设为默认"
                 .to_string(),
         })
     }
@@ -2007,7 +2007,7 @@ async fn run_callback_server(
             let _ = write_response(
                 &mut socket,
                 400,
-                "登录状态校验失败，请回到 Codey 重新开始。",
+                "登录状态校验失败，请回到 CodeyX 重新开始。",
             )
             .await;
             continue;
@@ -2018,7 +2018,7 @@ async fn run_callback_server(
             bail!("OpenAI 登录被拒绝：{error} {description}");
         }
         let Some(code) = params.get("code").filter(|code| !code.is_empty()) else {
-            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 Codey 重新开始。").await;
+            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 CodeyX 重新开始。").await;
             continue;
         };
         let exchanged = exchange_code(&client, code, &verifier).await;
@@ -2027,14 +2027,14 @@ async fn run_callback_server(
                 let _ = write_response(
                     &mut socket,
                     200,
-                    "登录成功，账号已添加到 Codey，可关闭此页面。",
+                    "登录成功，账号已添加到 CodeyX，可关闭此页面。",
                 )
                 .await;
                 return Ok(record);
             }
             Err(error) => {
                 let _ =
-                    write_response(&mut socket, 500, "换取令牌失败，请回到 Codey 查看错误。").await;
+                    write_response(&mut socket, 500, "换取令牌失败，请回到 CodeyX 查看错误。").await;
                 return Err(error);
             }
         }
@@ -2093,7 +2093,7 @@ async fn write_response(
         _ => "Internal Server Error",
     };
     let body = format!(
-        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>Codey</title></head>\
+        "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><title>CodeyX</title></head>\
          <body style=\"font-family:-apple-system,system-ui,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;margin:0;color:#222\">\
          <p style=\"font-size:18px\">{}</p></body></html>",
         html_escape(message)
@@ -2185,7 +2185,7 @@ pub(crate) const SIWC_REDIRECT_URI: &str = "http://127.0.0.1:1455/auth/callback"
 pub(crate) const SIWC_CALLBACK_PORT: u16 = 1455;
 /// 首次注册的入口 client_id；回调签发的 `oaiapp_*` 才是账号的持久身份。
 const SIWC_DYNAMIC_CLIENT_ID: &str = "dynamic_agent_client";
-const SIWC_AGENT_NAME_HINT: &str = "Codey";
+const SIWC_AGENT_NAME_HINT: &str = "CodeyX";
 const SIWC_SCOPE: &str =
     "openid profile email offline_access resource.invoke chatgpt.tokens.use.direct";
 /// 缺少该 scope 时凭据保留但直连不可用，界面引导重新授权。
@@ -2414,7 +2414,7 @@ async fn run_siwc_callback_server(
             let _ = write_response(
                 &mut socket,
                 400,
-                "授权状态校验失败，请回到 Codey 重新开始。",
+                "授权状态校验失败，请回到 CodeyX 重新开始。",
             )
             .await;
             continue;
@@ -2425,7 +2425,7 @@ async fn run_siwc_callback_server(
             bail!("ChatGPT 授权被拒绝：{error} {description}");
         }
         let Some(code) = params.get("code").filter(|code| !code.is_empty()) else {
-            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 Codey 重新开始。").await;
+            let _ = write_response(&mut socket, 400, "缺少授权码，请回到 CodeyX 重新开始。").await;
             continue;
         };
         let result = async {
@@ -2440,13 +2440,13 @@ async fn run_siwc_callback_server(
         .await;
         match result {
             Ok(credential) => {
-                let _ = write_response(&mut socket, 200, "授权成功，已回到 Codey，可关闭此页面。")
+                let _ = write_response(&mut socket, 200, "授权成功，已回到 CodeyX，可关闭此页面。")
                     .await;
                 return Ok(credential);
             }
             Err(error) => {
                 let _ =
-                    write_response(&mut socket, 500, "授权校验失败，请回到 Codey 查看错误。").await;
+                    write_response(&mut socket, 500, "授权校验失败，请回到 CodeyX 查看错误。").await;
                 return Err(error);
             }
         }
@@ -4303,7 +4303,7 @@ mod tests {
         assert_eq!(
             store.credential_path(&home, "acct_1"),
             store.account_path("acct_1"),
-            "idle accounts read the document Codey stored"
+            "idle accounts read the document CodeyX stored"
         );
     }
 

@@ -56,7 +56,7 @@ export function UsageAnalysisPanel({ onBack }: { onBack: () => void }) {
       </div>
       <Badge variant="secondary">仅保留的日志</Badge>
     </div>
-    <p className="usage-scope">仅统计经过 Codey 路由且仍保留的请求日志，不包含官方直连。清理日志会影响历史统计。</p>
+    <p className="usage-scope">仅统计经过 CodeyX 路由且仍保留的请求日志，不包含官方直连。清理日志会影响历史统计。</p>
     <div aria-live="polite" aria-busy={state.loading}>
       {state.loading ? <div className="usage-state" role="status"><Spinner size="sm" /><strong>正在统计用量…</strong><span>正在读取所选范围的请求日志</span></div>
         : state.error ? <div className="usage-state usage-error" role="alert"><strong>用量分析加载失败</strong><p>{state.error}</p><Button variant="outline" size="sm" onClick={reload}>重试</Button></div>

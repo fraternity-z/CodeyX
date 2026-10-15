@@ -18,7 +18,7 @@ test("overlay API paths reject commands outside the backend whitelist", () => {
   assert.equal(api.isCodeyApiCommand("../session/delete"), false);
   assert.throws(
     () => api.codeyApiPath("../session/delete"),
-    /不允许的 Codey API 命令/,
+    /不允许的 CodeyX API 命令/,
   );
 });
 

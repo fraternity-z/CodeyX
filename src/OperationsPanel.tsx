@@ -260,9 +260,9 @@ function OperationsPanelComponent({
           ? "官方市场：正在检查"
           : embeddedMarketplaceReady
             ? pluginMarketplaceStatus?.officialMarketplace === true
-              ? "官方市场：Codey 内置快照已接管，并检测到兼容缓存"
-              : "官方市场：Codey 内置快照已接管，无需联网下载"
-            : "官方市场：等待 Codey 内置快照修复",
+              ? "官方市场：CodeyX 内置快照已接管，并检测到兼容缓存"
+              : "官方市场：CodeyX 内置快照已接管，无需联网下载"
+            : "官方市场：等待 CodeyX 内置快照修复",
         tone: !pluginStatusKnown
           ? "info"
           : embeddedMarketplaceReady
@@ -273,14 +273,14 @@ function OperationsPanelComponent({
         id: "plugin-remote",
         icon: IconCloudCheck,
         tooltip: !pluginStatusKnown
-          ? "Codey 内置市场：正在检查"
+          ? "CodeyX 内置市场：正在检查"
           : !remoteMarketplaceCached
-            ? "Codey 内置市场：快照缺失"
+            ? "CodeyX 内置市场：快照缺失"
             : !remoteMarketplaceReady
-              ? "Codey 内置市场：快照存在但尚未注册"
+              ? "CodeyX 内置市场：快照存在但尚未注册"
               : !managedConfigCompatible
-                ? "Codey 内置市场：旧保留名配置待迁移"
-                : "Codey 内置市场：快照与注册完整",
+                ? "CodeyX 内置市场：旧保留名配置待迁移"
+                : "CodeyX 内置市场：快照与注册完整",
         tone:
           !pluginStatusKnown
             ? "info"
@@ -549,7 +549,7 @@ function OperationsPanelComponent({
                           </Badge>
                         </div>
                         <p className="injection-mode-description">
-                          点击后准备本地资源，再到 Codex 插件页面安装或更新 Codey Computer Use；启停也在该页面管理。
+                          点击后准备本地资源，再到 Codex 插件页面安装或更新 CodeyX Computer Use；启停也在该页面管理。
                         </p>
                         {computerUseNotice && (
                           <p

@@ -124,7 +124,7 @@ test("request log model cell shows the model sent upstream and the upstream mode
   assert.ok(viewer.includes("请求模型（发往上游）：${sentModel}"));
   assert.ok(viewer.includes("上游实际使用模型：${upstreamModel}"));
   assert.ok(viewer.includes("upstreamResponseModel?: string | null;"));
-  assert.ok(viewer.includes("Codex 请求 Codey 时选择的模型 ID，带线路前缀"));
+  assert.ok(viewer.includes("Codex 请求 CodeyX 时选择的模型 ID，带线路前缀"));
   // 请求模型取发往上游的模型，实际模型取上游响应回报的模型。
   assert.match(viewer, /请求模型<\/dt>[\s\S]*?selectedItem\.model \|\| selectedItem\.requestedModel/);
   assert.match(viewer, /实际使用模型<\/dt>[\s\S]*?selectedItem\.upstreamResponseModel/);

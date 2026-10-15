@@ -122,7 +122,7 @@ test("复制路径、修复配置与更新策略都接到真实回调", async (t
   const [slider] = policies(tree);
   assert.ok(slider);
   assert.equal(elementProps(slider).selectedKey, "stable");
-  assert.equal(elementType(byLabel(tree, "Codey 更新策略")[0]), hero.Tabs.List);
+  assert.equal(elementType(byLabel(tree, "CodeyX 更新策略")[0]), hero.Tabs.List);
   const tabs = collectElements(slider, element => elementType(element) === hero.Tabs.Tab);
   assert.deepEqual(tabs.map(element => [elementProps(element).id, textContent(element)]), [
     ["off", "不检查"], ["stable", "稳定版"], ["experimental", "实验版"],

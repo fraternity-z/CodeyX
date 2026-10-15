@@ -1,4 +1,4 @@
-// Lightweight renderer bootstrap injected by the Codey CDP launcher.
+// Lightweight renderer bootstrap injected by the CodeyX CDP launcher.
 // The heavier session/sidebar tools live in codey-inject.js and are loaded
 // after sidebar interaction or once the renderer has idle time.
 (() => {
@@ -24,7 +24,7 @@
   const runtimeHealthFailureRetryMs = 1_000;
   const runtimeHealthFailureThreshold = 2;
   // 系统睡眠会同时冻结页面和后端，唤醒瞬间所有进程一起恢复，
-  // 3 秒的往返预算不足以判断 Codey 是否真的退出。排程间隔远超定时器
+  // 3 秒的往返预算不足以判断 CodeyX 是否真的退出。排程间隔远超定时器
   // 周期即视为刚从睡眠恢复，在这段宽限期内放宽超时与失败阈值。
   const runtimeHealthResumeGapMs = 90_000;
   const runtimeHealthResumeGraceMs = 120_000;
@@ -42,7 +42,7 @@
   ].join(", ");
   const headerSelector = "header, nav";
   // Codex 把左侧图标栏收进 nav[data-app-navigation-rail]，图标栏底部的贴底
-  // 堆栈里放着帮助与个人资料按钮，Codey 入口跟随它们落在这里。
+  // 堆栈里放着帮助与个人资料按钮，CodeyX 入口跟随它们落在这里。
   const navigationRailSelector = '[data-app-navigation-rail="true"]';
   const railHelpLabelPattern = /帮助|help/i;
   const railProfileLabelPattern = /个人资料|账户|账号|profile|account/i;
@@ -94,7 +94,7 @@
     return Promise.resolve({
       status: "failed",
       code: "bridge_unavailable",
-      message: "Codey bridge 不可用",
+      message: "CodeyX bridge 不可用",
     });
   };
 
@@ -104,7 +104,7 @@
     style.id = styleId;
     style.textContent = `
       /* Codex 原生小按钮：28×28、圆角 12.5px、图标继承按钮前景色，
-         Codey 入口按同一套数值对齐，保证与相邻原生按钮同色同尺寸。 */
+         CodeyX 入口按同一套数值对齐，保证与相邻原生按钮同色同尺寸。 */
       #${buttonId} { --codey-icon-size: 16px; --codey-icon-color: currentColor; -webkit-app-region: no-drag !important; pointer-events: auto !important; position: relative; z-index: 2147483641; display: inline-grid; place-items: center; flex: 0 0 auto; width: 32px; height: 32px; border: 0; border-radius: 12.5px; padding: 0; margin-inline-start: 8px; margin-inline-end: 18px; background: transparent; color: inherit; cursor: pointer; opacity: .86; user-select: none; transition: background .15s ease, opacity .15s ease, transform .15s ease; }
       #${buttonId}[data-codey-header-actions="true"] { width: 28px; height: 28px; margin-inline-start: 0; margin-inline-end: 6px; }
       #${buttonId}[data-codey-native-slot="true"], #${buttonMeasureId} { box-sizing: border-box; flex: 0 0 auto; width: 28px; height: 28px; margin: 0; color: inherit; }
@@ -193,21 +193,21 @@
       button.removeAttribute?.("data-codey-update-available");
     }
     if (runtimeHealthState === "unavailable") {
-      const detail = runtimeHealthMessage || "Codey 后端未响应";
+      const detail = runtimeHealthMessage || "CodeyX 后端未响应";
       const updateLabel = hasDetectedUpdate() ? "，另有可用更新" : "";
       button.setAttribute(
         "aria-label",
-        `Codey 连接中断，点击查看处理提示${updateLabel}`,
+        `CodeyX 连接中断，点击查看处理提示${updateLabel}`,
       );
-      button.title = `Codey 连接中断：${detail}（点击查看处理提示）${updateLabel}`;
+      button.title = `CodeyX 连接中断：${detail}（点击查看处理提示）${updateLabel}`;
       return;
     }
     if (hasDetectedUpdate()) {
-      button.setAttribute("aria-label", "打开 Codey 配置，有可用更新");
-      button.title = "打开 Codey 配置（发现新版本）";
+      button.setAttribute("aria-label", "打开 CodeyX 配置，有可用更新");
+      button.title = "打开 CodeyX 配置（发现新版本）";
     } else {
-      button.setAttribute("aria-label", "打开 Codey 配置");
-      button.title = "打开 Codey 配置";
+      button.setAttribute("aria-label", "打开 CodeyX 配置");
+      button.title = "打开 CodeyX 配置";
     }
   };
 
@@ -299,7 +299,7 @@
       : 0;
     runtimeHealthLastCheckAt = observedAt;
     if (observedGap >= runtimeHealthResumeGapMs) {
-      // 页面和后端被系统一起冻结，唤醒后 Codey 需要时间重新建立与
+      // 页面和后端被系统一起冻结，唤醒后 CodeyX 需要时间重新建立与
       // Codex 的连接。恢复前记录的失败不代表当前状态，直接丢弃。
       runtimeHealthResumeGraceUntil = observedAt + runtimeHealthResumeGraceMs;
       runtimeHealthFailures = 0;
@@ -314,18 +314,18 @@
     try {
       if (typeof window.__codexSessionDeleteBridge !== "function") {
         runtimeHealthFailures = failureThreshold;
-        return setRuntimeHealthState("unavailable", "Codey bridge 不可用");
+        return setRuntimeHealthState("unavailable", "CodeyX bridge 不可用");
       }
       const result = await withTimeout(
         callBridge(backendHealthPath, {}, { timeoutMs: checkTimeoutMs }),
         checkTimeoutMs + 250,
-        "Codey 后端健康检查超时",
+        "CodeyX 后端健康检查超时",
       );
       if (result?.status === "ok") {
         runtimeHealthFailures = 0;
         return setRuntimeHealthState("healthy");
       }
-      const error = new Error(result?.message || "Codey 后端未响应");
+      const error = new Error(result?.message || "CodeyX 后端未响应");
       error.code = result?.code || "backend_unavailable";
       throw error;
     } catch (error) {
@@ -333,9 +333,9 @@
       const immediate = error?.code === "bridge_unavailable";
       if (immediate) runtimeHealthFailures = failureThreshold;
       if (runtimeHealthFailures >= failureThreshold) {
-        return setRuntimeHealthState("unavailable", "Codey 后端未响应");
+        return setRuntimeHealthState("unavailable", "CodeyX 后端未响应");
       }
-      return setRuntimeHealthState("checking", "正在确认 Codey 进程状态");
+      return setRuntimeHealthState("checking", "正在确认 CodeyX 进程状态");
     } finally {
       runtimeHealthCheckInFlight = false;
       const nextDelay = runtimeHealthFailures > 0
@@ -898,8 +898,8 @@
   const openSettings = () => {
     if (runtimeHealthState === "unavailable") {
       window.alert(
-        "Codey 与 Codex 的连接已中断，当前配置面板无法连接。"
-        + "Codey 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 Codey。",
+        "CodeyX 与 Codex 的连接已中断，当前配置面板无法连接。"
+        + "CodeyX 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 CodeyX。",
       );
       return;
     }
@@ -909,8 +909,8 @@
     }
     const detail = String(window.__codeyOverlayError || "").split("\n")[0];
     window.alert(detail
-      ? `Codey 内嵌配置面板加载失败：${detail}`
-      : "Codey 内嵌配置面板尚未加载，请退出 Codex 后重新启动 Codey");
+      ? `CodeyX 内嵌配置面板加载失败：${detail}`
+      : "CodeyX 内嵌配置面板尚未加载，请退出 Codex 后重新启动 CodeyX");
   };
 
   const mountableRect = (element) => {
@@ -1008,7 +1008,7 @@
   };
 
   // 图标栏底部的贴底堆栈：nav 的最后一个可见子容器 → 它的 flex 列容器，
-  // 帮助菜单可能不再显示，此时将 Codey 入口放在个人资料菜单之前。
+  // 帮助菜单可能不再显示，此时将 CodeyX 入口放在个人资料菜单之前。
   const findRailFooterMount = () => {
     const rail = document.querySelector(navigationRailSelector);
     if (!(rail instanceof HTMLElement)) return null;
@@ -1089,9 +1089,9 @@
       button = document.createElement("button");
       button.id = buttonId;
       button.type = "button";
-      button.setAttribute("aria-label", "打开 Codey 配置");
-      button.innerHTML = `${settingsIcon}<span class="codey-runtime-badge" aria-hidden="true">!</span><span class="codey-settings-label">Codey</span>`;
-      button.title = "打开 Codey 配置";
+      button.setAttribute("aria-label", "打开 CodeyX 配置");
+      button.innerHTML = `${settingsIcon}<span class="codey-runtime-badge" aria-hidden="true">!</span><span class="codey-settings-label">CodeyX</span>`;
+      button.title = "打开 CodeyX 配置";
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -1191,7 +1191,7 @@
         // the bootstrap observer/listeners.
         if (finishSessionToolsLoad()) return true;
         sessionToolsLoadPromise = null;
-        console.warn("[Codey] session tools lazy load failed", error);
+        console.warn("[CodeyX] session tools lazy load failed", error);
         return false;
       });
     return sessionToolsLoadPromise;

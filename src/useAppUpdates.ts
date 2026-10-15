@@ -34,7 +34,7 @@ declare global {
 }
 
 /// 用户点过"稍后"的版本，记在会话里。自动检查因此不会在同一个版本上反复
-/// 弹窗，用户重新打开 Codey 后仍会收到提醒。
+/// 弹窗，用户重新打开 CodeyX 后仍会收到提醒。
 function readDeferredVersion(): string | null {
   try {
     return window.sessionStorage.getItem(DEFERRED_UPDATE_STORAGE_KEY);
@@ -188,7 +188,7 @@ export function useAppUpdates({
       if (report.status === "started") {
         setNotice({
           tone: "info",
-          text: `v${report.version} 更新未完成，请重新打开 Codey 或再次点击更新`,
+          text: `v${report.version} 更新未完成，请重新打开 CodeyX 或再次点击更新`,
         });
         return;
       }
@@ -366,7 +366,7 @@ export function useAppUpdates({
       } else if (result.releaseNotes?.trim()) {
         setConfirmation({
           action: "view-update-notes",
-          title: `Codey 更新公告 v${result.latestVersion}`,
+          title: `CodeyX 更新公告 v${result.latestVersion}`,
           description: text,
           ...releaseAnnouncement(result),
           confirmLabel: "关闭",
@@ -388,7 +388,7 @@ export function useAppUpdates({
     if (!target?.updateAvailable || !target.selectedAsset || !updateVersionAllowed(target, policyRef.current) || isBusy) return;
     const confirmation: Confirmation = {
       action: "download-update",
-      title: `发现 Codey 新版本 v${target.latestVersion}`,
+      title: `发现 CodeyX 新版本 v${target.latestVersion}`,
       description: [
         `当前版本为 v${target.currentVersion}，检测到新版本 v${target.latestVersion}。`,
         "是否立即下载更新？",
@@ -452,7 +452,7 @@ export function useAppUpdates({
     setConfirmation({
       action: "install-update",
       title: "安装更新",
-      description: `Codey 会先保存未保存的设置，再退出当前实例，安装 ${target.fileName}，然后尝试启动新版。`,
+      description: `CodeyX 会先保存未保存的设置，再退出当前实例，安装 ${target.fileName}，然后尝试启动新版。`,
       ...releaseAnnouncement(announcement),
       confirmLabel: "安装并重启",
       run: () => void installDownloadedUpdate(target),
@@ -471,7 +471,7 @@ export function useAppUpdates({
       await invoke("install_downloaded_update", {
         filePath: target.filePath,
       });
-      const text = "正在退出 Codey 并启动安装器…";
+      const text = "正在退出 CodeyX 并启动安装器…";
       setUpdateResult({ tone: "pending", text });
       setNotice({ tone: "info", text });
     } catch (error) {

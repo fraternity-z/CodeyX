@@ -1,4 +1,4 @@
-// Keep Codex's native model allowlist aligned with the current Codey channel.
+// Keep Codex's native model allowlist aligned with the current CodeyX channel.
 (() => {
   const patchVersion = "66";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
@@ -103,7 +103,7 @@
   const patchedProviderKey = Symbol("codeyPatchedModelProvider");
   const patchedRouteKey = Symbol("codeyPatchedRoute");
   const blockedProviderRequestKey = Symbol("codeyBlockedProviderRequest");
-  // Codex persists a thread's original provider in rollout data, while Codey
+  // Codex persists a thread's original provider in rollout data, while CodeyX
   // can resume that same thread through the local router for this process.
   // Keep the two identities separate so a later thread/list response cannot
   // erase a successful runtime migration.
@@ -362,7 +362,7 @@
       }
     } else {
       // `turn/start` has no modelProvider field. New, forked, and resumed
-      // threads may use the HTTP-only Codey carrier; the persisted rollout
+      // threads may use the HTTP-only CodeyX carrier; the persisted rollout
       // metadata remains untouched by a resume-time override.
       delete next.modelProvider;
     }
@@ -378,7 +378,7 @@
     let blocked = false;
     if (providerBoundExistingThreadMethods.has(method) && routedProviderId) {
       // Only an unloaded thread can migrate from an external provider during
-      // resume. Both Codey provider IDs share the same gateway carrier.
+      // resume. Both CodeyX provider IDs share the same gateway carrier.
       if (
         threadId
         && ((method !== "thread/resume" && unconfirmedThreadProviders.has(threadId)
@@ -1949,7 +1949,7 @@
           statsigClients: statsigClients().length,
           notifiedClients,
         }, revision);
-      }).catch((error) => console.warn("[Codey] model query refresh failed", error));
+      }).catch((error) => console.warn("[CodeyX] model query refresh failed", error));
     }
     return {
       queryClients: scan.queryClients.length,
@@ -2041,7 +2041,7 @@
             },
             (error) => {
               refreshDeliveryInFlight = false;
-              console.warn("[Codey] scheduled model delivery failed", error);
+              console.warn("[CodeyX] scheduled model delivery failed", error);
             },
           );
         }
@@ -2105,7 +2105,7 @@
         return await applyModelCatalog(nextCatalog);
       } catch (error) {
         if (disposed || request.generation !== catalogRequestGeneration) return false;
-        console.warn("[Codey] model whitelist refresh failed", error);
+        console.warn("[CodeyX] model whitelist refresh failed", error);
         scheduleRefresh();
         return false;
       }
@@ -2572,7 +2572,7 @@
       // Before the catalog arrives there is no safe way to distinguish a
       // legacy route alias from a legitimate upstream model containing `/`.
       // Preserve the model byte-for-byte, but keep every new, forked, or resumed
-      // thread on Codey's carrier so a route alias cannot reach the old provider.
+      // thread on CodeyX's carrier so a route alias cannot reach the old provider.
       const safeSource = method === "turn/start"
         ? paramsWithoutUnverifiedRouteMetadata(source, requestedModel)
         : source;
@@ -2686,7 +2686,7 @@
       );
     }
     // Any task can be resumed through the
-    // HTTP-only Codey carrier without rewriting its rollout. Preserve an
+    // HTTP-only CodeyX carrier without rewriting its rollout. Preserve an
     // unknown model exactly so the gateway can report it rather than falling
     // back to an unrelated default.
     if (method === "thread/resume" || method === "thread/fork") {
@@ -2861,7 +2861,7 @@
     if (catalog.loaded && catalog.models.length === 0) {
       return markBlockedProviderRequest({ ...params }, {
         reason: "provider_disabled",
-        message: "当前线路已禁用，请先在 Codey 中启用线路或切换到可用线路后重试。",
+        message: "当前线路已禁用，请先在 CodeyX 中启用线路或切换到可用线路后重试。",
       });
     }
     const threadId = threadIdFromParams(params);
@@ -2946,7 +2946,7 @@
     if (!blocked) return false;
     const target = blocked.routeName || "所选线路";
     const message = blocked.message || `暂时无法确认此任务的线路配置。请重启 Codex 后恢复任务，或用 ${target} 新建任务。`;
-    console.warn("[Codey] provider migration required before routed turn", blocked);
+    console.warn("[CodeyX] provider migration required before routed turn", blocked);
     try {
       const noticeId = "codey-provider-mismatch-notice";
       let notice = document.getElementById?.(noticeId);
@@ -3007,7 +3007,7 @@
           patchOutgoingModelRequest(event.detail);
         }
       } catch (error) {
-        console.warn("[Codey] model request repair failed", error);
+        console.warn("[CodeyX] model request repair failed", error);
       }
       return originalDispatchEvent.call(this, event);
     };
@@ -3119,7 +3119,7 @@
         const routed = rewrittenOutgoingMessage({ type: "mcp-request", request: { method, params } });
         if (blockedProviderRequest(routed)) {
           showBlockedProviderNotice(routed);
-          return Promise.reject(new Error("Codey blocked provider migration"));
+          return Promise.reject(new Error("CodeyX blocked provider migration"));
         }
         return enqueue.call(this, routed.request.method, routed.request.params, ...args);
       },
@@ -3186,7 +3186,7 @@
     trackOutgoingMessage: (detail) => {
       // AppServerRequestClient runs rewriteOutgoingMessage before createRequest
       // assigns an id. Track the concrete request too, otherwise a later native
-      // model/list reply can bypass the response patch and replace Codey's hot
+      // model/list reply can bypass the response patch and replace CodeyX's hot
       // catalog after a completed turn.
       rememberOutgoingModelListRequest(detail);
       rememberOutgoingThreadRequest(detail);

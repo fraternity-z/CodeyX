@@ -25,7 +25,7 @@
   const locationKey = () => window.location?.href || "";
   const context = () => window.__codeyPromptOptimize?.composerContext?.();
   const call = async (name, payload) => {
-    if (typeof window.__codexSessionDeleteBridge !== "function") throw new Error("Codey bridge 尚未就绪");
+    if (typeof window.__codexSessionDeleteBridge !== "function") throw new Error("CodeyX bridge 尚未就绪");
     const result = await window.__codexSessionDeleteBridge(name, payload);
     if (result?.status === "failed") throw new Error(result.message || "Git 操作失败");
     return result;

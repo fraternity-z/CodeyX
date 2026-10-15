@@ -81,7 +81,7 @@ impl InjectionPhase {
             Self::SelectTarget => "选择 Codex renderer",
             Self::InstallBridge => "安装 CDP bridge 与注入脚本",
             Self::VerifyRequestGate => "校验模型请求入口",
-            Self::VerifyOverlay => "验证 Codey 浮层",
+            Self::VerifyOverlay => "验证 CodeyX 浮层",
             Self::ReadStatuses => "读取注入状态",
         }
     }
@@ -761,7 +761,7 @@ fn safe_injection_error_summary(error: &anyhow::Error) -> String {
     } else if normalized.contains("timed out waiting for cdp command") {
         "CDP 命令未在单次响应预算内完成".to_string()
     } else if normalized.contains("codey 内嵌配置面板注入失败") {
-        "Codey 浮层未就绪".to_string()
+        "CodeyX 浮层未就绪".to_string()
     } else if normalized.contains("codex 页面没有 cdp websocket 地址") {
         "Codex 页面缺少调试连接地址".to_string()
     } else if normalized.contains("cdp websocket closed before response") {
@@ -1043,7 +1043,7 @@ async fn verify_injection(
             // 浮层由加载器脚本同步生成，缺失说明注入脚本执行失败，只能重装。
             reinstall: true,
             error: error.context(format!(
-                "验证 Codex renderer {} 的 Codey 浮层失败",
+                "验证 Codex renderer {} 的 CodeyX 浮层失败",
                 bridge.target_id
             )),
         })?;
@@ -1248,7 +1248,7 @@ pub(crate) async fn remote_control_request(
         r#"typeof window.__codeyRemoteControl === "function""#,
     )
     .await
-    .map_err(|_| "无法连接 Codex 桌面，请检查 Codey 是否正在运行")?;
+    .map_err(|_| "无法连接 Codex 桌面，请检查 CodeyX 是否正在运行")?;
     if runtime_value(&ready).and_then(serde_json::Value::as_bool) != Some(true) {
         let loaded = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
             websocket_url,
@@ -1259,7 +1259,7 @@ pub(crate) async fn remote_control_request(
         .await
         .map_err(|_| "桌面会话接口加载失败，请重新连接")?;
         if runtime_value(&loaded).and_then(serde_json::Value::as_str) != Some("") {
-            return Err("桌面会话接口尚未就绪，请更新或重启 Codey".into());
+            return Err("桌面会话接口尚未就绪，请更新或重启 CodeyX".into());
         }
     }
     let expires_at = std::time::SystemTime::now()
@@ -1271,7 +1271,7 @@ pub(crate) async fn remote_control_request(
     // structured renderer probes so both resume and create return their value.
     let script = format!(
         r#"(async () => {{
-          if (typeof window.__codeyRemoteControl !== "function") return JSON.stringify({{status:"failed",message:"桌面会话接口尚未就绪，请更新或重启 Codey"}});
+          if (typeof window.__codeyRemoteControl !== "function") return JSON.stringify({{status:"failed",message:"桌面会话接口尚未就绪，请更新或重启 CodeyX"}});
           try {{ return JSON.stringify(await window.__codeyRemoteControl({args}, {expires_at})); }}
           catch {{ return JSON.stringify({{status:"failed",message:"桌面未确认远程操作，请检查会话状态后重试"}}); }}
         }})()"#
@@ -1556,12 +1556,12 @@ fn with_lazy_loaders(handler: BridgeHandler, websocket_url: Arc<str>) -> BridgeH
                     &settings_overlay_load_script,
                 )
                 .await
-                .context("按需加载 Codey 内嵌配置面板失败")?;
+                .context("按需加载 CodeyX 内嵌配置面板失败")?;
                 let message = runtime_value(&response)
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("配置面板加载脚本未返回状态");
                 if !message.is_empty() {
-                    anyhow::bail!("Codey 内嵌配置面板加载失败：{message}");
+                    anyhow::bail!("CodeyX 内嵌配置面板加载失败：{message}");
                 }
                 Ok(serde_json::json!({ "status": "ok" }))
             });
@@ -1576,12 +1576,12 @@ fn with_lazy_loaders(handler: BridgeHandler, websocket_url: Arc<str>) -> BridgeH
                     &session_tools_load_script,
                 )
                 .await
-                .context("按需加载 Codey 会话工具失败")?;
+                .context("按需加载 CodeyX 会话工具失败")?;
                 let message = runtime_value(&response)
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or("会话工具加载脚本未返回状态");
                 if !message.is_empty() {
-                    anyhow::bail!("Codey 会话工具加载失败：{message}");
+                    anyhow::bail!("CodeyX 会话工具加载失败：{message}");
                 }
                 Ok(serde_json::json!({ "status": "ok" }))
             });
@@ -1664,7 +1664,7 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
     load() {
       if (loading) return loading;
       if (typeof window.__codexSessionDeleteBridge !== "function") {
-        return Promise.reject(new Error("Codey bridge 尚未就绪"));
+        return Promise.reject(new Error("CodeyX bridge 尚未就绪"));
       }
       loading = Promise.resolve(
         window.__codexSessionDeleteBridge(loadPath, {}),
@@ -1692,7 +1692,7 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
         const message = formatError(error);
         window.__codeyOverlayError = message;
         loading = null;
-        window.alert(`Codey 内嵌配置面板加载失败：${message}`);
+        window.alert(`CodeyX 内嵌配置面板加载失败：${message}`);
       });
     },
   };
@@ -1773,7 +1773,7 @@ async fn ensure_settings_overlay_ready(websocket_url: &str) -> Result<()> {
           && typeof window.__codeySettingsOverlay.toggle === "function""#,
     )
     .await
-    .context("检查 Codey 内嵌配置面板状态失败")?;
+    .context("检查 CodeyX 内嵌配置面板状态失败")?;
     if runtime_value(&ready).and_then(serde_json::Value::as_bool) == Some(true) {
         return Ok(());
     }
@@ -1783,11 +1783,11 @@ async fn ensure_settings_overlay_ready(websocket_url: &str) -> Result<()> {
         r#"String(window.__codeyOverlayError || "未生成浮层控制器")"#,
     )
     .await
-    .context("读取 Codey 内嵌配置面板异常失败")?;
+    .context("读取 CodeyX 内嵌配置面板异常失败")?;
     let message = runtime_value(&error)
         .and_then(serde_json::Value::as_str)
         .unwrap_or("未知错误");
-    anyhow::bail!("Codey 内嵌配置面板注入失败：{message}")
+    anyhow::bail!("CodeyX 内嵌配置面板注入失败：{message}")
 }
 
 fn runtime_value(response: &serde_json::Value) -> Option<&serde_json::Value> {
@@ -1835,7 +1835,7 @@ pub async fn is_target_healthy(websocket_url: &str) -> Result<TargetHealth> {
             {
                 return Ok(TargetHealth::Unresponsive);
             }
-            Err(error).context("检查 Codey bridge 健康状态失败")
+            Err(error).context("检查 CodeyX bridge 健康状态失败")
         }
     }
 }

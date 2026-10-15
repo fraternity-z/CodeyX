@@ -2,7 +2,7 @@
 // The button joins the composer's native action row so it follows normal
 // responsive layout instead of floating above the input. The enabled flag is
 // read from /settings/get at runtime, so the console switch applies without a
-// Codex restart. All API traffic goes through the Codey bridge and never
+// Codex restart. All API traffic goes through the CodeyX bridge and never
 // carries the configured API key into this page.
 (() => {
   const moduleLoaded = window.__codeyPromptOptimizeModuleLoaded === true;
@@ -77,7 +77,7 @@
     if (typeof window.__codexSessionDeleteBridge === "function") {
       return window.__codexSessionDeleteBridge(path, payload);
     }
-    return Promise.reject(new Error("Codey bridge 尚未就绪"));
+    return Promise.reject(new Error("CodeyX bridge 尚未就绪"));
   };
 
   const withTimeout = (promise, ms, message) => {
@@ -853,7 +853,7 @@
             typeof console !== "undefined" &&
             typeof console.error === "function"
           ) {
-            console.error("Codey 提示词优化脚本异常：", error);
+            console.error("CodeyX 提示词优化脚本异常：", error);
           }
         }
         ready = true;

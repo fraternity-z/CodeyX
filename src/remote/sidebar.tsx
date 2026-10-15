@@ -41,6 +41,6 @@ export function Sidebar(props: Props) {
       {props.loading && !props.threads.length && <p className="remote-list-empty" role="status">正在加载会话…</p>}
       {props.error && <p role="alert" className="remote-client-error">{props.error}</p>}
     </div>
-    <footer className="remote-sidebar-footer"><button aria-pressed={props.archived} onClick={() => props.onArchived(!props.archived)}><IconArchive size={18} />{props.archived ? "返回会话" : "归档会话"}</button><button onClick={props.onPanel}><IconSettings size={18} />Codey 控制台</button><button className="remote-icon-button" aria-label="退出此设备" onClick={props.onLogout}><IconLogout size={18} /></button></footer>
+    <footer className="remote-sidebar-footer"><button aria-pressed={props.archived} onClick={() => props.onArchived(!props.archived)}><IconArchive size={18} />{props.archived ? "返回会话" : "归档会话"}</button><button onClick={props.onPanel}><IconSettings size={18} />CodeyX 控制台</button><button className="remote-icon-button" aria-label="退出此设备" onClick={props.onLogout}><IconLogout size={18} /></button></footer>
   </aside>;
 }

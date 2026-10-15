@@ -81,12 +81,12 @@ writeFileSync(
 <plist version="1.0">
 <dict>
   <key>CFBundleDevelopmentRegion</key><string>zh_CN</string>
-  <key>CFBundleDisplayName</key><string>Codey</string>
+  <key>CFBundleDisplayName</key><string>CodeyX</string>
   <key>CFBundleExecutable</key><string>codey</string>
   <key>CFBundleIdentifier</key><string>com.codey.codex-fixer</string>
   <key>CFBundleIconFile</key><string>Codey</string>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
-  <key>CFBundleName</key><string>Codey</string>
+  <key>CFBundleName</key><string>CodeyX</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundleVersion</key><string>${version}</string>

@@ -20,7 +20,7 @@ const appSource = readFileSync(
 );
 
 test("prompt optimization switches between Codey routing and manual upstream configuration", () => {
-  assert.match(cardSource, /使用 Codey 路由/);
+  assert.match(cardSource, /使用 CodeyX 路由/);
   assert.match(cardSource, /手动配置/);
   assert.match(cardSource, /OpenAI Responses/);
   assert.match(cardSource, /OpenAI Chat Completions/);

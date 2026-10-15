@@ -37,7 +37,7 @@ const MAX_BODY: usize = 1024 * 1024;
 // Four MiB of images expanded as base64, plus escaped message text and metadata.
 const MAX_MESSAGE_BODY: usize = 7 * 1024 * 1024;
 const COOKIE: &str = "codey_remote";
-const HTML: &str = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content\"><meta name=\"color-scheme\" content=\"light dark\"><title>Codex · Codey 远程控制</title><link rel=\"stylesheet\" href=\"/remote.css\"></head><body><div id=\"root\"></div><script src=\"/remote.js\" defer></script></body></html>";
+const HTML: &str = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content\"><meta name=\"color-scheme\" content=\"light dark\"><title>Codex · CodeyX 远程控制</title><link rel=\"stylesheet\" href=\"/remote.css\"></head><body><div id=\"root\"></div><script src=\"/remote.js\" defer></script></body></html>";
 
 pub(super) struct Core {
     pub auth: Mutex<Auth>,
@@ -369,7 +369,7 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
             .and_then(std::convert::identity),
             "/remote/models" => {
                 let Some(state) = core.state.upgrade() else {
-                    return failure(StatusCode::SERVICE_UNAVAILABLE, "Codey 正在退出");
+                    return failure(StatusCode::SERVICE_UNAVAILABLE, "CodeyX 正在退出");
                 };
                 Ok(state
                     .bridge_request("/codex-model-catalog".into(), json!({}))
@@ -377,7 +377,7 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
             }
             "/remote/defaults" => {
                 let Some(state) = core.state.upgrade() else {
-                    return failure(StatusCode::SERVICE_UNAVAILABLE, "Codey 正在退出");
+                    return failure(StatusCode::SERVICE_UNAVAILABLE, "CodeyX 正在退出");
                 };
                 super::create::defaults(&state, &args).await
             }
@@ -388,7 +388,7 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
                     return failure(StatusCode::FORBIDDEN, "此操作仅可在电脑端使用");
                 }
                 let Some(state) = core.state.upgrade() else {
-                    return failure(StatusCode::SERVICE_UNAVAILABLE, "Codey 正在退出");
+                    return failure(StatusCode::SERVICE_UNAVAILABLE, "CodeyX 正在退出");
                 };
                 let args = {
                     let config = state.config.read().await;
@@ -459,7 +459,7 @@ fn event_stream(
         .await;
         let result = async {
             if *shutdown.borrow() || !authorized(&core,&token) { return Err("设备授权已撤销".to_string()); }
-            let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+            let state = core.state.upgrade().ok_or("CodeyX 正在退出")?;
             super::create::open(&state, &thread).await?;
             let mut desktop = Desktop::follow(&thread).await?;
             let mut changed = true;
@@ -539,7 +539,7 @@ async fn action_once(core: &Core, token: &str, path: &str, args: &Value) -> Resu
     );
     let result = if path == "/remote/create" {
         async {
-            let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+            let state = core.state.upgrade().ok_or("CodeyX 正在退出")?;
             if args.get("model").is_some() || args.get("effort").is_some() {
                 let catalog = state
                     .bridge_request("/codex-model-catalog".into(), json!({}))
@@ -562,14 +562,14 @@ async fn perform_action(core: &Core, args: &Value) -> Result<Value, String> {
     super::desktop::validate_thread(thread)?;
     let action = args["action"].as_str().ok_or("缺少会话操作")?;
     if action == "open" {
-        let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+        let state = core.state.upgrade().ok_or("CodeyX 正在退出")?;
         super::create::open(&state, thread).await?;
         Desktop::follow(thread).await?;
         return Ok(json!({"status":"ok"}));
     }
     let mut desktop = Desktop::follow(thread).await?;
     if action == "settings" && (args.get("model").is_some() || args.get("effort").is_some()) {
-        let state = core.state.upgrade().ok_or("Codey 正在退出")?;
+        let state = core.state.upgrade().ok_or("CodeyX 正在退出")?;
         let catalog = state
             .bridge_request("/codex-model-catalog".into(), json!({}))
             .await;

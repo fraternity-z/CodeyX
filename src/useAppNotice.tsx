@@ -10,7 +10,7 @@ import {
 
 const INITIAL_NOTICE: Notice = {
   tone: "info",
-  text: "正在连接 Codey…",
+  text: "正在连接 CodeyX…",
 };
 
 export type AppNoticeController = ExternalStore<Notice>;
@@ -44,7 +44,7 @@ export const NoticeToast = memo(function NoticeToast({
   );
   useEffect(() => {
     if (
-      !notice.text || notice.text.startsWith("正在连接 Codey") ||
+      !notice.text || notice.text.startsWith("正在连接 CodeyX") ||
       controller.getSnapshot() !== notice
     ) {
       return;

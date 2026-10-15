@@ -351,7 +351,7 @@ mod tests {
             .unwrap();
         assert_eq!(plugin["installed"], false);
         assert_eq!(plugin["enabled"], false);
-        assert_eq!(plugin["interface"]["displayName"], "Codey Computer Use");
+        assert_eq!(plugin["interface"]["displayName"], "CodeyX Computer Use");
         assert_eq!(plugin["policy"]["installation"], "AVAILABLE");
         let marketplace = crate::computer_use::marketplace_path(home);
         fs::remove_file(&marketplace).unwrap();

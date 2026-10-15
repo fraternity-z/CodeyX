@@ -345,7 +345,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
     <section ref={setSectionEl} className="secondary-section codey-plugins-section" aria-labelledby="codey-plugins-title" data-codey-plugin-drop-zone="">
       <SettingsPageHeader
         id="codey-plugins-title"
-        title="Codey 插件"
+        title="CodeyX 插件"
         icon={<IconPuzzle size={15} />}
         description="安装独立功能模块，扩展 Codex 能力与环境支持。"
         actions={
@@ -581,7 +581,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
 
                   {plugin.restartRequired && (
                     <div className="mt-3 rounded-lg border border-amber-200/70 bg-amber-50/70 p-2.5 text-[11.5px] text-amber-800 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-300">
-                      需要重启 Codey 或停用后重新启用，以应用版本更新或配置变更。
+                      需要重启 CodeyX 或停用后重新启用，以应用版本更新或配置变更。
                     </div>
                   )}
 
@@ -838,7 +838,7 @@ export function CodeyPluginsSection({ container }: { container?: HTMLElement | n
                   <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-300">
                     <IconAlertTriangle className="mt-0.5 shrink-0" size={16} aria-hidden="true" />
                     <p className="m-0 leading-relaxed">
-                      启用后将执行插件本地代码，插件具有与 Codey 相同的系统运行权限。请确认来源安全可靠。
+                      启用后将执行插件本地代码，插件具有与 CodeyX 相同的系统运行权限。请确认来源安全可靠。
                     </p>
                   </div>
                 </div>

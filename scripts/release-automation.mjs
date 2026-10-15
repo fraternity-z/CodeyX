@@ -412,7 +412,7 @@ export async function main(command = process.argv[2]) {
     await prepareReleaseVersion(build);
   } else if (command === "artifacts-ready") {
     const build = await loadBuild();
-    for (const name of [`Codey-${build.version}-macos-arm64-unsigned.zip`, `Codey-${build.version}-windows-x64-setup.exe`]) {
+    for (const name of [`Codey-${build.version}-macos-arm64-unsigned.zip`, `CodeyX-${build.version}-windows-x64-setup.exe`]) {
       if ((await stat(join("release-assets", name))).size < 1) throw new Error("安装包为空");
     }
     await callback("events", { status: "artifacts_ready" });

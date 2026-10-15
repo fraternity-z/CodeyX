@@ -81,7 +81,7 @@ export function RemoteControlPanel({ active = true }: { active?: boolean }) {
         id="remote-control-title"
         title="远程控制"
         icon={<IconDeviceMobile size={16} />}
-        description="用手机接续电脑上的 Codex 会话，随时管理 Codey。"
+        description="用手机接续电脑上的 Codex 会话，随时管理 CodeyX。"
         actions={!remote && (
           <Button variant="light" size="xs" disabled={disabled} loading={busy === "refresh"}
             onClick={() => void run("refresh", async () => { await refresh(); })}>
@@ -100,7 +100,7 @@ export function RemoteControlPanel({ active = true }: { active?: boolean }) {
             <div className="remote-card-heading">
               <div className="remote-heading-main">
                 <span className="remote-section-icon"><IconDeviceDesktop size={21} aria-hidden="true" /></span>
-                <div><h3 id={controlId + "-service"}>让电脑与手机保持连接</h3><p>电脑保持开机，Codey 持续运行，即可在手机上继续工作。</p></div>
+                <div><h3 id={controlId + "-service"}>让电脑与手机保持连接</h3><p>电脑保持开机，CodeyX 持续运行，即可在手机上继续工作。</p></div>
               </div>
               <span className={`remote-status ${status.running ? "is-online" : ""}`} role="status">
                 <span className="remote-status-dot" aria-hidden="true" />{status.running ? "服务已开启" : "未开启"}

@@ -106,8 +106,8 @@ async fn blocking<T: Serialize + Send + 'static>(
 async fn select_package() -> Result<Value, String> {
     blocking(|| {
         rfd::FileDialog::new()
-            .set_title("导入 Codey 插件")
-            .add_filter("Codey 插件", &["codey-plugin"])
+            .set_title("导入 CodeyX 插件")
+            .add_filter("CodeyX 插件", &["codey-plugin"])
             .pick_file()
             .map(|path| codey_plugins::inspect(&path))
             .transpose()

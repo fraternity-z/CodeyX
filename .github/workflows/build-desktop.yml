@@ -462,7 +462,7 @@ jobs:
             exit $LASTEXITCODE
           }
 
-          $installer = "dist\windows\Codey-$version-windows-x64-setup.exe"
+          $installer = "dist\windows\CodeyX-$version-windows-x64-setup.exe"
           if (-not (Test-Path $installer)) {
             throw "NSIS installer was not created: $installer"
           }

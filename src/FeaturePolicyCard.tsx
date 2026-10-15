@@ -464,13 +464,13 @@ function FeaturePolicyCardComponent({
   const fastContextToolsEnabled =
     config.fastContextTools && !fastctxStatusBlocksEmbedded;
   const fastctxBlockedReason = fastContextToolsStatus.detectionFailed
-    ? "暂时无法确认 Codex 配置中的 FastCtx 状态，为避免重复加载，Codey 内置 FastCtx 不可开启"
+    ? "暂时无法确认 Codex 配置中的 FastCtx 状态，为避免重复加载，CodeyX 内置 FastCtx 不可开启"
     : fastContextToolsStatus.userConfigured
       ? `已检测到 Codex 配置中的 FastCtx${
           fastContextToolsStatus.serverId
             ? `（${fastContextToolsStatus.serverId}）`
             : ""
-        }，为避免重复加载，Codey 内置 FastCtx 不可开启`
+        }，为避免重复加载，CodeyX 内置 FastCtx 不可开启`
       : "";
   const fastContextToolsSwitch = (
     <Switch
@@ -675,9 +675,9 @@ function FeaturePolicyCardComponent({
                   {fastctxStatusBlocksEmbedded
                     ? fastContextToolsStatus.detectionFailed
                       ? "暂时无法确认 FastCtx 状态，内置工具保持关闭"
-                      : "已检测到已配置的 FastCtx，Codey 不会重复加载内置工具"
+                      : "已检测到已配置的 FastCtx，CodeyX 不会重复加载内置工具"
                     : config.fastContextTools
-                      ? "下次启动加载 Codey 内置 FastCtx 文件工具"
+                      ? "下次启动加载 CodeyX 内置 FastCtx 文件工具"
                       : "保持 Codex 默认文件工具，不加载额外 MCP"}
                 </small>
               </div>

@@ -242,8 +242,8 @@ function CodexExtensionsPageComponent({
         kind === "mcp"
           ? "将移除该服务的配置注册并自动刷新 Codex，不删除外部程序。移除后如需再次使用，请重新导入配置。"
           : "ownership" in entry && entry.ownership === "external"
-            ? "将直接删除该外部安装目录及其全部资源文件，不经过 Codey 托管记录，删除后无法从本页恢复。目录内容无法完整校验时会拒绝删除。"
-            : "将删除这份 Codey 托管安装及其本地文件，保留原始来源。卸载后如需再次使用，请重新安装。若文件已被外部修改，后端可能拒绝卸载。",
+            ? "将直接删除该外部安装目录及其全部资源文件，不经过 CodeyX 托管记录，删除后无法从本页恢复。目录内容无法完整校验时会拒绝删除。"
+            : "将删除这份 CodeyX 托管安装及其本地文件，保留原始来源。卸载后如需再次使用，请重新安装。若文件已被外部修改，后端可能拒绝卸载。",
       destructive: true,
       action: {
         action: kind === "mcp" ? "remove_mcp" : "uninstall_skill",

@@ -89,7 +89,7 @@ function PromptOptimizationCardComponent({
   const modelError =
     optimization.enabled && !optimization.model.trim()
       ? usesCodeyRoute
-        ? "请选择 Codey 路由模型"
+        ? "请选择 CodeyX 路由模型"
         : "请选择或填写模型"
       : "";
   const connectionDraftValid = usesCodeyRoute
@@ -255,7 +255,7 @@ function PromptOptimizationCardComponent({
                           className="prompt-tab-text"
                           title={codeyRouteAvailable ? undefined : "本地路由已关闭"}
                         >
-                          使用 Codey 路由
+                          使用 CodeyX 路由
                         </span>
                         <Tabs.Indicator />
                       </Tabs.Tab>
@@ -295,7 +295,7 @@ function PromptOptimizationCardComponent({
                       <Label htmlFor={modelInputId} className="prompt-field-label">模型</Label>
                       <div className="prompt-field-control">
                         <ModelCombobox
-                          aria-label="提示词优化 Codey 路由模型"
+                          aria-label="提示词优化 CodeyX 路由模型"
                           value={optimization.model}
                           placeholder={
                             subagentModelOptions.length === 0

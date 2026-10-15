@@ -269,4 +269,24 @@ test("Windows release publishes the installer without a portable zip", () => {
     /Get-Command makensis -ErrorAction SilentlyContinue/,
   );
   assert.doesNotMatch(windowsPackageStep, /\$makensis = "makensis"/);
+  assert.ok(windowsPackageStep.includes('dist\\windows\\CodeyX-$version-windows-x64-setup.exe'));
+  assert.ok(windowsInstallerScript.includes('Name "CodeyX"'));
+  assert.ok(windowsInstallerScript.includes('BrandingText "CodeyX"'));
+  assert.ok(windowsInstallerScript.includes('CodeyX-${VERSION}-windows-x64-setup.exe'));
+  assert.ok(windowsInstallerScript.includes('InstallDir "$LOCALAPPDATA\\Programs\\CodeyX"'));
+  assert.ok(windowsInstallerScript.includes('InstallDirRegKey HKCU "${UNINSTALL_KEY}" "InstallLocation"'));
+  assert.ok(windowsInstallerScript.includes('Uninstall\\Codey"'));
+  assert.ok(windowsInstallerScript.includes('"DisplayName" "CodeyX"'));
+  const uninstall = windowsInstallerScript.slice(windowsInstallerScript.indexOf('Section "Uninstall"'));
+  for (const shortcut of [
+    '$DESKTOP\\CodeyX.lnk',
+    '$SMPROGRAMS\\CodeyX\\CodeyX.lnk',
+    '$SMPROGRAMS\\CodeyX\\Uninstall CodeyX.lnk',
+  ]) {
+    assert.ok(windowsInstallerScript.includes(`CreateShortcut "${shortcut}"`));
+    assert.ok(uninstall.includes(`Delete "${shortcut}"`));
+  }
+  assert.ok(windowsInstallerScript.includes('IfFileExists "$DESKTOP\\Codey.lnk" 0 legacy_desktop_shortcut_done'));
+  assert.ok(uninstall.includes('Delete "$DESKTOP\\Codey.lnk"'));
+  assert.doesNotMatch(windowsInstallerScript, /RMDir\s+\/r/i);
 });

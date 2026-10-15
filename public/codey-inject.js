@@ -145,7 +145,7 @@
     if (typeof window.__codexSessionDeleteBridge === "function") {
       return window.__codexSessionDeleteBridge(path, payload, options);
     }
-    return Promise.resolve({ status: "failed", message: "Codey bridge unavailable" });
+    return Promise.resolve({ status: "failed", message: "CodeyX bridge unavailable" });
   };
 
   const isRenderedSessionElement = (element) => (
@@ -916,7 +916,7 @@
     const handle = await window.showSaveFilePicker({
       suggestedName: filename,
       types: [{
-        description: "Codey 会话数据",
+        description: "CodeyX 会话数据",
         accept: { "application/json": [".json"] },
       }],
     });
@@ -1768,7 +1768,7 @@
       );
       if (disposed) return;
       if (result?.status !== "ok" || !result.timestamps || typeof result.timestamps !== "object") {
-        throw new Error(result?.message || "Codey thread timestamp bridge is unavailable");
+        throw new Error(result?.message || "CodeyX thread timestamp bridge is unavailable");
       }
       const refreshedCacheKeys = new Set();
       refs.forEach((ref) => {
@@ -2494,7 +2494,7 @@
         if (manager && reader) return { manager, reader, readServiceTier: serviceTierReaders.size === 1 ? [...serviceTierReaders][0] : null };
       }
     }
-    throw new Error("当前 Codex 暂不支持远程新建会话，请更新 Codey 后重试");
+    throw new Error("当前 Codex 暂不支持远程新建会话，请更新 CodeyX 后重试");
   };
 
   // Keep creation and resumption inside the desktop's native manager. In
@@ -2509,7 +2509,7 @@
       const controller = await getCodexSessionController("remote");
       const manager = controller.manager;
       if (typeof manager?.resumeConversation !== "function") {
-        throw new Error("当前 Codex 暂不支持远程读取会话，请更新 Codey 后重试");
+        throw new Error("当前 Codex 暂不支持远程读取会话，请更新 CodeyX 后重试");
       }
       assertCurrent();
       // resumeConversation also discovers an owner in another window and
@@ -3066,7 +3066,7 @@
         window.alert(
           deleted
             ? `${partialMessage}页面不会隐藏未确认删除的轮次，请重启 Codex 刷新会话后重试。`
-            : "未在会话文件中找到所选轮次，页面不会再假装删除。请更新或重启 Codey 后重试。",
+            : "未在会话文件中找到所选轮次，页面不会再假装删除。请更新或重启 CodeyX 后重试。",
         );
         return;
       }
@@ -3633,7 +3633,7 @@
         window.__codeySessionToolsError = error instanceof Error
           ? `${error.name}: ${error.message}`
           : String(error);
-        console.error("[Codey] deferred session tools scan failed", error);
+        console.error("[CodeyX] deferred session tools scan failed", error);
       }
     };
     if (typeof window.requestIdleCallback === "function") {

@@ -134,7 +134,7 @@ export function ExtensionList({
                         >
                           {
                             {
-                              managed: "Codey 托管",
+                              managed: "CodeyX 托管",
                               external: "外部安装",
                               plugin: "插件缓存",
                             }[entry.ownership]

@@ -134,7 +134,7 @@ async fn run_with_mode(
     // so show a status window while looking for a possible compatibility fix.
     let checking_visible = matches!(mode, CheckMode::AfterLaunchFailure)
         && ui
-            .show_status("Codex 启动失败，正在检查 Codey 更新…")
+            .show_status("Codex 启动失败，正在检查 CodeyX 更新…")
             .is_ok();
     let started = std::time::Instant::now();
     let result = tokio::time::timeout(CHECK_TIMEOUT, backend.check()).await;
@@ -180,7 +180,7 @@ async fn run_with_mode(
     }
 
     let _ = ui.show_status(&format!(
-        "正在下载并验证 Codey v{}，请稍候…",
+        "正在下载并验证 CodeyX v{}，请稍候…",
         candidate.check.latest_version
     ));
     let download = tokio::time::timeout(DOWNLOAD_TIMEOUT, backend.download(&candidate)).await;
@@ -194,8 +194,8 @@ async fn run_with_mode(
         Err(_) => {
             let _ = ui.hide_status();
             let message = match mode {
-                CheckMode::Background => "下载更新超时，请在 Codey 控制台重试",
-                CheckMode::AfterLaunchFailure => "下载更新超时，请重新打开 Codey 后重试",
+                CheckMode::Background => "下载更新超时，请在 CodeyX 控制台重试",
+                CheckMode::AfterLaunchFailure => "下载更新超时，请重新打开 CodeyX 后重试",
             };
             let _ = ui.show_update_failure(message).await;
             return StartupUpdateOutcome::Continue;
@@ -460,8 +460,8 @@ mod tests {
         assert_eq!(
             ui.messages.lock().unwrap().as_slice(),
             [
-                "Codex 启动失败，正在检查 Codey 更新…",
-                "正在下载并验证 Codey v2.0.0，请稍候…",
+                "Codex 启动失败，正在检查 CodeyX 更新…",
+                "正在下载并验证 CodeyX v2.0.0，请稍候…",
             ]
         );
         assert_eq!(ui.hides.load(Ordering::Relaxed), 2);
@@ -531,7 +531,7 @@ mod tests {
         );
         assert_eq!(
             ui.failures.lock().unwrap().as_slice(),
-            ["下载更新超时，请重新打开 Codey 后重试"]
+            ["下载更新超时，请重新打开 CodeyX 后重试"]
         );
         assert_eq!(backend.installs.load(Ordering::Relaxed), 0);
     }
@@ -634,7 +634,7 @@ mod tests {
         assert_eq!(backend.installs.load(Ordering::Relaxed), 1);
         assert_eq!(
             ui.messages.lock().unwrap().as_slice(),
-            ["正在下载并验证 Codey v2.0.0，请稍候…"]
+            ["正在下载并验证 CodeyX v2.0.0，请稍候…"]
         );
         assert_eq!(ui.hides.load(Ordering::Relaxed), 1);
     }
@@ -682,7 +682,7 @@ mod tests {
         );
         assert_eq!(
             ui.failures.lock().unwrap().as_slice(),
-            ["下载更新超时，请在 Codey 控制台重试"]
+            ["下载更新超时，请在 CodeyX 控制台重试"]
         );
         assert_eq!(backend.installs.load(Ordering::Relaxed), 0);
     }

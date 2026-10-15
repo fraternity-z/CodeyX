@@ -227,7 +227,7 @@ export function PluginImportDialog({
               <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/25 bg-amber-500/10 p-3 text-amber-800 dark:text-amber-300">
                 <IconAlertTriangle className="mt-0.5 shrink-0" size={16} aria-hidden="true" />
                 <p className="m-0 leading-relaxed">
-                  原生插件与 Codey 同进程运行，具有相同系统权限。请确认来源安全。
+                  原生插件与 CodeyX 同进程运行，具有相同系统权限。请确认来源安全。
                 </p>
               </div>
             </div>

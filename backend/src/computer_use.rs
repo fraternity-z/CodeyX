@@ -171,20 +171,20 @@ fn install(home: &Path, native: &[u8]) -> Result<bool> {
     let manifest = json!({
         "name": PLUGIN, "version": plugin_version(native),
         "description": "读取桌面应用状态，通过辅助功能完成点击、输入和滚动。",
-        "author": {"name": "Codey"}, "license": "MIT",
+        "author": {"name": "CodeyX"}, "license": "MIT",
         "mcpServers": "./.mcp.json",
         "interface": {
-            "displayName": "Codey Computer Use",
+            "displayName": "CodeyX Computer Use",
             "shortDescription": "本地桌面应用操作",
             "longDescription": "读取桌面应用并执行点击、输入和滚动，支持 macOS 14 及以上和 Windows。macOS 需要辅助功能与屏幕录制权限；Windows 依赖系统 Windows PowerShell。",
-            "developerName": "Codey", "category": "Productivity",
+            "developerName": "CodeyX", "category": "Productivity",
             "capabilities": ["Read", "Write"],
             "defaultPrompt": ["查看当前运行的应用", "帮我操作桌面应用"]
         }
     });
     let mcp = json!({"mcpServers": {"codey_computer_use": {"command": executable, "args": []}}});
     let marketplace = json!({
-        "name": MARKETPLACE, "interface": {"displayName": "Codey"},
+        "name": MARKETPLACE, "interface": {"displayName": "CodeyX"},
         "plugins": [{"name": PLUGIN,
             "source": {"source": "local", "path": format!("./plugins/{PLUGIN}")},
             "policy": {"installation": "AVAILABLE", "authentication": "ON_INSTALL"},

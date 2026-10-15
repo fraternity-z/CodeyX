@@ -43,7 +43,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
   assert.equal(fastctxFeature.name, "FastCtx 上下文加速");
   assert.equal(
     fastctxFeature.detail,
-    "Codey 内置 FastCtx 已随当前运行实例加载",
+    "CodeyX 内置 FastCtx 已随当前运行实例加载",
   );
   assert.match(uiSource, /const fastContextToolsEnabled =\s*config\.fastContextTools && !fastctxStatusBlocksEmbedded/);
   assert.match(uiSource, /checked=\{fastContextToolsEnabled\}/);
@@ -56,7 +56,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
   assert.match(uiSource, /className="fastctx-disabled-switch-tooltip"[\s\S]*tabIndex=\{0\}/);
 });
 
-test("Codey keeps FastCtx in the dedicated sidecar", async () => {
+test("CodeyX keeps FastCtx in the dedicated sidecar", async () => {
   const [manifest, sidecarSource, mainSource, libSource, configSource, fastctxSource] = await Promise.all([
     readFile(new URL("backend/Cargo.toml", root), "utf8"),
     readFile(new URL("backend/src/bin/codey-fastctx.rs", root), "utf8"),

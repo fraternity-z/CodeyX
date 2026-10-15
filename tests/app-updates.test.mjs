@@ -528,7 +528,7 @@ test("Release 下载与安装仍需分别确认，下载携带版本和摘要", 
   const checking = h.render().checkForUpdates();
   h.requests[0].resolve(update);
   await checking;
-  assert.equal(confirmation.title, "发现 Codey 新版本 v1.0.1");
+  assert.equal(confirmation.title, "发现 CodeyX 新版本 v1.0.1");
   assert.doesNotMatch(confirmation.description, /管理员|回退|授权/);
   confirmation.run();
   assert.equal(h.requests[1].command, "download_update");

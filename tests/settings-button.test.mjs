@@ -138,7 +138,7 @@ test("mounts above the native help entry in the navigation rail footer", () => {
   assert.equal(button.parentElement, stack);
   assert.equal(button.dataset.codeyRailSlot, "true");
   assert.equal(button.hasAttribute("data-codey-native-slot"), false);
-  assert.equal(stack.children[0], button, "the Codey entry sits above the help entry");
+  assert.equal(stack.children[0], button, "the CodeyX entry sits above the help entry");
   assert.equal(button.nextElementSibling, helpSlot);
   assert.equal(document.getElementById("codey-settings-button-measure"), null);
   assert.equal(header.querySelector("#codey-settings-button"), null, "the header keeps only native actions");
@@ -287,14 +287,14 @@ test("joins the native measured action row and repairs its noninteractive mirror
   const mirror = document.getElementById("codey-settings-button-measure");
   assert.equal(button.parentElement, actionRow);
   assert.equal(button.dataset.codeyNativeSlot, "true");
-  assert.equal(actionRow.children.at(-1), button, "the Codey button owns the trailing slot");
+  assert.equal(actionRow.children.at(-1), button, "the CodeyX button owns the trailing slot");
   assert.equal(mirror.parentElement, measureRow);
   assert.equal(mirror.tagName, "SPAN");
   assert.equal(mirror.getAttribute("aria-hidden"), "true");
   const reads = header.rectReads;
   window.__codeyRendererScan();
   assert.equal(header.rectReads, reads, "stable mounts skip geometry reads");
-  // A native action rendered after the Codey button must not push it left.
+  // A native action rendered after the CodeyX button must not push it left.
   actionRow.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
   window.__codeyRendererScan();
   assert.equal(actionRow.children.at(-1), button);
@@ -412,7 +412,7 @@ test("keeps the header mount stable when only its measurement mirror changes", (
   assert.equal(document.getElementById("codey-settings-button-measure").parentElement, measureRow);
 });
 
-test("moves the Codey button beside the visible header's trailing action region", () => {
+test("moves the CodeyX button beside the visible header's trailing action region", () => {
   const hiddenHeader = new FakeElement("header", { visible: false });
   const visibleHeader = new FakeElement("header", { right: 1200 });
   const rightRegion = new FakeElement("div", { right: 1200, width: 70 });
@@ -962,7 +962,7 @@ test("hydrates the passive update badge from startup backend state", async () =>
   const button = fixture.document.getElementById("codey-settings-button");
   assert.ok(button);
   assert.equal(button.getAttribute("data-codey-update-available"), "true");
-  assert.equal(button.getAttribute("aria-label"), "打开 Codey 配置，有可用更新");
+  assert.equal(button.getAttribute("aria-label"), "打开 CodeyX 配置，有可用更新");
   assert.equal(fixture.window.__codeyUpdateAvailability.latestVersion, "1.0.1");
   const updateEvents = fixture.events.filter(
     (event) => event.type === "codey-update-availability-changed",
@@ -1103,7 +1103,7 @@ test("disabling renderer automatic checks ignores an in-flight update response",
   assert.equal(fixture.activeTimers().some((entry) => entry.delay === 30 * 60 * 1000), false);
 });
 
-test("marks the Codey icon unavailable after consecutive hung health checks and recovers", async () => {
+test("marks the CodeyX icon unavailable after consecutive hung health checks and recovers", async () => {
   let healthMode = "hang";
   const fixture = createStartupUpdateFixture(async (path) => {
     if (path === "/backend/status") {
@@ -1143,28 +1143,28 @@ test("marks the Codey icon unavailable after consecutive hung health checks and 
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
-  assert.match(button.getAttribute("aria-label"), /Codey 连接中断/);
-  assert.match(button.title, /Codey 后端未响应/);
+  assert.match(button.getAttribute("aria-label"), /CodeyX 连接中断/);
+  assert.match(button.title, /CodeyX 后端未响应/);
   button.dispatchEvent({
     type: "click",
     preventDefault() {},
     stopPropagation() {},
   });
   assert.deepEqual(fixture.alerts, [
-    "Codey 与 Codex 的连接已中断，当前配置面板无法连接。"
-    + "Codey 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 Codey。",
+    "CodeyX 与 Codex 的连接已中断，当前配置面板无法连接。"
+    + "CodeyX 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 CodeyX。",
   ]);
 
   healthMode = "healthy";
   await fixture.window.__codeyRefreshRuntimeHealth();
 
   assert.equal(button.getAttribute("data-codey-runtime-state"), "healthy");
-  assert.equal(button.getAttribute("aria-label"), "打开 Codey 配置");
-  assert.equal(button.title, "打开 Codey 配置");
+  assert.equal(button.getAttribute("aria-label"), "打开 CodeyX 配置");
+  assert.equal(button.title, "打开 CodeyX 配置");
   assert.equal(fixture.window.__codeyRuntimeHealth.consecutiveFailures, 0);
 });
 
-test("pauses Codey health checks while the page is hidden and resumes immediately", async () => {
+test("pauses CodeyX health checks while the page is hidden and resumes immediately", async () => {
   let healthCalls = 0;
   const fixture = createStartupUpdateFixture(async (path) => {
     if (path === "/backend/status") return { status: "ok", availableUpdate: null };

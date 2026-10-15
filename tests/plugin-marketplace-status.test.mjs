@@ -63,8 +63,8 @@ test("plugin marketplace repair is explicit and status checks stay read-only", a
   );
   assert.match(appSource, /initializedRemote/);
   assert.match(sectionsSource, /仅检查当前状态，不会在打开配置页时自动修复/);
-  assert.match(sectionsSource, /Codey 内置市场：快照缺失/);
-  assert.match(sectionsSource, /Codey 内置快照已接管，无需联网下载/);
+  assert.match(sectionsSource, /CodeyX 内置市场：快照缺失/);
+  assert.match(sectionsSource, /CodeyX 内置快照已接管，无需联网下载/);
   assert.match(sectionsSource, /remoteMarketplaceCached/);
   assert.match(sectionsSource, /remoteRegistered/);
   assert.match(sectionsSource, /onRepairPluginMarketplace/);

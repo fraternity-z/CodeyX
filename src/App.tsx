@@ -389,7 +389,7 @@ export function App({
       } else if (next.restartRequired) {
         setNotice({ tone: "info", text: "已保存的配置需重启 Codex 后生效" });
       } else if (!next.running) {
-        setNotice({ tone: "info", text: "Codey 运行时已就绪" });
+        setNotice({ tone: "info", text: "CodeyX 运行时已就绪" });
       }
     } catch (error) {
       window.clearTimeout(timer);
@@ -973,26 +973,26 @@ export function App({
       let noticeTone: "success" | "info" | "error" =
         result.restartRequired || subagentHotReloadFailed ? "info" : "success";
       let noticeText = result.restartRequired && !subagentNote
-        ? "Codey 设置已保存，启动参数将在重启 Codex 后生效"
-        : "Codey 设置已保存";
+        ? "CodeyX 设置已保存，启动参数将在重启 Codex 后生效"
+        : "CodeyX 设置已保存";
       if (subagentConfigRepaired) {
-        noticeText = "Codey 设置已保存；子代理配置已同步";
+        noticeText = "CodeyX 设置已保存；子代理配置已同步";
       } else if (subagentHotReloaded) {
-        noticeText = "Codey 设置已保存；子代理配置已实时更新";
+        noticeText = "CodeyX 设置已保存；子代理配置已实时更新";
       }
       if (requestLogHotReloadFailed) {
         noticeTone = "error";
-        noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志记录未能实时更新"}`;
+        noticeText = `CodeyX 设置已保存；${result.routeRequestLogHotReloadError || "请求日志记录未能实时更新"}`;
       } else if (requestLogSuperseded) {
         noticeTone = "info";
-        noticeText = `Codey 设置已保存；${result.routeRequestLogHotReloadError || "请求日志配置被更新的设置取代，请确认当前开关状态"}`;
+        noticeText = `CodeyX 设置已保存；${result.routeRequestLogHotReloadError || "请求日志配置被更新的设置取代，请确认当前开关状态"}`;
       } else if (requestLogHealth === "enabled") {
-        noticeText = `Codey 设置已保存；请求日志记录已实时开启，无需重启${restartSuffix}`;
+        noticeText = `CodeyX 设置已保存；请求日志记录已实时开启，无需重启${restartSuffix}`;
       } else if (requestLogHealth === "disabled") {
-        noticeText = `Codey 设置已保存；请求日志记录已实时关闭，无需重启${restartSuffix}`;
+        noticeText = `CodeyX 设置已保存；请求日志记录已实时关闭，无需重启${restartSuffix}`;
       }
       if (retryCountChanged && result.restartRequired) {
-        noticeText = "Codey 设置已保存；会话重试次数将在重启 Codex 后生效";
+        noticeText = "CodeyX 设置已保存；会话重试次数将在重启 Codex 后生效";
       }
       if (subagentNote) {
         noticeText += `；${subagentNote}`;
@@ -1044,7 +1044,7 @@ export function App({
       action: "restart",
       title: "重启 Codex？",
       description:
-        "当前 Codex 客户端将被关闭并由 Codey 自动重新拉起，正在执行的本地任务会被中断。",
+        "当前 Codex 客户端将被关闭并由 CodeyX 自动重新拉起，正在执行的本地任务会被中断。",
       confirmLabel: "重启 Codex",
       run: () => void restartCodex(),
     });
@@ -1068,7 +1068,7 @@ export function App({
       if (dirty) await persist(config);
       setNotice({
         tone: "info",
-        text: "正在重启 Codex，Codey 将自动重新拉起客户端…",
+        text: "正在重启 Codex，CodeyX 将自动重新拉起客户端…",
       });
       try {
         await withTimeout(invoke("restart_codey"), 10_000,
@@ -1119,7 +1119,7 @@ export function App({
         );
         setPluginMarketplaceStatus(result);
         setComputerUseNotice(result.computerUse?.ready
-          ? { tone: "success", text: "桌面插件已准备，请在 Codex 插件页面安装或更新 Codey Computer Use。" }
+          ? { tone: "success", text: "桌面插件已准备，请在 Codex 插件页面安装或更新 CodeyX Computer Use。" }
           : { tone: "error", text: "桌面插件尚未准备完整，请重新准备。" });
       } catch (error) {
         setComputerUseNotice({ tone: "error", text: errorText(error) });
@@ -1151,7 +1151,7 @@ export function App({
     setConfirmation({
       action: "repair-codex-config",
       title: "修复 Codex 配置？",
-      description: "将检查配置文件及相关路径，修改已有配置前自动备份，并修复能够确认的问题。修复成功后，请从 Codey 重启 Codex 使修改生效。",
+      description: "将检查配置文件及相关路径，修改已有配置前自动备份，并修复能够确认的问题。修复成功后，请从 CodeyX 重启 Codex 使修改生效。",
       confirmLabel: "确认修复",
       run: () => void repairCodexConfig(),
     });
@@ -1176,10 +1176,10 @@ export function App({
           : "Codex 配置检查通过，无需修改");
         report({
           tone: "success",
-          text: [result.repaired ? "修复成功，请从 Codey 重启 Codex 使修改生效。" : null, summary, `配置文件：${result.configPath}`, result.backupPath ? `备份文件：${result.backupPath}` : null].filter(Boolean).join("\n"),
+          text: [result.repaired ? "修复成功，请从 CodeyX 重启 Codex 使修改生效。" : null, summary, `配置文件：${result.configPath}`, result.backupPath ? `备份文件：${result.backupPath}` : null].filter(Boolean).join("\n"),
         });
       } catch (error) {
-        report({ tone: "error", text: `Codex 配置修复未完成：${errorText(error)}。请查看 Codey 错误日志；连接中断时可重新检查执行结果。` });
+        report({ tone: "error", text: `Codex 配置修复未完成：${errorText(error)}。请查看 CodeyX 错误日志；连接中断时可重新检查执行结果。` });
       }
     });
   }
@@ -1321,7 +1321,7 @@ export function App({
           <GitBranch size={17} />
         </div>
         <div>
-          <strong>{loadFailed ? "Codey 加载失败" : "正在载入 Codey"}</strong>
+          <strong>{loadFailed ? "CodeyX 加载失败" : "正在载入 CodeyX"}</strong>
           <p>
             <NoticeLoadingText controller={noticeController} />
           </p>
@@ -1353,7 +1353,7 @@ export function App({
         afterClose={onAfterClose}
         container={modalContainer}
         onCancel={handleCloseSettings}
-        title="Codey 配置"
+        title="CodeyX 配置"
         visible={modalVisible}
       >
         {loadingContent}
@@ -1377,7 +1377,7 @@ export function App({
         ? "正在检查更新…"
         : updateResult?.text
           ? `${updateResult.text}（点击再次检查）`
-          : "检查 Codey 在线更新";
+          : "检查 CodeyX 在线更新";
 
   const configHeaderContent = (
     <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
@@ -1385,7 +1385,7 @@ export function App({
         <CodeyBrandMark />
         <div className="flex min-w-0 flex-col">
           <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
-            <h1 className="m-0 whitespace-nowrap text-base font-bold tracking-[-0.02em] text-[var(--codey-text,#1d1d1f)]">Codey 控制台</h1>
+            <h1 className="m-0 whitespace-nowrap text-base font-bold tracking-[-0.02em] text-[var(--codey-text,#1d1d1f)]">CodeyX 控制台</h1>
             {dirty && (
               <Badge variant="warning">
                 未保存更改
@@ -1513,7 +1513,7 @@ export function App({
             />
           </div>
           <div className="macos-titlebar-title">
-            <span className="app-title-text">Codey Control Panel</span>
+            <span className="app-title-text">CodeyX Control Panel</span>
           </div>
           <div className="macos-titlebar-right" aria-hidden="true" />
         </div>

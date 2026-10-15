@@ -1936,7 +1936,7 @@ function ModelSectionComponent({
           <DialogContent className="route-editor-dialog">
             <DialogHeader>
               <DialogTitle>编辑上游请求头</DialogTitle>
-              <DialogDescription>{headerDialogProfile.name} 的 Codey → 上游请求头，使用 JSON 对象表示；null 或空字符串删除普通请求头，认证和协议必需请求头受保护。</DialogDescription>
+              <DialogDescription>{headerDialogProfile.name} 的 CodeyX → 上游请求头，使用 JSON 对象表示；null 或空字符串删除普通请求头，认证和协议必需请求头受保护。</DialogDescription>
             </DialogHeader>
             <label className="route-field">
               <span>请求头（JSON）</span>

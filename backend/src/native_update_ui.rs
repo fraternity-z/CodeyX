@@ -46,9 +46,9 @@ impl NativeUpdateUi {
             .is_some_and(|(target, current)| target < current);
         let notes = release_notes.map(format_update_notes).unwrap_or_default();
         let title = if rollback {
-            format!("回退 Codey 至 v{latest_version}")
+            format!("回退 CodeyX 至 v{latest_version}")
         } else {
-            format!("发现 Codey v{latest_version} 更新")
+            format!("发现 CodeyX v{latest_version} 更新")
         };
         let description = if rollback {
             format!(
@@ -56,7 +56,7 @@ impl NativeUpdateUi {
             )
         } else {
             format!(
-                "当前版本为 v{current_version}。\n是否现在下载、校验并安装更新？安装时会退出 Codex 和 Codey，并尝试启动新版。{notes}"
+                "当前版本为 v{current_version}。\n是否现在下载、校验并安装更新？安装时会退出 Codex 和 CodeyX，并尝试启动新版。{notes}"
             )
         };
         show_dialog(
@@ -77,8 +77,8 @@ impl NativeUpdateUi {
 
     pub async fn show_update_failure(&self, error: &str) -> Result<(), String> {
         show_dialog(
-            "Codey 更新失败".to_string(),
-            format!("{error}\n\n你可以进入 Codex 后，从 Codey 设置中重试。"),
+            "CodeyX 更新失败".to_string(),
+            format!("{error}\n\n你可以进入 Codex 后，从 CodeyX 设置中重试。"),
             DialogKind::Failure,
             "进入 Codex".to_string(),
             None,
@@ -89,8 +89,8 @@ impl NativeUpdateUi {
 
     pub async fn show_startup_failure(&self, error: &str) -> Result<(), String> {
         show_dialog(
-            "Codey 启动失败".to_string(),
-            format!("{error}\n\nCodey 将退出。处理上述问题后，请重新启动 Codey。"),
+            "CodeyX 启动失败".to_string(),
+            format!("{error}\n\nCodeyX 将退出。处理上述问题后，请重新启动 CodeyX。"),
             DialogKind::Failure,
             "退出".to_string(),
             None,
@@ -181,7 +181,7 @@ pub(crate) async fn confirm_context_recovery_with_reason(
         ContextRecoveryPurpose::ModelSync => ("恢复默认预算并继续", "取消"),
     };
     show_dialog(
-        "Codey 上下文设置暂时无法使用".to_string(),
+        "CodeyX 上下文设置暂时无法使用".to_string(),
         context_recovery_description(purpose, reason),
         DialogKind::RestoreContext,
         primary_label.to_string(),
@@ -297,7 +297,7 @@ mod update_note_tests {
             (DialogKind::Failure, DialogResult::Primary),
         ] {
             let result = show_dialog(
-                "Codey".to_string(),
+                "CodeyX".to_string(),
                 "需要用户确认".to_string(),
                 kind,
                 "继续".to_string(),
@@ -630,7 +630,7 @@ mod platform {
             unsafe {
                 panel.setReleasedWhenClosed(false);
             }
-            panel.setTitle(&NSString::from_str("Codey"));
+            panel.setTitle(&NSString::from_str("CodeyX"));
             panel.setFloatingPanel(true);
             panel.setHidesOnDeactivate(false);
             panel.setLevel(NSFloatingWindowLevel);
@@ -704,7 +704,7 @@ mod platform {
             .name("codey-runtime".to_string())
             .spawn(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| run(worker_ui.clone())))
-                    .unwrap_or_else(|_| Err(anyhow::anyhow!("Codey 运行线程异常退出")));
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("CodeyX 运行线程异常退出")));
                 worker_ui.shutdown();
                 let _ = result_tx.send(result);
             })?;
@@ -712,10 +712,10 @@ mod platform {
         app.run();
         let result = result_rx
             .recv()
-            .map_err(|_| anyhow::anyhow!("Codey 运行线程未返回结果"))?;
+            .map_err(|_| anyhow::anyhow!("CodeyX 运行线程未返回结果"))?;
         worker
             .join()
-            .map_err(|_| anyhow::anyhow!("Codey 运行线程回收失败"))?;
+            .map_err(|_| anyhow::anyhow!("CodeyX 运行线程回收失败"))?;
         drop(ui);
         result
     }

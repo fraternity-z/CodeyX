@@ -61,7 +61,7 @@ test("a missing desktop adapter returns a readable failure through CDP", async (
   const result = await evaluateRemote({ action: "resume", threadId: "fixture-thread" }, null);
   assert.equal(result.calls, 0);
   assert.deepEqual(result.result, {
-    status: "failed", message: "桌面会话接口尚未就绪，请更新或重启 Codey",
+    status: "failed", message: "桌面会话接口尚未就绪，请更新或重启 CodeyX",
   });
 });
 

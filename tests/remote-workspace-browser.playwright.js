@@ -226,10 +226,10 @@ async page => {
   await page.waitForFunction(() => document.querySelectorAll('.remote-thread').length === 1);
   await page.getByRole('searchbox').fill('');
   await page.getByRole('button', { name: /重新设计界面/ }).waitFor();
-  await page.getByRole('button', { name: 'Codey 控制台' }).click();
+  await page.getByRole('button', { name: 'CodeyX 控制台' }).click();
   await page.getByRole('button', { name: '返回 Codex' }).click();
   await ready(); await layout();
   await page.evaluate(() => { window.remoteFixture.unauthorized = true; window.remoteFixture.unavailable(); });
-  await page.getByRole('heading', { name: '连接你的 Codey' }).waitFor();
+  await page.getByRole('heading', { name: '连接你的 CodeyX' }).waitFor();
   return { passed: ['Windows project grouping', 'Markdown and code', 'Settings synchronization', 'Fast on and off', 'Desktop draft defaults', 'Defaults retry and stale responses', 'Supported efforts', 'Per-thread drafts', 'Reconnect without replay', 'Desktop failure stops automatic retries', 'Uncertain send protection', 'Send, steer and stop', 'Blank project drafts', 'Native creation on first send', 'Uncertain creation survives reload', 'Unsent first message preserved', 'Uncertain first message protected', '320px and keyboard viewport', 'Dark and light themes', 'Search and console navigation', 'Revoked device returns to pairing'], actionCount: actions.length };
 }

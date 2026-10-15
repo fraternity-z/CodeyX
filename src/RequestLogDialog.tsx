@@ -560,7 +560,7 @@ function buildRequestLogRow(
    const timingTitle = item.downstreamFirstContentMs == null
      ? `首字耗时 (旧指标，上游首包): ${formatDuration(item.ttftMs)}`
      : `端到端首内容: ${formatDuration(item.downstreamFirstContentMs)} · 路由前置: ${formatDuration(item.routerPreUpstreamMs)} · 上游首包: ${formatDuration(item.upstreamFirstByteMs)}`;
-   // 请求模型是 Codey 发往上游的模型；实际模型是上游响应里回报的模型。
+   // 请求模型是 CodeyX 发往上游的模型；实际模型是上游响应里回报的模型。
    const sentModel = (item.model ?? "").trim() || item.requestedModel.trim();
    const upstreamModel = (item.upstreamResponseModel ?? "").trim();
    const upstreamModelDiffers = Boolean(upstreamModel) && !modelIdsEqual(upstreamModel, sentModel);
@@ -1207,7 +1207,7 @@ export function RequestLogDialog({
       <style>{requestLogStyles}</style>
       <div className="request-log-header">
         <div className="request-log-heading">
-          <div><p className="request-log-eyebrow">CODEY / 内置路由</p><h1>请求日志</h1></div>
+          <div><p className="request-log-eyebrow">CodeyX / 内置路由</p><h1>请求日志</h1></div>
           {health ? (
             <div
               role={healthWarning ? "alert" : "status"}
@@ -2170,7 +2170,7 @@ export function RequestLogDialog({
                       <dt className="text-[11px] text-[var(--codey-subtle,#8e8e93)]">Codex 选择器</dt>
                       <dd
                         className="m-0 mt-0.5 break-all font-mono text-[11px] text-[var(--codey-text-soft,#48484a)]"
-                        title="Codex 请求 Codey 时选择的模型 ID，带线路前缀"
+                        title="Codex 请求 CodeyX 时选择的模型 ID，带线路前缀"
                       >
                         {selectedItem.requestedModel}
                       </dd>
@@ -2286,7 +2286,7 @@ export function RequestLogDialog({
                   <div>
                     <div className="flex items-center gap-1">
                       <span className="text-[11px] font-medium text-[var(--codey-text-soft,#48484a)]">
-                        请求头（Codey 发往上游，敏感值已脱敏）
+                        请求头（CodeyX 发往上游，敏感值已脱敏）
                       </span>
                       {selectedItem.upstreamRequestHeaders ? (
                         <button

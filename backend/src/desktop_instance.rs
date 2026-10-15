@@ -105,9 +105,9 @@ pub(crate) fn claim() -> Option<DesktopInstanceGuard> {
     }
     record_handoff("existing_instance_busy", None);
     let _ = rfd::MessageDialog::new()
-        .set_title("Codey 已在运行")
+        .set_title("CodeyX 已在运行")
         .set_description(
-            "Codey 正在启动或运行 Codex，为避免中断当前启动，本次打开已取消。\n\n请等待 Codex 窗口出现；如果长时间没有出现，请在任务管理器中结束 Codey 后重新打开。",
+            "CodeyX 正在启动或运行 Codex，为避免中断当前启动，本次打开已取消。\n\n请等待 Codex 窗口出现；如果长时间没有出现，请在任务管理器中结束 CodeyX 后重新打开。",
         )
         .set_level(rfd::MessageLevel::Info)
         .set_buttons(rfd::MessageButtons::Ok)

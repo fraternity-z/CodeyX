@@ -90,10 +90,10 @@ function SystemSettingsDialogComponent({
         <div className="flex flex-col gap-2.5 py-1 text-sm">
           {/* 版本与目录信息 */}
           <div className="flex flex-col rounded-xl border border-[var(--codey-border-subtle)] bg-[var(--codey-surface-muted)] p-3">
-            {/* 上半部分：Codey 与 Codex 版本并排 */}
+            {/* 上半部分：CodeyX 与 Codex 版本并排 */}
             <div className="grid grid-cols-2 divide-x divide-[var(--codey-border-subtle)] pb-2.5 border-b border-[var(--codey-border-subtle)]">
               <div className="flex items-center justify-between pr-3 min-w-0">
-                <span className="text-xs font-medium text-[var(--codey-muted)] shrink-0">Codey 版本</span>
+                <span className="text-xs font-medium text-[var(--codey-muted)] shrink-0">CodeyX 版本</span>
                 <span className="font-mono text-xs font-semibold tracking-tight text-[var(--codey-text)] truncate">
                   v{appVersion || "1.0.0"}
                 </span>
@@ -177,11 +177,11 @@ function SystemSettingsDialogComponent({
 
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--codey-border-subtle)] bg-[var(--codey-surface-muted)] p-3">
             <div className="flex items-center gap-1.5 min-w-0">
-              <span className="text-xs font-semibold text-[var(--codey-text)]">Codey 更新策略</span>
+              <span className="text-xs font-semibold text-[var(--codey-text)]">CodeyX 更新策略</span>
               <Tooltip content="从本项目 GitHub Releases 检测更新，保存后生效。不检查仅关闭自动检查，仍可手动检查稳定版。" position="top">
                 <span
                   className="inline-flex shrink-0 cursor-help items-center text-[var(--codey-muted)] transition-colors hover:text-[var(--codey-text)]"
-                  aria-label="Codey 更新策略说明"
+                  aria-label="CodeyX 更新策略说明"
                 >
                   <IconHelpCircle size={14} aria-hidden="true" />
                 </span>
@@ -193,7 +193,7 @@ function SystemSettingsDialogComponent({
               className="shrink-0"
             >
               <Tabs.ListContainer>
-                <Tabs.List aria-label="Codey 更新策略">
+                <Tabs.List aria-label="CodeyX 更新策略">
                   <Tabs.Tab id="off" isDisabled={isBusy} className="text-xs">不检查<Tabs.Indicator /></Tabs.Tab>
                   <Tabs.Tab id="stable" isDisabled={isBusy} className="text-xs">稳定版<Tabs.Indicator /></Tabs.Tab>
                   <Tabs.Tab id="experimental" isDisabled={isBusy} className="text-xs">实验版<Tabs.Indicator /></Tabs.Tab>

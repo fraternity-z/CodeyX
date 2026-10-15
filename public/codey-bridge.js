@@ -255,7 +255,7 @@
       try {
         subscriber.callback(own);
       } catch (error) {
-        window.console?.error?.("[Codey] mutation subscriber failed", error);
+        window.console?.error?.("[CodeyX] mutation subscriber failed", error);
       }
     }
   };
@@ -477,6 +477,6 @@
     if (typeof window.__codexSessionDeleteBridge === "function") {
       return window.__codexSessionDeleteBridge(path, payload);
     }
-    return Promise.resolve({ status: "failed", message: "Codey bridge unavailable" });
+    return Promise.resolve({ status: "failed", message: "CodeyX bridge unavailable" });
   };
 })();

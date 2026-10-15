@@ -171,7 +171,7 @@ export function ExtensionEditor({
           </div>
           {!draft.readOnly ? (
             <p className="m-0 text-[11px] text-muted">
-              头部必须包含 <code className="rounded bg-black/[0.05] px-1 py-0.5 font-mono text-[10px] text-foreground dark:bg-white/[0.08]">name</code> 与 <code className="rounded bg-black/[0.05] px-1 py-0.5 font-mono text-[10px] text-foreground dark:bg-white/[0.08]">description</code> 声明。仅 Codey 托管的 Skill 可编辑。
+              头部必须包含 <code className="rounded bg-black/[0.05] px-1 py-0.5 font-mono text-[10px] text-foreground dark:bg-white/[0.08]">name</code> 与 <code className="rounded bg-black/[0.05] px-1 py-0.5 font-mono text-[10px] text-foreground dark:bg-white/[0.08]">description</code> 声明。仅 CodeyX 托管的 Skill 可编辑。
             </p>
           ) : null}
         </div>

@@ -61,6 +61,9 @@ fn main() {
 #[cfg(windows)]
 fn embed_windows_icon() {
     let mut resource = winres::WindowsResource::new();
+    resource
+        .set("ProductName", "CodeyX")
+        .set("FileDescription", "CodeyX");
     resource.set_icon("icons/Codey.ico").set_manifest(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">

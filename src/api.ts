@@ -85,7 +85,7 @@ export function isCodeyApiCommand(command: string): command is CodeyApiCommand {
 
 export function codeyApiPath(command: string): `/api/${CodeyApiCommand}` {
   if (!isCodeyApiCommand(command)) {
-    throw new Error(`不允许的 Codey API 命令：${command}`);
+    throw new Error(`不允许的 CodeyX API 命令：${command}`);
   }
   return `/api/${command}`;
 }
@@ -103,7 +103,7 @@ declare global {
 /** Cross-module marker: ESM loaders can hand different instances the class. */
 export const CodeyApiErrorMarker: unique symbol = Symbol.for("codey.api.error");
 
-/** A request the Codey bridge answered with an explicit failure. */
+/** A request the CodeyX bridge answered with an explicit failure. */
 export class CodeyApiError extends Error {
   readonly [CodeyApiErrorMarker] = true;
 
@@ -122,11 +122,11 @@ export async function invoke<T>(
   args: Record<string, unknown> = {},
 ): Promise<T> {
   if (typeof window.__codeyInvokeApi !== "function") {
-    throw new Error("Codey bridge 尚未连接，请退出 Codex 后重新启动 Codey");
+    throw new Error("CodeyX bridge 尚未连接，请退出 Codex 后重新启动 CodeyX");
   }
   const value = await window.__codeyInvokeApi(command, args) as { status?: string; message?: string };
   if (value?.status === "failed") {
-    throw new CodeyApiError(value.message || "Codey bridge 请求失败");
+    throw new CodeyApiError(value.message || "CodeyX bridge 请求失败");
   }
   return value as T;
 }

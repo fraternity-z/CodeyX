@@ -291,7 +291,7 @@ async fn photo_body_budget_only_applies_to_authenticated_message_endpoints() {
         assert_eq!(
             result["message"],
             if path == "/remote/create" {
-                "Codey 正在退出"
+                "CodeyX 正在退出"
             } else {
                 "远程请求过大"
             }
