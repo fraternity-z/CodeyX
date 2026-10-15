@@ -144,7 +144,7 @@ test("official route settings are edited on the route card instead of the accoun
   const [modelSection, panel, app] = await Promise.all([
     readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/features/routes/useRoutesController.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(modelSection, /id="official-route-name-input"/);
@@ -168,10 +168,9 @@ test("official route settings are edited on the route card instead of the accoun
   assert.match(panel, /aria-label=\{`移除官方账号 \$\{label\}`\}/);
   assert.doesNotMatch(panel, /IconPencil|validateOutboundProxyUrl/);
 
-  assert.match(app, /accountId: routeSettings.accountId/);
-  assert.match(app, /routeName: routeSettings.routeName/);
-  assert.match(app, /routeShortName: routeSettings.routeShortName/);
-  assert.match(app, /baseUrl: routeSettings.baseUrl/);
+  assert.match(app, /routeRequests\.saveOfficial\(/);
+  assert.match(app, /\.\.\.routeSettings/);
+  for (const field of ["accountId", "routeName", "routeShortName", "baseUrl"]) assert.match(app, new RegExp(`${field}: string`));
 });
 
 test("official accounts derive missing route settings and keep explicit blank long names", async () => {

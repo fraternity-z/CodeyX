@@ -2033,8 +2033,8 @@ async fn run_callback_server(
                 return Ok(record);
             }
             Err(error) => {
-                let _ =
-                    write_response(&mut socket, 500, "换取令牌失败，请回到 CodeyX 查看错误。").await;
+                let _ = write_response(&mut socket, 500, "换取令牌失败，请回到 CodeyX 查看错误。")
+                    .await;
                 return Err(error);
             }
         }
@@ -2445,8 +2445,8 @@ async fn run_siwc_callback_server(
                 return Ok(credential);
             }
             Err(error) => {
-                let _ =
-                    write_response(&mut socket, 500, "授权校验失败，请回到 CodeyX 查看错误。").await;
+                let _ = write_response(&mut socket, 500, "授权校验失败，请回到 CodeyX 查看错误。")
+                    .await;
                 return Err(error);
             }
         }

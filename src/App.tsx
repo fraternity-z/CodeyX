@@ -13,7 +13,7 @@ import {
   IconX,
 } from "@tabler/icons-react";
 import { invoke } from "./api";
-import { rememberOfficialAccounts } from "./officialAccountsRequests";
+import { useRoutesController } from "./features/routes";
 import { useDraftConfig } from "./useDraftConfig";
 import { ModelPickerDialog } from "./AppDialogs";
 import { SystemSettingsDialog } from "./SystemSettingsDialog";
@@ -33,17 +33,14 @@ import type { NotificationChannel } from "./notifications";
 import { errorText, withTimeout } from "./appUtils";
 import type { DiagnosticStorageCleanup, DiagnosticStorageTarget } from "./diagnosticStorage";
 import { DiagnosticCleanupNotice } from "./DiagnosticCleanupNotice";
-import { modelIdsEqual, uniqueModelIds } from "./modelIds";
-import { globalDefaultForRoute, routeProviderId } from "./modelRoutes";
-import { prefixedRouteName } from "./routeShortNames";
-import { customContextRestoredNote, subagentUpdateNote, type ModelRuntimeUpdate } from "./modelSelectionNotice";
+import { subagentUpdateNote } from "./modelSelectionNotice";
 import { PromptOptimizationCard } from "./PromptOptimizationCard";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
 import { RemoteControlPanel } from "./RemoteControlPanel";
 import { useModelSelection } from "./useModelSelection";
-import { SETTINGS_OPENED_EVENT, useRuntimeStatus } from "./useRuntimeStatus";
+import { useRuntimeStatus } from "./useRuntimeStatus";
 import { useAppUpdates } from "./useAppUpdates";
 import {
   NoticeLoadingText,
@@ -76,32 +73,6 @@ const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
 };
 const CONFIG_LOAD_TIMEOUT_MS = 30_000;
 const PLUGIN_MARKETPLACE_STATUS_TIMEOUT_MS = 15_000;
-
-function thirdPartyRouteModelState(
-  config: Config,
-  route: Profile,
-  catalog: ModelState,
-): ModelState {
-  const providerId = routeProviderId(route);
-  const selectedModels = uniqueModelIds([
-    ...(config.selectedModelsByProvider[providerId] || []),
-    ...(config.declaredOfficialModelsByProvider[providerId] || []),
-  ]);
-  return {
-    officialModels: [],
-    officialModelIds: [],
-    thirdPartyModels: selectedModels,
-    thirdPartyModelMetadata: catalog.thirdPartyModelMetadata,
-    manualThirdPartyModels:
-      config.manualThirdPartyModelsByProvider[providerId] || [],
-    upstreamModels: uniqueModelIds([
-      ...(config.upstreamModelsByProvider[providerId] || []),
-      ...selectedModels,
-    ]),
-    defaultModel:
-      globalDefaultForRoute(config, route, selectedModels) || selectedModels[0] || "",
-  };
-}
 
 export function App({
   embedded = false,
@@ -280,6 +251,16 @@ export function App({
     setNotice,
   });
   const {
+    saveRoute, setRouteEnabled, reorderRoute, reorderRouteModels, requestDeleteRoute,
+    fetchRouteModels, saveOfficialRouteSettings, setRouteDefaultModel, handleOfficialAccountsChanged,
+  } = useRoutesController({
+    active: !embedded || modalVisible,
+    config, dirty, isBusy, provider, setConfig, setDirty, persistedConfigRef,
+    setPersistedConfig, isOnlyNativeRouterToggle, adoptRouteConfig,
+    modelState, setModelState, beginModelPickerLoad, completeModelPickerLoad,
+    setProviderStatus, setStatus, setNotice, setConfirmation, runOperation, persist,
+  });
+  const {
     automaticallyChecking,
     updateResult,
     updateCheck,
@@ -302,33 +283,6 @@ export function App({
     void load();
     return () => {
       loadGenerationRef.current += 1;
-    };
-  }, []);
-
-  const refreshPluginRoutesRef = useRef<() => void>(() => undefined);
-  refreshPluginRoutesRef.current = () => {
-    void invoke<{
-      config: Config;
-      providerStatus?: ProviderStatus;
-      modelState?: ModelState;
-    }>("load_codey_config")
-      .then((result) => {
-        const merged = adoptRouteConfig(result.config);
-        if (!merged) return;
-        setDirty(merged.dirty);
-        if (result.providerStatus) setProviderStatus(result.providerStatus);
-        if (result.modelState) setModelState(result.modelState);
-      })
-      .catch(() => undefined);
-  };
-  useEffect(() => {
-    const refresh = () => refreshPluginRoutesRef.current();
-    window.addEventListener("codey:plugin-routes-changed", refresh);
-    // 浮层关闭后 App 仍挂载；重新打开时通过草稿合并读取最新配置和版本。
-    window.addEventListener(SETTINGS_OPENED_EVENT, refresh);
-    return () => {
-      window.removeEventListener("codey:plugin-routes-changed", refresh);
-      window.removeEventListener(SETTINGS_OPENED_EVENT, refresh);
     };
   }, []);
 
@@ -543,408 +497,6 @@ export function App({
       channels,
       "通知渠道已删除",
     );
-  }
-
-  async function syncCurrentProvider() {
-    if (!config || isBusy) return;
-    const nativeMode = config?.localRouterEnabled === false;
-    const shouldPersistNativeToggle = Boolean(
-      nativeMode && dirty && isOnlyNativeRouterToggle(config),
-    );
-    if (dirty && !shouldPersistNativeToggle) return;
-    await runOperation("sync-provider", async () => {
-      if (shouldPersistNativeToggle) {
-        await persist(config);
-      }
-      const session = nativeMode
-        ? beginModelPickerLoad(provider?.official ? null : provider?.id ?? null, false)
-        : 0;
-      try {
-        const result = await invoke<{
-          config: Config;
-          providerStatus: ProviderStatus;
-          modelState: ModelState;
-          restartRequired?: boolean;
-        }>("sync_current_provider");
-        setPersistedConfig(result.config);
-        setProviderStatus(result.providerStatus);
-        setModelState(result.modelState);
-        setStatus((current) => ({
-          ...current,
-          restartRequired: result.restartRequired ?? current.restartRequired,
-        }));
-        if (nativeMode) {
-          completeModelPickerLoad(
-            session,
-            result.providerStatus.provider.official
-              ? result.modelState
-              : { ...result.modelState, officialModels: [], officialModelIds: [] },
-            "",
-            result.providerStatus.provider.official ? null : result.providerStatus.provider.id,
-          );
-        }
-        setNotice({
-          tone: result.restartRequired ? "info" : "success",
-          text: nativeMode
-            ? `已同步当前线路「${result.providerStatus.provider.name}」，请勾选要启用的模型`
-            : result.restartRequired
-              ? "已重新读取 Codex 配置，重启后应用当前线路"
-              : "已重新读取 Codex 配置",
-        });
-      } catch (error) {
-        if (nativeMode) {
-          completeModelPickerLoad(
-            session,
-            provider?.official ? modelState : { ...modelState, officialModels: [], officialModelIds: [] },
-            `自动同步失败：${errorText(error)}。请重试以读取当前账号可用模型。`,
-            provider?.official ? null : provider?.id ?? null,
-          );
-        }
-        throw error;
-      }
-    });
-  }
-
-  function applyRouteResult(result: {
-    config: Config;
-    providerStatus?: ProviderStatus;
-    modelState?: ModelState;
-    restartRequired?: boolean;
-  }) {
-    const merged = adoptRouteConfig(result.config);
-    if (!merged) return;
-    if (result.providerStatus) setProviderStatus(result.providerStatus);
-    if (result.modelState) setModelState(result.modelState);
-    if (typeof result.restartRequired === "boolean") {
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired,
-      }));
-    }
-    setDirty(merged.dirty);
-    window.dispatchEvent(
-      new CustomEvent("codey:config-changed", {
-        detail: { config: result.config },
-      }),
-    );
-  }
-
-  async function saveRoute(route: Profile) {
-    if (!config) return false;
-    let saved = false;
-    await runOperation("save-route", async () => {
-      const routeExists = config.profiles.some(
-        (profile) => profile.id === route.id,
-      );
-      const nextConfig = {
-        ...config,
-        profiles: routeExists
-          ? config.profiles.map((profile) =>
-              profile.id === route.id ? route : profile
-            )
-          : [...config.profiles, route],
-      };
-      const result = await persist(nextConfig);
-      saved = true;
-      setNotice({
-        tone: result.restartRequired ? "info" : "success",
-        text: result.restartRequired
-          ? `线路「${route.name}」已保存，重启 Codex 后注册新的接入配置`
-          : `线路「${route.name}」已保存，模型选择器已刷新`,
-      });
-    });
-    return saved;
-  }
-
-  async function setRouteEnabled(routeId: string, enabled: boolean) {
-    if (!config || dirty || isBusy || !config.localRouterEnabled) return false;
-    const route = config.profiles.find((profile) => profile.id === routeId);
-    if (!route) return false;
-    let saved = false;
-    await runOperation("set-route-enabled", async () => {
-      const result = await invoke<{
-        config: Config;
-        providerStatus?: ProviderStatus;
-        modelState: ModelState;
-        restartRequired?: boolean;
-        modelHotReloadError?: string;
-        subagentConfigHotReloadError?: string;
-      }>("set_route_enabled", {
-        routeId,
-        enabled,
-        expectedRevision: config.settingsRevision,
-      });
-      applyRouteResult(result);
-      saved = true;
-      const reloadError = result.modelHotReloadError || result.subagentConfigHotReloadError;
-      setNotice({
-        tone: reloadError || result.restartRequired ? "info" : "success",
-        text: `线路「${route.name}」已${enabled ? "启用" : "停用"}${reloadError
-          ? `，部分运行配置未更新：${reloadError}`
-          : result.restartRequired ? "，重启 Codex 后完全生效" : ""}`,
-      });
-    });
-    return saved;
-  }
-
-  async function reorderRoute(sourceId: string, targetId: string) {
-    if (!config || dirty || isBusy || !config.localRouterEnabled) return;
-    const profiles = [...config.profiles];
-    const sourceIndex = profiles.findIndex((profile) => profile.id === sourceId);
-    const targetIndex = profiles.findIndex((profile) => profile.id === targetId);
-    if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex) return;
-    if ((profiles[sourceIndex].enabled === false) !== (profiles[targetIndex].enabled === false)) return;
-    profiles.splice(targetIndex, 0, profiles.splice(sourceIndex, 1)[0]);
-    await runOperation("reorder-routes", async () => {
-      await persist({ ...config, profiles });
-      setNotice({ tone: "success", text: "线路顺序已保存" });
-    });
-  }
-
-  async function reorderRouteModels(routeId: string, models: string[]) {
-    if (!config || dirty || isBusy || !config.localRouterEnabled) return;
-    const route = config.profiles.find((profile) => profile.id === routeId);
-    if (!route) return;
-    await runOperation("reorder-route-models", async () => {
-      const result = await invoke<{
-        config: Config;
-        modelState: ModelState;
-        restartRequired?: boolean;
-      } & ModelRuntimeUpdate>("reorder_route_models", {
-        routeId,
-        models,
-        expectedRevision: config.settingsRevision,
-      });
-      applyRouteResult(result);
-      // 顺序调整即时生效，不按重启状态提示；只有推送到选择器失败时才提醒。
-      setNotice(
-        result.modelHotReloadError
-          ? {
-              tone: "info",
-              text: `模型顺序已保存，但模型列表未刷新：${result.modelHotReloadError}`,
-            }
-          : { tone: "success", text: "模型顺序已保存" },
-      );
-    });
-  }
-
-  async function deleteRoute(routeId: string) {
-    if (!config || dirty) return;
-    await runOperation("delete-route", async () => {
-      const result = await invoke<{
-        config: Config;
-        providerStatus: ProviderStatus;
-        modelState: ModelState;
-        restartRequired?: boolean;
-        modelHotReloaded?: boolean;
-      }>("delete_route", {
-        routeId,
-        expectedRevision: config.settingsRevision,
-      });
-      applyRouteResult(result);
-      setNotice({
-        tone: result.modelHotReloaded === false ? "info" : "success",
-        text: "线路已删除，相关模型已从选择器移除",
-      });
-    });
-  }
-
-  function requestDeleteRoute(routeId: string) {
-    if (!config) return;
-    const persisted = persistedConfigRef.current;
-    const persistedRoute = persisted?.profiles.some(
-      (profile) => profile.id === routeId,
-    );
-    if (!persistedRoute) {
-      const profiles = config.profiles.filter((profile) => profile.id !== routeId);
-      if (profiles.length === 0) return;
-      const next = {
-        ...config,
-        activeProfileId:
-          config.activeProfileId === routeId
-            ? profiles[0].id
-            : config.activeProfileId,
-        profiles,
-      };
-      setConfig(next);
-      setDirty(
-        !persisted ||
-          JSON.stringify({ ...next, settingsRevision: 0 }) !==
-            JSON.stringify({ ...persisted, settingsRevision: 0 }),
-      );
-      return;
-    }
-    if (dirty) {
-      setNotice({ tone: "info", text: "请先保存或放弃当前更改，再删除已保存线路" });
-      return;
-    }
-    const route = config.profiles.find((profile) => profile.id === routeId);
-    setConfirmation({
-      action: "delete-route",
-      title: `删除线路「${route ? prefixedRouteName(route) : "未命名线路"}」？`,
-      description: "该线路及其模型选择会立即从对话模型选择器移除。此操作无法撤销。",
-      confirmLabel: "删除线路",
-      run: () => void deleteRoute(routeId),
-    });
-  }
-
-  async function fetchRouteModels(route: Profile) {
-    if (!config) return;
-    const nativeMode = !config.localRouterEnabled;
-    if (nativeMode) {
-      await syncCurrentProvider();
-      return;
-    }
-    await runOperation("fetch-route-models", async () => {
-      const savedConfig = config;
-      const savedRoute = savedConfig.profiles.find((profile) => profile.id === route.id);
-      if (!savedRoute) throw new Error("找不到要同步模型的线路");
-      const session = beginModelPickerLoad(
-        savedRoute.id,
-        savedRoute.supportsAutoReview === true,
-      );
-      try {
-        const result = await invoke<{
-          config: Config;
-          providerStatus: ProviderStatus;
-          modelState: ModelState;
-          routeModelState: ModelState;
-          models: string[];
-          restartRequired?: boolean;
-          modelHotReloaded?: boolean;
-        }>("fetch_route_models", {
-          routeId: savedRoute.id,
-          expectedRevision: savedConfig.settingsRevision,
-        });
-        applyRouteResult(result);
-        completeModelPickerLoad(
-          session,
-          savedRoute.authMode === "officialAccount"
-            ? result.routeModelState
-            : { ...result.routeModelState, officialModels: [], officialModelIds: [] },
-          "",
-          savedRoute.id,
-          result.config.profiles.find((profile) => profile.id === savedRoute.id)
-            ?.supportsAutoReview === true,
-        );
-      } catch (error) {
-        const warning = savedRoute.authMode === "officialAccount"
-          ? `自动同步失败：${errorText(error)}。请重试以读取当前账号可用模型。`
-          : `自动同步失败：${errorText(error)}。仍可手动录入当前线路支持的模型 ID。`;
-        completeModelPickerLoad(
-          session,
-          savedRoute.authMode === "officialAccount"
-            ? modelState
-            : thirdPartyRouteModelState(savedConfig, savedRoute, modelState),
-          warning,
-          savedRoute.id,
-          savedRoute.supportsAutoReview === true,
-        );
-        setNotice({
-          tone: "error",
-          text: "模型同步失败，已打开手动配置",
-        });
-      }
-    });
-  }
-
-  async function saveOfficialRouteSettings(
-    routeId: string,
-    models: string[],
-    showAccountUsageInHeader: boolean,
-    enabled: boolean,
-    modelContexts: Record<string, import("./App.types").ModelContextConfig> | undefined,
-    upstreamProxy?: string,
-    routeSettings?: {
-      accountId: string;
-      routeName: string;
-      routeShortName: string;
-      baseUrl: string;
-    },
-  ) {
-    if (!config) return false;
-    const profile = config.profiles.find((candidate) => candidate.id === routeId);
-    if (!profile || profile.authMode !== "officialAccount") return false;
-    if (models.length === 0) {
-      setNotice({ tone: "info", text: "官方账号线路至少需要保留一个模型" });
-      return false;
-    }
-    let saved = false;
-    await runOperation("save-official-route-settings", async () => {
-      const modelResult = await invoke<{
-        config: Config;
-        modelState: ModelState;
-        restartRequired?: boolean;
-        modelHotReloaded?: boolean;
-        customContextsRestored?: boolean;
-      } & import("./App.types").OfficialAccountsResult>("save_official_route_models", {
-        routeId,
-        models,
-        ...(modelContexts === undefined ? {} : { modelContexts }),
-        enabled,
-        showAccountUsageInHeader,
-        // undefined 表示保持现状（如只同步模型），空字符串表示清除代理。
-        ...(upstreamProxy === undefined ? {} : { upstreamProxy }),
-        // 线路名、短名称、网关和代理写入同一账号记录，避免再打一次派生/热更新。
-        ...(routeSettings
-          ? {
-              accountId: routeSettings.accountId,
-              routeName: routeSettings.routeName,
-              routeShortName: routeSettings.routeShortName,
-              baseUrl: routeSettings.baseUrl,
-            }
-          : {}),
-      });
-      applyRouteResult(modelResult);
-      if (routeSettings) handleOfficialAccountsChanged(modelResult);
-      saved = true;
-      const restartNote = modelResult.restartRequired
-        ? "，重启 Codex 后完全生效"
-        : "，模型与额度展示已更新";
-      setNotice({
-        tone:
-          modelResult.restartRequired || modelResult.customContextsRestored
-            ? "info"
-            : "success",
-        text: `官方账号设置已保存${restartNote}${customContextRestoredNote(modelResult)}`,
-      });
-    });
-    return saved;
-  }
-
-  async function setRouteDefaultModel(routeId: string, model: string) {
-    if (!config) return;
-    const profile = config.profiles.find((candidate) => candidate.id === routeId);
-    if (!profile) return;
-    const providerId = profile.sourceProviderId || profile.id;
-    const configuredOfficialModels = config.selectedModelsByProvider[providerId] || [];
-    const enabledModels = profile.authMode === "officialAccount"
-      ? configuredOfficialModels.length > 0
-        ? configuredOfficialModels
-        : modelState.officialModelIds
-      : [
-          ...(config.selectedModelsByProvider[providerId] || []),
-          ...(config.declaredOfficialModelsByProvider[providerId] || []),
-        ];
-    if (!enabledModels.some((candidate) => modelIdsEqual(candidate, model))) {
-      setNotice({ tone: "error", text: `模型 ${model} 不属于该线路` });
-      return;
-    }
-    await runOperation("save-default-model", async () => {
-      const result = await invoke<{
-        config: Config;
-        modelState: ModelState;
-        restartRequired?: boolean;
-      }>("save_default_model", {
-        routeId,
-        model,
-      });
-      applyRouteResult(result);
-      setNotice({
-        tone: result.restartRequired ? "info" : "success",
-        text: `已将全局默认模型设为「${profile.name} / ${model}」`,
-      });
-    });
   }
 
   async function saveCurrent() {
@@ -1272,24 +824,6 @@ export function App({
         : "保存后关闭日志记录，无需重启",
     });
   });
-  const handleOfficialAccountsChanged = useStableEvent(
-    (result: import("./App.types").OfficialAccountsResult) => {
-      rememberOfficialAccounts(result);
-      if (result.config) {
-        applyRouteResult({
-          config: result.config,
-          modelState: result.modelState,
-          restartRequired: result.restartRequired,
-        });
-      }
-      if (typeof result.officialAccountAvailable === "boolean") {
-        setStatus((current) => ({
-          ...current,
-          officialAccountAvailable: result.officialAccountAvailable,
-        }));
-      }
-    },
-  );
   const handleNotice = useStableEvent(
     (notice: { tone: "success" | "info" | "error"; text: string }) => setNotice(notice),
   );

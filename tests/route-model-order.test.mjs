@@ -294,13 +294,15 @@ test("有未保存改动或操作进行中时模型手柄禁用，本地路由�
 });
 
 test("控制台通过带版本号的排序命令保存模型顺序", async () => {
-  const [app, api] = await Promise.all([readSource("src/App.tsx"), readSource("src/api.ts")]);
+  const [app, api, routes, requests] = await Promise.all([readSource("src/App.tsx"), readSource("src/api.ts"),
+    readSource("src/features/routes/useRoutesController.ts"), readSource("src/features/routes/requests.ts")]);
   assert.match(app, /onReorderRouteModels=\{handleReorderRouteModels\}/);
   assert.match(
-    app,
-    /"reorder_route_models",\s*\{\s*routeId,\s*models,\s*expectedRevision: config\.settingsRevision,\s*\}/,
+    requests,
+    /"reorder_route_models",\s*\{\s*routeId,\s*models,\s*expectedRevision\s*\}/,
   );
-  assert.match(app, /if \(!config \|\| dirty \|\| isBusy \|\| !config\.localRouterEnabled\) return;\s*const route = config\.profiles\.find\(\(profile\) => profile\.id === routeId\);/);
+  assert.match(routes, /routeRequests\.reorderModels\(routeId, models, config\.settingsRevision\)/);
+  assert.match(routes, /if \(!config \|\| dirty \|\| isBusy \|\| !config\.localRouterEnabled\) return;\s*const route = config\.profiles\.find\(\(profile\) => profile\.id === routeId\);/);
   assert.match(api, /"reorder_route_models",/);
 });
 

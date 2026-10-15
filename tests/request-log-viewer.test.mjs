@@ -4,8 +4,13 @@ import ts from "typescript";
 
 import { readSource } from "./helpers/read-source.mjs";
 
+// 展示契约覆盖拆分后的实际视图、类型与 controller，请求行为另由 controller 测试执行。
+const readRequestLogs = async () => (await Promise.all([
+  "RequestLogView.tsx", "types.ts", "useRequestLogsController.ts", "requests.ts",
+].map((file) => readSource(`src/features/request-logs/${file}`)))).join("\n");
+
 test("request log provider labels use route short names and distinguish official accounts", async () => {
-  const viewer = await readSource("src/RequestLogDialog.tsx");
+  const viewer = await readRequestLogs();
   const routeNames = await readSource("src/routeShortNames.ts");
   const source = [
     routeNames.match(/export function fallbackRouteShortName\([\s\S]*?\n\}/)?.[0],
@@ -33,7 +38,7 @@ test("request log provider labels use route short names and distinguish official
 });
 
 test("request log cache hit rate uses input tokens and preserves unknown usage", async () => {
-  const viewer = await readSource("src/RequestLogDialog.tsx");
+  const viewer = await readRequestLogs();
   const source = viewer.match(/function formatCacheHitRate\([\s\S]*?\n\}/)?.[0];
   assert.ok(source);
   const compiled = ts.transpileModule(source, {}).outputText;
@@ -48,7 +53,7 @@ test("request log cache hit rate uses input tokens and preserves unknown usage",
 
 test("request log output speed uses one decimal and preserves unknown values", async () => {
   const [viewer, usage] = await Promise.all([
-    readSource("src/RequestLogDialog.tsx"),
+    readRequestLogs(),
     readSource("src/usageAnalysis.ts"),
   ]);
   const source = viewer.match(/function formatTokensPerSecond\([\s\S]*?\n\}/)?.[0];
@@ -111,11 +116,11 @@ test("request log preview measures all output after the upstream first byte and 
 
 test("request log model cell shows the model sent upstream and the upstream model when it differs", async () => {
   const [viewer, preview] = await Promise.all([
-    readSource("src/RequestLogDialog.tsx"),
+    readRequestLogs(),
     readSource("src/dev/mockApi.ts"),
   ]);
 
-  assert.ok(viewer.includes('import { modelIdsEqual } from "./modelIds";'));
+  assert.ok(viewer.includes('import { modelIdsEqual } from "../../modelIds";'));
   assert.ok(viewer.includes('const sentModel = (item.model ?? "").trim() || item.requestedModel.trim();'));
   assert.ok(viewer.includes('const upstreamModel = (item.upstreamResponseModel ?? "").trim();'));
   assert.ok(viewer.includes("const upstreamModelDiffers = Boolean(upstreamModel) && !modelIdsEqual(upstreamModel, sentModel);"));
@@ -139,7 +144,7 @@ test("request log model cell shows the model sent upstream and the upstream mode
 });
 
 test("request log detail labels request body shape and flags empty input arrays", async () => {
-  const viewer = await readSource("src/RequestLogDialog.tsx");
+  const viewer = await readRequestLogs();
   const source = viewer.match(/function requestShapeText\([\s\S]*?\n\}/)?.[0];
   assert.ok(source);
   const compiled = ts.transpileModule(source, {}).outputText;
@@ -201,12 +206,12 @@ test("request log viewer is hosted by the local router for the system browser", 
 });
 
 test("request log viewer uses a full-screen server-paginated searchable table", async () => {
-  const viewer = await readSource("src/RequestLogDialog.tsx");
+  const viewer = await readRequestLogs();
 
   assert.doesNotMatch(viewer, /<Modal/);
   assert.doesNotMatch(viewer, /antd|ant-/);
   assert.match(viewer, /className="[^"]*flex h-full min-h-0 flex-1 flex-col/);
-  assert.match(viewer, /invoke<RouteRequestLogQueryPage>\("query_route_request_logs", \{/);
+  assert.match(viewer, /invoke<RouteRequestLogQueryPage>\("query_route_request_logs", query\)/);
   assert.match(viewer, /pageSize/);
   assert.match(viewer, /window\.setTimeout\([\s\S]*300/);
   assert.match(viewer, /按供应商筛选请求日志/);
@@ -250,8 +255,8 @@ test("request log viewer uses a full-screen server-paginated searchable table", 
   assert.match(viewer, /container=\{standalone \? document\.body : container\}/);
   assert.match(viewer, /disabled=\{clearing\}/);
   assert.doesNotMatch(viewer, /disabled=\{loading \|\| clearing \|\| result\?\.queryable !== true\}/);
-  assert.match(viewer, /if \(clearInFlight\.current\) return/);
-  assert.match(viewer, /setPage\(1\)/);
+  assert.match(viewer, /if \(!opened \|\| clearInFlight\.current\) return/);
+  assert.match(viewer, /pagination\.key === paginationKey \? pagination\.page : 1/);
   assert.match(viewer, /total:\s*0/);
   assert.match(viewer, /items:\s*\[\]/);
   assert.match(viewer, /<Alert\.Title>\{actionNotice\.tone === "success" \? "删除成功" : "删除失败"\}<\/Alert\.Title>/);
@@ -336,7 +341,7 @@ test("request log preview supports clearing all history", async () => {
 // 搜索防抖的首次执行发生在挂载时，若此时重置分页，首页查询刚拿到的游标会被清空，
 // 第 2 页及之后的页码都会保持禁用。
 test("request log search debounce keeps the first page cursors when the query text is unchanged", async () => {
-  const viewer = await readSource("src/RequestLogDialog.tsx");
+  const viewer = await readRequestLogs();
   const source = viewer.match(
     /useEffect\(\(\) => \{\r?\n\s+const nextSearch = searchInput\.trim\(\);[\s\S]*?\}, \[searchInput, search\]\);/,
   )?.[0];
@@ -344,7 +349,6 @@ test("request log search debounce keeps the first page cursors when the query te
   assert.ok(source);
   assert.match(source, /if \(nextSearch === search\) return;/);
   assert.match(source, /window\.setTimeout\([\s\S]*?300/);
-  assert.match(source, /setSearch\(nextSearch\)/);
-  assert.match(source, /resetPagination\(\)/);
+  assert.match(source, /setSelection\(\(current\) => \(\{ \.\.\.current, search: nextSearch \}\)\)/);
   assert.match(source, /window\.clearTimeout\(timer\)/);
 });

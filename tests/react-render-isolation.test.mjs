@@ -15,6 +15,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
     sections,
     modelSelection,
     draftConfig,
+    routes,
   ] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
     readFile(new URL("src/useAppUpdates.ts", root), "utf8"),
@@ -29,6 +30,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
     ).then((sources) => sources.join("\n")),
     readFile(new URL("src/useModelSelection.ts", root), "utf8"),
     readFile(new URL("src/useDraftConfig.ts", root), "utf8"),
+    readFile(new URL("src/features/routes/useRoutesController.ts", root), "utf8"),
   ]);
 
   assert.doesNotMatch(app, /useState<Notice>/);
@@ -73,7 +75,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.match(app, /onSave=\{saveModelSelection\}/);
   assert.doesNotMatch(modelSelection, /withTimeout/);
   assert.match(modelSelection, /routeId: modelPickerRouteId/);
-  assert.match(app, /routeModelState/);
+  assert.match(routes, /routeModelState/);
   assert.doesNotMatch(app, /onSetDefaultModel=\{\(.*=>/);
   assert.doesNotMatch(
     app,
@@ -109,11 +111,11 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.match(sections, /disabled=\{!canSyncCurrentProvider \|\| isBusy\}/);
   assert.match(draftConfig, /canSyncCurrentProvider: !dirty \|\| pendingNativeRouterToggle/);
   assert.match(app, /canSyncCurrentProvider=\{canSyncCurrentProvider\}/);
-  assert.match(app, /if \(shouldPersistNativeToggle\) \{\s*await persist\(config\)/);
-  assert.match(app, /if \(nativeMode\) \{\s*completeModelPickerLoad\(/);
-  assert.match(app, /result\.providerStatus\.provider\.official \? null : result\.providerStatus\.provider\.id/);
-  assert.match(app, /if \(nativeMode\) \{\s*await syncCurrentProvider\(\);\s*return/);
-  assert.match(app, /savedRoute\.authMode === "officialAccount"\s*\?\s*result\.routeModelState/);
+  assert.match(routes, /if \(shouldPersistNativeToggle\) await persist\(config\)/);
+  assert.match(routes, /if \(nativeMode\) completeModelPickerLoad\(/);
+  assert.match(routes, /result\.providerStatus\.provider\.official \? null : result\.providerStatus\.provider\.id/);
+  assert.match(routes, /if \(!config\.localRouterEnabled\) \{ await syncCurrentProvider\(\); return/);
+  assert.match(routes, /savedRoute\.authMode === "officialAccount"\s*\?\s*result\.routeModelState/);
   assert.match(
     sections,
     /disabled=\{\s*routeConfigReadOnly \|\|\s*(?:isOfficial \|\|\s*)?isBusy \|\|\s*dirty \|\|\s*config\.profiles\.length <= 1\s*\}/,
