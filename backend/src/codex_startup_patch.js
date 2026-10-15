@@ -1117,11 +1117,8 @@
   const defaultRouterProvider = runtimeConfigValue(nativeRuntimeConfigOverrides, "model_provider");
   const localRouterRuntimeEnabled = localRouterProviderIds.has(defaultRouterProvider);
   const routerProviderForParams = () => "codey_router";
-  if (localRouterRuntimeEnabled) {
-    // A shared daemon or external WebSocket can retain another provider and
-    // never read this launch's overrides. Use Codex's own process-local mode.
-    process.env.CODEX_APP_SERVER_FORCE_CLI = "1";
-  }
+  // Desktop must retain its per-host transport selection. A global CLI override
+  // also bypasses SSH/cloud connections; local routing is verified at spawn.
   // Native Desktop calls (including resume after restart) bypass the renderer.
   // A null provider restores the rollout's old provider despite CLI defaults.
   const routeLocalAppServerMessage = (message, hostKind) => {
@@ -1417,32 +1414,33 @@
     };
     finishAppServerRuntimeOverrideValidation(normalized);
   };
-  const inspectCodexAppServerRuntimeOverrides = (command, args) => {
-    if (!Array.isArray(args)) return null;
+  const isLocalCodexAppServerSpawn = (command, args) => {
+    if (!Array.isArray(args) ||
+        args.filter((argument) => argument === "app-server").length !== 1) return false;
     const commandName = String(command ?? "");
-    const appServerArgCount = args
-      .filter((argument) => argument === "app-server")
-      .length;
-    const directCodexCommand = /(?:^|[/\\])codex(?:\.exe)?$/i.test(commandName);
-    const runtimeManagedAppServer =
-      nativeRuntimeConfigOverrides.length > 0 && appServerArgCount === 1;
-    if (
-      appServerArgCount === 1 &&
-      (directCodexCommand || runtimeManagedAppServer)
-    ) {
-      const configs = collectRuntimeConfigArgsAfterAppServer(args);
-      return {
-        mode: "argv",
-        command,
-        args,
-        requiredRuntimeConfigs: appServerRuntimeConfigs,
-        missingRuntimeConfigs: validateRuntimeConfigSet(
-          configs,
-          appServerRuntimeConfigs,
-        ),
-      };
-    }
-    return null;
+    if (/(?:^|[/\\])codex(?:\.exe)?$/i.test(commandName)) return true;
+    // Remote launchers can also pass an app-server argument. Only known local
+    // wrappers may receive routing configuration, hooks or startup validation.
+    return nativeRuntimeConfigOverrides.length > 0 && commandName.length > 0 && [
+      process.env.CODEX_CLI_PATH,
+      process.env.CODEY_CODEX_CLI_STDIN_RELAY,
+      process.env.CODEY_CODEX_CLI_WRAPPER_TARGET,
+      process.env.CODEY_CODEX_CLI_WRAPPER_SOURCE,
+    ].some((filename) => typeof filename === "string" && filename.trim() === commandName);
+  };
+  const inspectCodexAppServerRuntimeOverrides = (command, args) => {
+    if (!isLocalCodexAppServerSpawn(command, args)) return null;
+    const configs = collectRuntimeConfigArgsAfterAppServer(args);
+    return {
+      mode: "argv",
+      command,
+      args,
+      requiredRuntimeConfigs: appServerRuntimeConfigs,
+      missingRuntimeConfigs: validateRuntimeConfigSet(
+        configs,
+        appServerRuntimeConfigs,
+      ),
+    };
   };
   let appServerRuntimeDegradationReported = false;
   const awaitCodexAppServerRuntimeOverrides = async () => {
@@ -1560,21 +1558,9 @@
     return rewritten;
   };
   const rewriteCodexAppServerSpawnArgs = (command, args) => {
-    if (!Array.isArray(args)) return args;
-    const commandName = String(command ?? "");
-    const appServerArgCount = args
-      .filter((argument) => argument === "app-server")
-      .length;
-    const directCodexCommand = /(?:^|[/\\])codex(?:\.exe)?$/i.test(commandName);
-    const runtimeManagedAppServer =
-      nativeRuntimeConfigOverrides.length > 0 && appServerArgCount === 1;
-    if (
-      appServerArgCount === 1 &&
-      (directCodexCommand || runtimeManagedAppServer)
-    ) {
-      return rewriteCodexAppServerArgs(args);
-    }
-    return args;
+    return isLocalCodexAppServerSpawn(command, args)
+      ? rewriteCodexAppServerArgs(args)
+      : args;
   };
   Object.defineProperty(globalThis, "__CODEY_REWRITE_CODEX_APP_SERVER_ARGS__", {
     configurable: false,
@@ -1666,13 +1652,7 @@
   const NativeSpawn = childProcess.spawn;
   if (!NativeSpawn.__codeyAppServerAnalyticsDisabled) {
     const isManagedCodexAppServerSpawn = (command, args) =>
-      subagentGateRuntimeActive &&
-      Array.isArray(args) &&
-      args.filter((argument) => argument === "app-server").length === 1 &&
-      (
-        /(?:^|[/\\])codex(?:\.exe)?$/i.test(String(command ?? "")) ||
-        nativeRuntimeConfigOverrides.length > 0
-      );
+      subagentGateRuntimeActive && isLocalCodexAppServerSpawn(command, args);
     const withSubagentGateEnvironment = (rest) => {
       const runtimeId = createSubagentGateRuntimeId();
       const options = rest[0];

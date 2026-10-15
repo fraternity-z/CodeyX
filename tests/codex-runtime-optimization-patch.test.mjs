@@ -103,6 +103,7 @@ test.after(() => rm(relayDirectory, { recursive: true, force: true }));
 const relayContext = (configs, environment = {}) => ({
   process: { ...process, env: {
     ...process.env,
+    CODEX_APP_SERVER_FORCE_CLI: undefined,
     CODEY_DISABLE_MACOS_CHILD_PROCESS_SAMPLER: "false",
     CODEX_CLI_PATH: relayWrapper,
     CODEY_CODEX_CLI_STDIN_RELAY: relayWrapper,
@@ -185,7 +186,6 @@ test("native thread routing uses one provider across route capabilities", async 
     'model_provider="codey_router_remote"', `model_catalog_json=${JSON.stringify(catalogPath)}`, 'model="remote/shared"',
   ]);
   try {
-    assert.equal(runtime.context.process.env.CODEX_APP_SERVER_FORCE_CLI, "1");
     const route = runtime.context.__CODEY_ROUTE_LOCAL_APP_SERVER_MESSAGE__;
     for (const method of ["thread/start", "thread/resume", "thread/fork"]) {
       for (const [model, provider] of [["local/shared", "codey_router"], ["remote/shared", "codey_router"], ["shared", "codey_router"]]) {
@@ -524,7 +524,7 @@ test("relay restores only its execution context into a filtered child environmen
     assert.equal(forwardedOptions.env.OMITTED_PARENT_VARIABLE, undefined);
     assert.equal(forwardedOptions.env.CHILD_ONLY, "keep");
     assert.equal(forwardedOptions.env.PATH, relayDirectory);
-    assert.equal(forwardedOptions.env.CODEX_APP_SERVER_FORCE_CLI, "1");
+    assert.equal(forwardedOptions.env.CODEX_APP_SERVER_FORCE_CLI, undefined);
     assert.deepEqual(runtime.context.process.env, parentBefore);
     assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
       "codey-app-server-runtime-overrides-degraded");
@@ -552,7 +552,7 @@ test("router mode refuses transport drift without a valid prepared relay and nat
       { CODEY_CODEX_CLI_WRAPPER_OVERRIDES: '[42]' },
     ].map((env) => ({ context: relayContext(configs, env), command: relayTarget })),
     { context: relayContext(configs), command: customCli },
-    { context: relayContext(configs), command: "custom-app-server" },
+    { context: relayContext(configs, { CODEX_CLI_PATH: "custom-app-server" }), command: "custom-app-server" },
     { context: relayContext(configs), command: "codex", options: { env: { PATH: `${customCliDirectory}${delimiter}${relayDirectory}` } } },
     { context: relayContext(configs), command: relayTarget, options: { shell: true } },
     { context: relayContext(configs), command: relayWrapper, options: { windowsVerbatimArguments: true } },
@@ -897,7 +897,7 @@ test("real CLI routes new and resumed threads through the local entry", {
   }
 });
 
-test("router mode forces a private CLI and applies transport overrides after parent tables", async () => {
+test("router mode preserves transport settings and applies local CLI overrides after parent tables", async () => {
   const overrides = [
     'model_provider="codey_router"',
     'model_providers.codey_router.base_url="http://127.0.0.1:43127/v1"',
@@ -909,7 +909,7 @@ test("router mode forces a private CLI and applies transport overrides after par
   } });
   const runtime = await loadPatchInIsolatedContext(overrides, { process: processWithExternalTransport() });
   try {
-    assert.equal(runtime.context.process.env.CODEX_APP_SERVER_FORCE_CLI, "1");
+    assert.equal(runtime.context.process.env.CODEX_APP_SERVER_FORCE_CLI, "0");
     const parent = 'model_providers={codey_router={base_url="https://wrong.example/v1"}}';
     process.getBuiltinModule("child_process").spawn("codex", ["app-server", "-c", parent]);
     const args = Array.from(runtime.spawnCalls.at(-1)[1]);
@@ -926,6 +926,90 @@ test("router mode forces a private CLI and applies transport overrides after par
     assert.equal(native.context.process.env.CODEX_APP_SERVER_FORCE_CLI, "0");
   } finally {
     native.restore();
+  }
+});
+
+test("router mode preserves Desktop connection settings and remote thread messages", async () => {
+  for (const provider of ["codey_router", "codey_router_remote"]) {
+    for (const forceCli of [undefined, "0", "1"]) {
+      const env = {
+        CODEX_CLI_PATH: relayWrapper,
+        CODEX_APP_SERVER_USE_LOCAL_DAEMON: "1",
+        CODEX_APP_SERVER_WS_URL: "ws://127.0.0.1:9999",
+      };
+      if (forceCli !== undefined) env.CODEX_APP_SERVER_FORCE_CLI = forceCli;
+      const before = { ...env };
+      const runtime = await loadPatchInIsolatedContext([
+        `model_provider=${JSON.stringify(provider)}`,
+      ], { process: { ...process, env } });
+      try {
+        assert.deepEqual(env, before, "routing must not change Desktop's host selection");
+        vm.runInNewContext(runtime.context.__CODEY_PATCH_CODEX_APP_SERVER_MESSAGES__(appServerTransportFixture), runtime.context);
+        for (const hostKind of ["ssh", "durable", "remote-control", "wsl"]) {
+          const messages = [];
+          const transport = new runtime.context.Transport({
+            hostKind,
+            getConnection: () => ({ send: (message) => messages.push(JSON.parse(message)) }),
+          });
+          for (const method of ["thread/start", "thread/resume", "thread/fork", "thread/read", "thread/list", "thread/archive", "thread/delete"]) {
+            const message = { id: 1, method, params: {
+              threadId: "remote-thread", modelProvider: "remote-provider",
+              config: { model_provider: "remote-provider" },
+            } };
+            transport.sendMessage(message);
+            assert.deepEqual(messages.at(-1), message, `${provider}/${hostKind}/${method}`);
+          }
+        }
+      } finally { runtime.restore(); }
+    }
+  }
+});
+
+test("remote app-server commands neither receive local overrides nor confirm local startup", async () => {
+  const configs = ['model_provider="codey_router"', "features.hooks=true"];
+  for (const installMessagePatch of [false, true]) {
+    const runtime = await loadPatchInIsolatedContext(configs, relayContext(configs), installMessagePatch);
+    try {
+      const spawn = process.getBuiltinModule("child_process").spawn;
+      for (const [command, args] of [
+        ["ssh", ["remote", "codex", "app-server"]],
+        ["C:\\Windows\\System32\\OpenSSH\\ssh.exe", ["remote", "codex", "app-server", "proxy"]],
+        ["/usr/bin/ssh", ["remote", "codex", "app-server", "daemon", "start"]],
+        ["wsl.exe", ["--", "codex", "app-server"]],
+        ["node", ["remote-helper.mjs", "app-server"]],
+        ["/opt/remote-codex", ["app-server"]],
+        ["", ["app-server"]],
+      ]) {
+        const options = Object.freeze({ env: Object.freeze({ CHILD_ONLY: "keep" }) });
+        Object.freeze(args);
+        spawn(command, args, options);
+        assert.deepEqual(runtime.spawnCalls.at(-1), [command, args, options]);
+        assert.equal(runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.observed, false);
+      }
+      spawn(relayWrapper, ["app-server"]);
+      assert.equal(runtime.spawnCalls.at(-1)[0], relayWrapper);
+      assert.ok(runtime.spawnCalls.at(-1)[1].includes(configs[0]));
+      assert.equal(runtime.spawnCalls.at(-1)[2].env.CODEY_SUBAGENT_GATE_ACTIVE, "1");
+      assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
+        installMessagePatch ? "codey-app-server-runtime-overrides-verified" : "codey-app-server-runtime-overrides-degraded");
+    } finally { runtime.restore(); }
+  }
+});
+
+test("registered local CLI paths receive overrides even with nonstandard executable names", async () => {
+  const configs = ['model_provider="codey_router"'];
+  for (const key of ["CODEX_CLI_PATH", "CODEY_CODEX_CLI_STDIN_RELAY", "CODEY_CODEX_CLI_WRAPPER_TARGET", "CODEY_CODEX_CLI_WRAPPER_SOURCE"]) {
+    const command = join(relayDirectory, "runtime helper.exe");
+    const runtime = await loadPatchInIsolatedContext(configs, {
+      process: { ...process, env: { [key]: command } },
+    });
+    try {
+      process.getBuiltinModule("child_process").spawn(command, ["app-server"]);
+      assert.equal(runtime.spawnCalls[0][0], command);
+      assert.ok(runtime.spawnCalls[0][1].includes(configs[0]), key);
+      assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
+        "codey-app-server-runtime-overrides-verified");
+    } finally { runtime.restore(); }
   }
 });
 
@@ -1302,6 +1386,8 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
   const originalJsExtension = Module._extensions[".js"];
   const originalSpawn = childProcess.spawn;
   const NativeWorker = workerThreads.Worker;
+  const originalCliPath = process.env.CODEX_CLI_PATH;
+  process.env.CODEX_CLI_PATH = process.execPath;
   const spawnCalls = [];
   const ipcHandlers = new Map();
   const fakeIpcMain = new EventEmitter();
@@ -1473,14 +1559,9 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     childProcess.spawn("bash", ["-lc", unrelatedShell]);
     assert.equal(spawnCalls.at(-1)[1].at(-1), unrelatedShell);
 
-    const runtimeManagedAppServerArgs = ["app-server", "--analytics-default-enabled"];
-    childProcess.spawn("node", runtimeManagedAppServerArgs);
-    assert.deepEqual(spawnCalls.at(-1)[1], [
-      "app-server",
-      "-c",
-      "analytics.enabled=false",
-      ...nativeRuntimeConfigOverrides.flatMap((config) => ["-c", config]),
-    ]);
+    const unrelatedAppServerArgs = ["app-server", "--analytics-default-enabled"];
+    childProcess.spawn("node", unrelatedAppServerArgs);
+    assert.deepEqual(spawnCalls.at(-1), ["node", unrelatedAppServerArgs]);
 
     const spawnOptions = { cwd: "/tmp" };
     childProcess.spawn("git", spawnOptions);
@@ -1488,7 +1569,7 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
     assert.equal(spawnCalls.at(-1)[1], spawnOptions);
     assert.equal(
       globalThis.__CODEY_CODEX_STARTUP_PATCH__.appServerAnalyticsPatchCount,
-      5,
+      4,
     );
     assert.equal(
       globalThis.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.complete,
@@ -1694,6 +1775,8 @@ test("startup patch disables Codex analytics and trims diagnostic polling", asyn
       /requestAppStateSnapshot\(e\).*electron-app-state-snapshot-request/,
     );
   } finally {
+    if (originalCliPath === undefined) delete process.env.CODEX_CLI_PATH;
+    else process.env.CODEX_CLI_PATH = originalCliPath;
     childProcess.spawn = originalSpawn;
     workerThreads.Worker = NativeWorker;
     Module.syncBuiltinESMExports?.();
@@ -1714,7 +1797,10 @@ test("startup patch rejects unobserved runtime overrides on timeout without expo
   let timeoutMs;
   let cleared = false;
   const runtime = await loadPatchInIsolatedContext(runtimeConfigOverrides, {
-    ...relayContext(runtimeConfigOverrides),
+    ...relayContext(runtimeConfigOverrides, {
+      CODEX_APP_SERVER_WS_URL: "ws://127.0.0.1:9999",
+      CODEX_APP_SERVER_USE_LOCAL_DAEMON: "1",
+    }),
     console: { ...console, warn: (...args) => warnings.push(args.join(" ")) },
     setTimeout(callback, delay) {
       expire = callback;
@@ -1749,6 +1835,8 @@ test("startup patch rejects unobserved runtime overrides on timeout without expo
     });
     assert.equal(cleared, true);
     assert.deepEqual(warnings, []);
+    assert.equal(runtime.context.process.env.CODEX_APP_SERVER_FORCE_CLI, undefined);
+    assert.equal(runtime.context.process.env.CODEX_APP_SERVER_WS_URL, "ws://127.0.0.1:9999");
   } finally {
     runtime.restore();
   }

@@ -325,6 +325,16 @@ test("CLI relay provenance records the discovered source before Windows runtime 
   assert.match(launcher, /CLI_WRAPPER_SOURCE_ENV\.to_string\(\),\s*source\.to_string_lossy\(\)\.to_string\(\)/);
 });
 
+test("CLI wrapper launch preserves Desktop's native remote transport selection", async () => {
+  const { launcher } = await loadSpawnCodexSections();
+  const wrapper = launcher.match(/async fn prepare_cli_wrapper\([\s\S]*?\n\}/)?.[0];
+  assert.ok(wrapper);
+  assert.doesNotMatch(wrapper, /CODEX_APP_SERVER_FORCE_CLI/);
+  assert.match(wrapper, /"CODEX_CLI_PATH"\.to_string\(\)/);
+  assert.match(wrapper, /CLI_WRAPPER_STDIN_RELAY_ENV/);
+  assert.match(wrapper, /local_router_proxy_bypass_environment/);
+});
+
 test("NODE_OPTIONS require path follows platform and fuse availability", async () => {
   const { launcher, macosSpawn, startupPatch, windowsSpawn } = await loadSpawnCodexSections();
 

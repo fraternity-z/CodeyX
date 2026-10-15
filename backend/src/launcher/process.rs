@@ -1432,9 +1432,6 @@ async fn prepare_cli_wrapper(
         ));
     }
     if crate::codex_startup_patch::local_router_runtime_enabled(runtime_config_overrides) {
-        // Applies before Desktop chooses a transport, including CLI fallback
-        // launches where the inspector patch cannot set this environment.
-        environment.push(("CODEX_APP_SERVER_FORCE_CLI".to_string(), "1".to_string()));
         environment.extend(local_router_proxy_bypass_environment(
             runtime_config_overrides,
             std::env::var("NO_PROXY").ok().as_deref(),
@@ -1463,6 +1460,8 @@ async fn prepare_cli_wrapper(
             wrapper.to_string_lossy().to_string(),
         ));
     }
+    // Select the wrapper only when Desktop chooses a CLI transport. A global
+    // transport override would also redirect SSH and cloud hosts to this CLI.
     environment.insert(
         0,
         (
