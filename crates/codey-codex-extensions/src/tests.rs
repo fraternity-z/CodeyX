@@ -1048,13 +1048,90 @@ fn rejects_symbolic_links_without_hiding_other_skills() {
     let root = f.home.join("skills");
     fs::create_dir_all(root.join("safe")).unwrap();
     fs::copy(f.source.join("SKILL.md"), root.join("safe/SKILL.md")).unwrap();
-    symlink(&f.source, root.join("link")).unwrap();
-    assert_eq!(f.list()["skills"].as_array().unwrap().len(), 1);
-    assert!(f.list()["warnings"].as_array().unwrap().len() > 1);
+    // Codex 不加载文件链接，扫描时直接跳过，不产生警告。
+    fs::create_dir_all(root.join("file-link")).unwrap();
+    symlink(f.source.join("SKILL.md"), root.join("file-link/SKILL.md")).unwrap();
+    let inventory = f.list();
+    assert_eq!(inventory["skills"].as_array().unwrap().len(), 1);
+    assert_eq!(inventory["warnings"].as_array().unwrap().len(), 1);
     let actual = f.home.join("real.toml");
     fs::rename(f.home.join("config.toml"), &actual).unwrap();
     symlink(actual, f.home.join("config.toml")).unwrap();
     assert!(f.service.dispatch(json!({"action":"list"})).is_err());
+}
+
+/// Windows 创建目录链接需要开发者模式或管理员权限，缺少权限时跳过相关用例。
+fn link_dir(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    return std::os::unix::fs::symlink(target, link).is_ok();
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_dir(target, link).is_ok();
+}
+
+#[test]
+fn linked_skill_directories_follow_codex_and_only_allow_toggle() {
+    let f = Fixture::new("");
+    let root = f.home.join("skills");
+    fs::create_dir_all(&root).unwrap();
+    if !link_dir(&f.source, &root.join("linked")) {
+        return;
+    }
+    // 指回根目录的链接不能造成循环或重复条目。
+    assert!(link_dir(&root, &root.join("loop")));
+    let inventory = f.list();
+    assert_eq!(inventory["warnings"].as_array().unwrap().len(), 1);
+    let skills = inventory["skills"].as_array().unwrap();
+    assert_eq!(skills.len(), 1);
+    let entry = &skills[0];
+    let id = entry["id"].clone();
+    assert_eq!(entry["sourcePath"], json!(root.join("linked")));
+    assert_eq!(entry["ownership"], "external");
+    assert_eq!(entry["readOnly"], false);
+    assert_eq!(entry["canToggle"], true);
+    assert_eq!(entry["canEdit"], false);
+    assert_eq!(entry["canRemove"], false);
+    assert_eq!(
+        fsutil::real_path(Path::new(entry["linkTarget"].as_str().unwrap())),
+        fsutil::real_path(&f.source)
+    );
+    assert!(
+        f.mutate(json!({"action":"uninstall_skill","id":id}))
+            .is_err()
+    );
+    let text = "---\nname: demo\ndescription: Changed\n---\n";
+    assert!(
+        f.mutate(json!({"action":"save_skill","id":id,"content":text}))
+            .is_err()
+    );
+    assert!(
+        f.service
+            .dispatch(json!({"action":"export_skill","id":id}))
+            .is_ok()
+    );
+    assert_eq!(
+        f.service
+            .dispatch(json!({"action":"validate_skill","id":id}))
+            .unwrap()["ok"],
+        true
+    );
+    f.mutate(json!({"action":"set_skill_enabled","id":id,"enabled":false}))
+        .unwrap();
+    assert_eq!(f.list()["skills"][0]["enabled"], false);
+    // Codex 按真实路径匹配规则，写成链接目标路径的规则同样生效。
+    fs::write(
+        f.home.join("config.toml"),
+        format!(
+            "[[skills.config]]\npath = '{}'\nenabled = false\n",
+            f.source.join("SKILL.md").display()
+        ),
+    )
+    .unwrap();
+    assert_eq!(f.list()["skills"][0]["enabled"], false);
+    f.mutate(json!({"action":"set_skill_enabled","id":id,"enabled":true}))
+        .unwrap();
+    assert_eq!(f.list()["skills"][0]["enabled"], true);
+    assert!(f.source.join("SKILL.md").exists());
+    assert_eq!(skills::named_manifests(&root).len(), 1);
 }
 
 #[test]

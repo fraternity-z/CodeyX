@@ -22,6 +22,7 @@ import { ModelSection } from "./ModelSection";
 import { UsageAnalysisPanel } from "./UsageAnalysisPanel";
 import { OperationsPanel } from "./OperationsPanel";
 import { CodeyPluginsSection } from "./CodeyPluginsSection";
+import { BuiltinToolsPage } from "./BuiltinToolsPage";
 import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
 import { canRepairMainProcessInjection, isMainProcessInjectionConfirmed } from "./runtimeStatusPresentation";
 import { repairOperationResult } from "./injectionRepair";
@@ -1589,7 +1590,6 @@ export function App({
               />
               <FeaturePolicyCard
                 config={config}
-                fastContextToolsStatus={fastContextToolsStatus}
                 isMacClient={status.clientPlatform === "macos"}
                 isWindowsClient={status.clientPlatform === "windows"}
                 cleanupBusy={busy === "clear-diagnostic-storage"}
@@ -1654,6 +1654,10 @@ export function App({
             />
           ),
           remote: (active) => <RemoteControlPanel active={active} />,
+          tools: (active) => (
+            <BuiltinToolsPage active={active} config={config} fastContextToolsStatus={fastContextToolsStatus}
+              isBusy={isBusy} onConfigChange={handleConfigChange} />
+          ),
           plugins: <CodeyPluginsSection container={popupContainer} />,
           mcp: (active) => (
             <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />

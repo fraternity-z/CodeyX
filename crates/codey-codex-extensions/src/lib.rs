@@ -137,8 +137,9 @@ impl ExtensionService {
                 skills::entries(&root, kind, &registry, &disabled, &mut warnings, &mut cache)
             {
                 if named.contains(entry["name"].as_str().unwrap_or_default())
-                    || unknown_paths
-                        .contains(&PathBuf::from(entry["manifestPath"].as_str().unwrap()))
+                    || unknown_paths.contains(&fsutil::real_path(Path::new(
+                        entry["manifestPath"].as_str().unwrap(),
+                    )))
                 {
                     entry["readOnly"] = json!(true);
                     entry["enabledKnown"] = json!(false);
@@ -274,6 +275,16 @@ impl ExtensionService {
             .context("Skill 不存在或不属于当前作用域")
     }
 
+    /// 链接 Skill 从真实目录读取资源：遍历不接受链接本身作为起点。
+    fn resource_dir(entry: &Value) -> PathBuf {
+        PathBuf::from(
+            entry["linkTarget"]
+                .as_str()
+                .or_else(|| entry["sourcePath"].as_str())
+                .unwrap(),
+        )
+    }
+
     fn required<'a>(request: &'a Value, key: &str) -> Result<&'a str> {
         request
             .get(key)
@@ -318,7 +329,7 @@ impl ExtensionService {
         if action == "export_skill" {
             let inventory = self.inventory(&scope)?;
             let entry = self.entry(&inventory, Self::required(&request, "id")?)?;
-            let bytes = skills::export(Path::new(entry["sourcePath"].as_str().unwrap()))?;
+            let bytes = skills::export(&Self::resource_dir(&entry))?;
             ensure!(
                 self.inventory(&scope)?["revision"] == inventory["revision"],
                 "导出期间内容已变化，请刷新后重试"
@@ -346,7 +357,7 @@ impl ExtensionService {
                 );
             }
             let meta = skills::metadata(&bytes);
-            let tree = fsutil::walk(path.parent().unwrap());
+            let tree = fsutil::walk(&Self::resource_dir(&entry));
             let ok = meta.is_ok() && tree.is_ok();
             return Ok(
                 json!({"ok":ok,"summary":if ok {"Skill 结构检查通过，未执行内容；依赖与任务效果仍需实际验证"}else{"Skill 检查失败"},"checks":[{"name":"元数据","ok":meta.is_ok(),"message":meta.err().map(|e|e.to_string()).unwrap_or_else(||"元数据有效".to_owned())},{"name":"资源路径","ok":tree.is_ok(),"message":tree.err().map(|e|e.to_string()).unwrap_or_else(||"目录和文件符合安全限制".to_owned())}]}),

@@ -1,5 +1,9 @@
+use crate::fsutil;
 use anyhow::{Context, Result};
-use std::{collections::BTreeSet, path::PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 use toml_edit::{Array, ArrayOfTables, DocumentMut, InlineTable, Item, Table, Value};
 
 /// Codex 接受表数组与内联表数组；只转换目标节点，保留其他配置。
@@ -23,6 +27,7 @@ fn rules(doc: &DocumentMut) -> Result<Vec<Table>> {
         .collect()
 }
 
+/// Codex 按真实路径匹配规则，经链接或目标路径写成的规则等价；返回的路径均已解析。
 pub fn disabled(doc: &DocumentMut) -> Result<(Vec<PathBuf>, BTreeSet<String>)> {
     let mut disabled = Vec::new();
     let mut named = BTreeSet::new();
@@ -31,7 +36,7 @@ pub fn disabled(doc: &DocumentMut) -> Result<(Vec<PathBuf>, BTreeSet<String>)> {
             named.insert(name.to_owned());
         }
         if let Some(path) = rule.get("path").and_then(Item::as_str) {
-            let path = PathBuf::from(path);
+            let path = fsutil::real_path(Path::new(path));
             disabled.retain(|p| p != &path);
             if rule.get("enabled").and_then(Item::as_bool) == Some(false) {
                 disabled.push(path);
@@ -45,7 +50,10 @@ pub fn unknown_paths(doc: &DocumentMut) -> Result<BTreeSet<PathBuf>> {
     Ok(rules(doc)?
         .iter()
         .filter(|rule| rule.get("enabled").is_some_and(|v| v.as_bool().is_none()))
-        .filter_map(|rule| rule.get("path").and_then(Item::as_str).map(PathBuf::from))
+        .filter_map(|rule| {
+            let path = rule.get("path").and_then(Item::as_str)?;
+            Some(fsutil::real_path(Path::new(path)))
+        })
         .collect())
 }
 

@@ -7,6 +7,7 @@ import {
   IconRoute,
   IconServer,
   IconSparkles,
+  IconTools,
   IconUsersGroup,
 } from "@tabler/icons-react";
 
@@ -16,6 +17,7 @@ const SETTINGS_PAGES = [
   { id: "prompt", title: "提示词优化", icon: IconSparkles, group: "核心配置" },
   { id: "subagents", title: "子代理优化", icon: IconUsersGroup, group: "核心配置" },
   { id: "remote", title: "远程控制", icon: IconDeviceMobile, group: "核心配置" },
+  { id: "tools", title: "内置工具", icon: IconTools, group: "扩展生态" },
   { id: "plugins", title: "CodeyX 插件", icon: IconPlugConnected, group: "扩展生态" },
   { id: "mcp", title: "MCP 管理", icon: IconServer, group: "扩展生态" },
   { id: "skills", title: "Skill 管理", icon: IconBook2, group: "扩展生态" },

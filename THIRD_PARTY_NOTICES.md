@@ -9,6 +9,7 @@ CodeyX 基于 [SuperGness/Codey](https://github.com/SuperGness/codey) 独立维�
 | ComputerUse | MIT，Copyright (c) 2026 Leo；完整许可保留在 `vendor/ComputerUse/LICENSE` 并随安装包分发。 |
 | [codex-mobile-bridge](https://github.com/try2love/codex-mobile-bridge) | 远程会话协议适配来源，MIT，Copyright (c) 2026 try2love。 |
 | [cloudflared](https://github.com/cloudflare/cloudflared) | 可选下载的隧道组件，Apache-2.0。 |
+| [CodeGraph](https://github.com/colbymchenry/codegraph) | 可选下载的代码索引工具，[MIT](https://github.com/colbymchenry/codegraph/blob/main/LICENSE)；运行包及其依赖保留各自许可。 |
 
 ## FastCtx NOTICE
 

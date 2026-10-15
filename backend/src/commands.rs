@@ -9,6 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+mod builtin_tools;
 mod config_repair;
 mod conversation_git;
 mod diagnostics;
@@ -150,6 +151,7 @@ pub struct AppState {
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     runtime_operation: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
+    builtin_tools: builtin_tools::ToolState,
     trace_log_write_protection_active: AtomicBool,
     pub crashpad_pending_stats: CrashpadPendingStatsHandle,
     pub startup_error: RwLock<Option<String>>,
@@ -276,6 +278,7 @@ impl Default for AppState {
             runtime: Mutex::new(None),
             runtime_operation: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
+            builtin_tools: builtin_tools::ToolState::default(),
             trace_log_write_protection_active: AtomicBool::new(false),
             crashpad_pending_stats: CrashpadPendingStatsHandle::idle(protect_crashpad_pending),
             startup_error: RwLock::new(None),
@@ -1198,6 +1201,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         | "install_downloaded_update" => updates::invoke(state, command, &args).await,
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "codex_extensions" => extensions::invoke(state, &args).await,
+        "builtin_tools" => builtin_tools::invoke(state, &args).await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         "prepare_computer_use" => prepare_computer_use().await,
         "get_codey_plugin_host_info"

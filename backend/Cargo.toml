@@ -37,6 +37,8 @@ directories.workspace = true
 fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "22b40ea324a186a921dfe38c205e3ffacdf6546d", default-features = false }
 fs2.workspace = true
 futures-util.workspace = true
+flate2 = "1"
+tar = "0.4"
 http-body = "1"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["server", "http1"] }
@@ -61,7 +63,6 @@ webpki-roots = "0.26"
 zstd = "0.13"
 
 [dev-dependencies]
-flate2 = "1"
 tokio = { workspace = true, features = ["test-util"] }
 
 [[bench]]
@@ -95,8 +96,6 @@ windows = { version = "0.58", default-features = false, features = [
 ] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-flate2 = "1"
-tar = "0.4"
 dispatch2 = { version = "0.3.1", default-features = false, features = ["objc2", "std"] }
 objc2 = { version = "0.6.4", default-features = false, features = ["std"] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [

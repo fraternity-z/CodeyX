@@ -86,6 +86,39 @@ pub fn safe_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// 符号链接，以及 Windows 上目录联接等重解析点。
+pub fn is_link(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| {
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if meta.file_attributes() & 0x400 != 0 {
+                return true;
+            }
+        }
+        meta.file_type().is_symlink()
+    })
+}
+
+/// 解析链接后的真实路径，与 Codex 识别 Skill 和匹配启停规则的方式一致；
+/// Windows 去掉 `\\?\` 前缀便于展示。无法解析时保留原路径。
+pub fn real_path(path: &Path) -> PathBuf {
+    let Ok(real) = fs::canonicalize(path) else {
+        return path.to_path_buf();
+    };
+    #[cfg(windows)]
+    {
+        if let Some(plain) = real
+            .to_str()
+            .and_then(|text| text.strip_prefix(r"\\?\"))
+            .filter(|text| !text.starts_with(r"UNC\"))
+        {
+            return PathBuf::from(plain);
+        }
+    }
+    real
+}
+
 pub fn read(path: &Path) -> Result<Option<Vec<u8>>> {
     safe_path(path)?;
     let mut f = match fs::File::open(path) {

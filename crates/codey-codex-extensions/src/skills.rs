@@ -3,7 +3,7 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
     io::{Cursor, Read, Write},
     path::{Component, Path, PathBuf},
@@ -89,19 +89,22 @@ pub fn entries(
     warnings: &mut Vec<String>,
     cache: &mut fsutil::ReadCache,
 ) -> Vec<Value> {
-    let files = discover(root, warnings);
-    files.into_iter().filter(|p| p.file_name().is_some_and(|s| s == "SKILL.md")).map(|manifest| {
+    let files = discover(root, matches!(scope, "user" | "project"), warnings);
+    files.into_iter().map(|(manifest, linked)| {
         let path = manifest.parent().unwrap();
+        // 链接内容由外部工具维护：不纳入托管、不删除，只允许查看、导出和启停。
+        let link_target = linked.then(|| fsutil::real_path(path));
         let is_system = scope == "system" || manifest.components().any(|c| c.as_os_str() == ".system");
-        let ownership = if scope == "plugin" { "plugin" } else if is_system { "builtin" } else if registry.contains_key(path) { "managed" } else { "external" };
+        let ownership = if scope == "plugin" { "plugin" } else if is_system { "builtin" } else if registry.contains_key(path) && !linked { "managed" } else { "external" };
         let readonly = ownership == "plugin" || ownership == "builtin";
         let parsed = cache.read(&manifest).and_then(|bytes| metadata(bytes.context("Skill 文件已消失")?));
         let (name, description, error) = match parsed { Ok((n,d)) => (n,d,None), Err(e) => (path.file_name().unwrap_or_default().to_string_lossy().into_owned(), String::new(), Some(e.to_string())) };
         let effective_scope = if is_system { "system" } else { scope };
         let version = if error.is_none() { cache.read(&manifest).ok().flatten().and_then(manifest_version) } else { None };
         let (dependencies, dependency_warnings) = dependencies(path, cache);
-        let mut entry = json!({"id":id(&manifest),"name":name,"description":description,"enabled":!disabled.contains(&manifest),"enabledKnown":ownership != "plugin","sourcePath":path,"manifestPath":manifest,"scope":effective_scope,"ownership":ownership,"origin":registry.get(path).map(|m|m.source.as_str()).unwrap_or(""),"readOnly":readonly,"updatedAt":fsutil::updated_at(&manifest),"configurationStatus":if error.is_none(){"valid"}else{"invalid"},"version":version,"dependencies":dependencies,"dependencyWarnings":dependency_warnings,"canEdit":!readonly && ownership == "managed" && fsutil::writable(&manifest),"canToggle":!readonly,"canRemove":!readonly && path != root && fsutil::writable(path),"canCheck":true});
+        let mut entry = json!({"id":id(&manifest),"name":name,"description":description,"enabled":!disabled.contains(&fsutil::real_path(&manifest)),"enabledKnown":ownership != "plugin","sourcePath":path,"manifestPath":manifest,"scope":effective_scope,"ownership":ownership,"origin":registry.get(path).map(|m|m.source.as_str()).unwrap_or(""),"readOnly":readonly,"updatedAt":fsutil::updated_at(&manifest),"configurationStatus":if error.is_none(){"valid"}else{"invalid"},"version":version,"dependencies":dependencies,"dependencyWarnings":dependency_warnings,"canEdit":!readonly && ownership == "managed" && fsutil::writable(&manifest),"canToggle":!readonly,"canRemove":!readonly && !linked && path != root && fsutil::writable(path),"canCheck":true,"linkTarget":link_target});
         if readonly { entry["reason"] = json!(if scope == "plugin" { "插件缓存资源，仅展示，不代表当前会话已加载" } else { "Codex 系统资源不可修改" }); }
+        else if let Some(target) = &link_target { entry["reason"] = json!(format!("链接自 {}，请在源位置维护文件；此处仅可启停和导出", target.display())); }
         if let Some(error) = error { entry["error"] = json!(error); }
         entry
     }).collect()
@@ -129,10 +132,9 @@ fn manifest_version(bytes: &[u8]) -> Option<String> {
 pub fn named_manifests(root: &Path) -> Vec<(String, PathBuf)> {
     let mut warnings = Vec::new();
     let mut cache = fsutil::ReadCache::default();
-    discover(root, &mut warnings)
+    discover(root, true, &mut warnings)
         .into_iter()
-        .filter(|path| path.file_name().is_some_and(|name| name == "SKILL.md"))
-        .filter_map(|manifest| {
+        .filter_map(|(manifest, _)| {
             let bytes = cache.read(&manifest).ok().flatten()?;
             let (name, _) = metadata(bytes).ok()?;
             Some((name, manifest))
@@ -225,19 +227,29 @@ pub fn export(root: &Path) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
+/// 用户和项目范围与 Codex 一致地跟随目录链接，并标记 SKILL.md 是否位于根目录下的链接内；
+/// 插件缓存仍拒绝链接，因为它允许删除目录。
+fn discover(root: &Path, follow_links: bool, warnings: &mut Vec<String>) -> Vec<(PathBuf, bool)> {
     if !root.exists() {
         return vec![];
     }
-    let mut pending = vec![(root.to_path_buf(), 0)];
+    let mut pending = vec![(root.to_path_buf(), 0, false)];
+    // 普通目录先于链接扫描，使同一真实目录优先按普通路径展示和托管。
+    let mut links = Vec::new();
+    let mut visited = BTreeSet::new();
     let mut found = Vec::new();
     let mut count = 0usize;
-    while let Some((dir, depth)) = pending.pop() {
+    while let Some((dir, depth, linked)) = pending.pop().or_else(|| links.pop()) {
         if depth > 20 {
             warnings.push("部分 Skill 目录超过层级限制".to_owned());
             continue;
         }
-        if let Err(e) = fsutil::safe_path(&dir) {
+        if follow_links {
+            // 链接可能指回祖先或与普通目录重复，按真实路径只扫描一次。
+            if !visited.insert(fsutil::real_path(&dir)) {
+                continue;
+            }
+        } else if let Err(e) = fsutil::safe_path(&dir) {
             warnings.push(e.to_string());
             continue;
         }
@@ -263,13 +275,24 @@ fn discover(root: &Path, warnings: &mut Vec<String>) -> Vec<PathBuf> {
             };
             let path = entry.path();
             if let Err(e) = fsutil::safe_path(&path) {
-                warnings.push(e.to_string());
+                // Codex 只跟随目录链接、不加载文件链接，后者直接跳过。
+                if follow_links && fsutil::is_link(&path) {
+                    if path.is_dir() {
+                        links.push((path, depth + 1, true));
+                    }
+                } else {
+                    warnings.push(e.to_string());
+                }
                 continue;
             }
             if path.is_dir() {
-                pending.push((path, depth + 1));
+                if linked {
+                    links.push((path, depth + 1, true));
+                } else {
+                    pending.push((path, depth + 1, false));
+                }
             } else if path.file_name().is_some_and(|s| s == "SKILL.md") {
-                found.push(path);
+                found.push((path, linked));
             }
         }
     }
