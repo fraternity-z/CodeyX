@@ -7,6 +7,7 @@ import { test } from "@playwright/test";
 for (const [name, filename, fixture] of [
   ["更新公告的主题、Shadow DOM、窄屏和键盘交互", "release-notes-browser.playwright.js", "?view=update&state=markdown"],
   ["内置工具启停、页面切换和读取失败后重试", "builtin-tools-browser.playwright.js", "?platform=windows"],
+  ["远程控制草稿、隐藏重开和配对生命周期", "remote-control-browser.playwright.js", "?platform=windows"],
   ["请求日志翻页、筛选、详情和删除确认", "request-logs-browser.playwright.js", "?view=logs"],
 ]) {
   test(name, async ({ page, baseURL }) => {

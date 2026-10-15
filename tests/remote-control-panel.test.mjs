@@ -2,11 +2,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readSource } from "./helpers/read-source.mjs";
 import {
-  autoStubModule, collectElements, createComponentModule, elementProps, elementType, textContent,
+  autoStubModule, collectElements, elementProps, elementType, textContent,
 } from "./helpers/jsx-tree.mjs";
+import { createControllerHarness, installControllerWindow } from "./helpers/controller-harness.mjs";
 
 const ui = autoStubModule("ui");
-const originalWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
 const stopped = { running: false, urls: [], devices: [] };
 const publicUrl = "https://remote.example.test";
 const localUrl = "http://192.168.1.8:43129";
@@ -23,22 +23,13 @@ const input = (tree, label) => {
 async function fixture(t, initial = stopped, options = {}) {
   let status = structuredClone(initial);
   const calls = [];
-  let poll;
-  let cleared = false;
-  Object.defineProperty(globalThis, "window", { configurable: true, value: {
-    __codeyRemoteClient: options.remote ?? false,
-    setInterval(callback) { poll = callback; return 1; },
-    clearInterval() { cleared = true; },
-  } });
-  t.after(() => {
-    if (originalWindow) Object.defineProperty(globalThis, "window", originalWindow);
-    else delete globalThis.window;
-  });
-  const module = await createComponentModule(new URL("../src/RemoteControlPanel.tsx", import.meta.url), {
-    stubs: {
+  const browser = installControllerWindow(t);
+  window.__codeyRemoteClient = options.remote ?? false;
+  const harness = createControllerHarness(new URL("../src/RemoteControlPanel.tsx", import.meta.url), "RemoteControlPanel", {
       "./components/ui": ui,
+      "../../components/ui": ui,
       "@tabler/icons-react": autoStubModule("icons"),
-      "./api": { invoke: async (command, args) => {
+      "../../api": { invoke: async (command, args) => {
         calls.push({ command, args });
         if (options.invoke) return options.invoke(command, args);
         if (command === "remote_control_status") return structuredClone(status);
@@ -47,25 +38,21 @@ async function fixture(t, initial = stopped, options = {}) {
         if (command === "pair_remote_control") return { ...pairing, url: `${args.url}/#pair=${"a".repeat(64)}` };
         if (command === "revoke_remote_device") status.devices = status.devices.filter(device => device.id !== args.id);
       } },
-    },
   });
-  let effect;
-  module.react.useEffect = callback => { effect = callback; };
-  const render = () => { module.restart(); return module.exports.RemoteControlPanel({ active: options.active ?? true }); };
+  const render = () => harness.render({ active: options.active ?? true });
   render();
-  const cleanup = effect();
-  await flush();
+  await harness.flush();
   return {
-    render, calls, cleanup,
+    render, calls, cleanup: harness.unmount,
     setStatus(next) { status = next; },
-    async poll() { await poll?.(); },
-    get cleared() { return cleared; },
+    async poll() { browser.tick(); await harness.flush(); },
+    get cleared() { return browser.timers.size === 0; },
     async click(label) {
       const target = button(render(), label);
       assert.ok(target, `button ${label} exists`);
       assert.equal(elementProps(target).disabled, false);
       elementProps(target).onClick();
-      await flush();
+      await harness.flush();
     },
     changeMode(value) { elementProps(nodes(render(), props => props.type === "radio" && props.value === value)[0]).onChange(); },
   };

@@ -18,7 +18,8 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
   ] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
     readFile(new URL("src/App.types.ts", root), "utf8"),
-    readFile(new URL("src/BuiltinToolsPage.tsx", root), "utf8"),
+    Promise.all(["BuiltinToolsPage.tsx", "useBuiltinToolsController.ts"].map(file =>
+      readFile(new URL(`src/features/builtin-tools/${file}`, root), "utf8"))).then(parts => parts.join("\n")),
     readFile(new URL("backend/src/config.rs", root), "utf8"),
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
     readFile(new URL("backend/src/commands/runtime.rs", root), "utf8"),

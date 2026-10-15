@@ -33,6 +33,7 @@ export function createControllerHarness(url, name, stubs = {}) {
       return hooks[index].value;
     },
     useCallback(callback, deps) { return react.useMemo(() => callback, deps); },
+    useId() { return react.useRef(":controller:").current; },
     useEffect(effect, deps) {
       const index = cursor++;
       if (same(hooks[index]?.deps, deps)) return;
