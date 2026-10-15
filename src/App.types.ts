@@ -281,6 +281,7 @@ export type Confirmation = {
     | "repair-codex-config"
     | "install-update"
     | "download-update"
+    | "view-update-notes"
     | "enable-experimental-updates"
     | "discard-settings-changes"
     | "delete-notification-channel"
@@ -291,6 +292,8 @@ export type Confirmation = {
   title: string;
   description: string;
   releaseNotes?: string;
+  releaseTitle?: string;
+  releaseUrl?: string;
   confirmLabel: string;
   run: () => void;
   /// 用户点"稍后"/关闭对话框时触发，用于记录"本次不再提示"。
@@ -329,6 +332,8 @@ export type UpdateCheck = {
   updateAvailable: boolean;
   selectedAsset?: UpdateAsset;
   releaseNotes?: string | null;
+  releaseTitle?: string | null;
+  releaseUrl?: string | null;
   releaseId?: string | null;
   prerelease?: boolean;
 };

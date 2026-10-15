@@ -58,6 +58,10 @@ pub(crate) struct UpdateCheck {
     #[serde(default)]
     pub(crate) release_notes: Option<String>,
     #[serde(default)]
+    pub(crate) release_title: Option<String>,
+    #[serde(default)]
+    pub(crate) release_url: Option<String>,
+    #[serde(default)]
     pub(crate) release_id: Option<String>,
     #[serde(default)]
     pub(crate) prerelease: bool,
@@ -98,6 +102,8 @@ struct GitHubRelease {
     prerelease: bool,
     #[serde(default)]
     body: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
     assets: Vec<GitHubReleaseAsset>,
 }
 
@@ -411,6 +417,8 @@ fn assess_github_releases(
             update_available: false,
             selected_asset: None,
             release_notes: None,
+            release_title: None,
+            release_url: None,
             release_id: None,
             prerelease: false,
         });
@@ -430,6 +438,14 @@ fn assess_github_releases(
         assets: asset.into_iter().collect(),
     };
     let mut check = assess_update_manifest(current_version, &manifest)?;
+    check.release_title = release
+        .name
+        .clone()
+        .filter(|title| !title.trim().is_empty());
+    check.release_url = Some(format!(
+        "https://github.com/{repository}/releases/tag/{}",
+        release.tag_name
+    ));
     check.release_id = Some(release.id.to_string());
     check.prerelease = release.prerelease || !version.pre.is_empty();
     Ok(check)
@@ -687,6 +703,8 @@ pub(super) fn assess_update_manifest(
         update_available: latest.cmp_precedence(&current).is_gt(),
         selected_asset: selected_update_asset(&manifest.assets).map(|asset| asset_info(&asset)),
         release_notes: manifest.release_notes.clone(),
+        release_title: None,
+        release_url: None,
         release_id: None,
         prerelease: !latest.pre.is_empty(),
     })
@@ -1148,6 +1166,8 @@ mod tests {
         serde_json::from_value(json!({
             "id": 123,
             "tag_name": format!("v{version}"),
+            "name": format!("CodeyX v{version} · 更新公告"),
+            "html_url": "https://other.example/untrusted-release",
             "draft": false,
             "prerelease": version.contains('-'),
             "body": "- Release 发布说明",
@@ -1173,6 +1193,27 @@ mod tests {
         ] {
             assert!(github_releases_repository(url).is_err(), "{url}");
         }
+    }
+
+    #[test]
+    fn github_release_announcements_keep_the_full_body_and_trusted_source() {
+        let mut release = github_release("2.0.0-beta.1");
+        let body = "    保留代码缩进\n\n## 更新亮点\n\n![截图](https://example.test/image.png)\n\n<details><summary>完整变更</summary>正文</details>\n";
+        release.body = Some(body.to_string());
+        let check = assess_github_releases(
+            "1.0.0",
+            &[release],
+            REPOSITORY,
+            crate::config::CodeyUpdatePolicy::Experimental,
+        )
+        .unwrap();
+        let value = serde_json::to_value(check).unwrap();
+        assert_eq!(value["releaseNotes"], body);
+        assert_eq!(value["releaseTitle"], "CodeyX v2.0.0-beta.1 · 更新公告");
+        assert_eq!(
+            value["releaseUrl"],
+            "https://github.com/fraternity-z/CodeyX/releases/tag/v2.0.0-beta.1"
+        );
     }
 
     #[test]
@@ -1373,6 +1414,8 @@ mod tests {
             update_available: true,
             selected_asset: Some(asset),
             release_notes: None,
+            release_title: None,
+            release_url: None,
             release_id: None,
             prerelease: Version::parse(version).is_ok_and(|version| !version.pre.is_empty()),
         }

@@ -21,6 +21,7 @@ import { errorText, withTimeout } from "./appUtils";
 import { formatBytes } from "./formatters";
 
 const UPDATE_AVAILABLE_EVENT = "codey-update-availability-changed";
+const UPDATE_PROMPT_EVENT = "codey-update-prompt";
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 30 * 60 * 1000;
 const UPDATE_CHECK_TIMEOUT_MS = 12_000;
 const DEFERRED_UPDATE_STORAGE_KEY = "codey.deferredUpdateVersion";
@@ -28,6 +29,7 @@ const DEFERRED_UPDATE_STORAGE_KEY = "codey.deferredUpdateVersion";
 declare global {
   interface Window {
     __codeyUpdateAvailability?: UpdateCheck | null;
+    __codeyPendingUpdatePrompt?: UpdateCheck | null;
   }
 }
 
@@ -79,13 +81,19 @@ function updatePromptKey(result: Pick<UpdateCheck, "latestVersion">): string {
 }
 
 function updateCheckText(result: UpdateCheck) {
-  const base = result.updateAvailable
+  return result.updateAvailable
     ? result.selectedAsset
       ? `发现 v${result.latestVersion} 更新（当前 v${result.currentVersion}）`
       : `发现 v${result.latestVersion} 更新，但当前系统暂无可安装包`
     : `当前已是最新版本 v${result.currentVersion}`;
-  const notes = result.releaseNotes?.trim();
-  return notes ? `${base}：${notes}` : base;
+}
+
+function releaseAnnouncement(result?: UpdateCheck | null) {
+  return {
+    releaseNotes: result?.releaseNotes ?? undefined,
+    releaseTitle: result?.releaseTitle ?? undefined,
+    releaseUrl: result?.releaseUrl ?? undefined,
+  };
 }
 
 function updateResultTone(result: UpdateCheck): InlineResult["tone"] {
@@ -126,11 +134,13 @@ export function useAppUpdates({
   const manualCheckVersion = useRef(0);
   const updateCheckInFlightRef = useRef<Promise<UpdateCheck> | null>(null);
   const policyRef = useRef(codeyUpdatePolicy);
-  const previousPolicyRef = useRef(codeyUpdatePolicy);
+  const previousPolicyRef = useRef<Config["codeyUpdatePolicy"] | null>(configLoaded ? codeyUpdatePolicy : null);
   policyRef.current = codeyUpdatePolicy;
   useEffect(() => {
-    if (previousPolicyRef.current === codeyUpdatePolicy) return;
+    if (!configLoaded) return;
+    const previousPolicy = previousPolicyRef.current;
     previousPolicyRef.current = codeyUpdatePolicy;
+    if (previousPolicy === null || previousPolicy === codeyUpdatePolicy) return;
     manualCheckVersion.current += 1;
     updateCheckInFlightRef.current = null;
     updateCheckRef.current = null;
@@ -138,8 +148,9 @@ export function useAppUpdates({
     setDownloadedUpdate(null);
     setUpdateResult({ tone: "idle", text: "" });
     publishUpdateAvailability(null);
-    setConfirmation(current => current && ["download-update", "install-update"].includes(current.action) ? null : current);
-  }, [codeyUpdatePolicy]);
+    window.__codeyPendingUpdatePrompt = null;
+    setConfirmation(current => current && ["download-update", "install-update", "view-update-notes"].includes(current.action) ? null : current);
+  }, [codeyUpdatePolicy, configLoaded]);
   const requestUpdateCheck = useCallback((forceRefresh = false, manual = false) => {
     if (policyRef.current === "off" && !manual) return Promise.reject(new Error("已关闭自动检查更新"));
     const current = updateCheckInFlightRef.current;
@@ -216,6 +227,25 @@ export function useAppUpdates({
       );
     };
   }, []);
+
+  useEffect(() => {
+    const showPendingUpdate = () => {
+      const result = window.__codeyPendingUpdatePrompt;
+      if (!result || !configLoaded || isBusy) return;
+      window.__codeyPendingUpdatePrompt = null;
+      if (manualCheckVersion.current > 0 || policyRef.current === "off" || !result.updateAvailable || !result.selectedAsset || !updateVersionAllowed(result, policyRef.current)) return;
+      updateCheckRef.current = result;
+      setUpdateCheck(result);
+      setUpdateResult({ tone: updateResultTone(result), text: updateCheckText(result) });
+      publishUpdateAvailability(result);
+      if (promptedVersionRef.current === updatePromptKey(result) || readDeferredVersion() === updatePromptKey(result)) return;
+      promptedVersionRef.current = updatePromptKey(result);
+      askDownloadUpdate(result, true);
+    };
+    showPendingUpdate();
+    window.addEventListener(UPDATE_PROMPT_EVENT, showPendingUpdate);
+    return () => window.removeEventListener(UPDATE_PROMPT_EVENT, showPendingUpdate);
+  }, [configLoaded, isBusy, codeyUpdatePolicy, setConfirmation]);
 
   useEffect(() => {
     if (embedded || !configLoaded || codeyUpdatePolicy === "off") return;
@@ -329,10 +359,19 @@ export function useAppUpdates({
           downloadedUpdate.size === result.selectedAsset.size
         ) {
           setDownloadedUpdate(downloadedUpdate);
-          askInstallDownloadedUpdate(downloadedUpdate);
+          askInstallDownloadedUpdate(downloadedUpdate, result);
         } else {
           askDownloadUpdate(result);
         }
+      } else if (result.releaseNotes?.trim()) {
+        setConfirmation({
+          action: "view-update-notes",
+          title: `Codey 更新公告 v${result.latestVersion}`,
+          description: text,
+          ...releaseAnnouncement(result),
+          confirmLabel: "关闭",
+          run: () => undefined,
+        });
       }
     } catch (error) {
       if (requestVersion !== manualCheckVersion.current) return;
@@ -344,10 +383,10 @@ export function useAppUpdates({
     }
   }
 
-  function askDownloadUpdate(check?: UpdateCheck | null) {
+  function askDownloadUpdate(check?: UpdateCheck | null, background = false) {
     const target = check ?? updateCheck;
     if (!target?.updateAvailable || !target.selectedAsset || !updateVersionAllowed(target, policyRef.current) || isBusy) return;
-    setConfirmation({
+    const confirmation: Confirmation = {
       action: "download-update",
       title: `发现 Codey 新版本 v${target.latestVersion}`,
       description: [
@@ -356,12 +395,13 @@ export function useAppUpdates({
       ]
         .filter(Boolean)
         .join("\n\n"),
-      releaseNotes: target.releaseNotes?.trim() || undefined,
+      ...releaseAnnouncement(target),
       confirmLabel: "立即更新",
       run: () => void downloadUpdate(target),
       // 用户已经在这次运行里明确推迟过这个版本，自动检查就不再反复弹窗。
       onDismiss: () => writeDeferredVersion(updatePromptKey(target)),
-    });
+    };
+    setConfirmation(background ? current => current ?? confirmation : confirmation);
   }
 
   async function downloadUpdate(checkOverride?: UpdateCheck | null) {
@@ -393,7 +433,7 @@ export function useAppUpdates({
       const text = `已下载 ${result.fileName}（${formatBytes(result.size)}），校验通过`;
       setUpdateResult({ tone: "success", text });
       setNotice({ tone: "success", text });
-      askInstallDownloadedUpdate(result);
+      askInstallDownloadedUpdate(result, target);
     } catch (error) {
       if (requestVersion !== manualCheckVersion.current) return;
       const text = errorText(error);
@@ -404,13 +444,16 @@ export function useAppUpdates({
     }
   }
 
-  function askInstallDownloadedUpdate(downloadOverride?: UpdateDownload | null) {
+  function askInstallDownloadedUpdate(downloadOverride?: UpdateDownload | null, checkOverride?: UpdateCheck | null) {
     const target = downloadOverride ?? downloadedUpdate;
     if (!target || !updateVersionAllowed(target, policyRef.current) || isBusy) return;
+    const check = checkOverride ?? updateCheck;
+    const announcement = check?.latestVersion === target.latestVersion && check.releaseId === target.releaseId ? check : null;
     setConfirmation({
       action: "install-update",
       title: "安装更新",
       description: `Codey 会先保存未保存的设置，再退出当前实例，安装 ${target.fileName}，然后尝试启动新版。`,
+      ...releaseAnnouncement(announcement),
       confirmLabel: "安装并重启",
       run: () => void installDownloadedUpdate(target),
       // 安装包已经下载好，"稍后"只影响自动提示，不影响用户从版本入口手动安装。

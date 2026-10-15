@@ -1591,6 +1591,47 @@ fn with_lazy_loaders(handler: BridgeHandler, websocket_url: Arc<str>) -> BridgeH
     })
 }
 
+pub(crate) async fn show_update_prompt(
+    websocket_url: &str,
+    check: &serde_json::Value,
+) -> Result<()> {
+    let loaded = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+        websocket_url,
+        &prepared_settings_overlay_load_script(),
+        false,
+        Duration::from_secs(10),
+    )
+    .await?;
+    if runtime_value(&loaded).and_then(serde_json::Value::as_str) != Some("") {
+        anyhow::bail!("更新公告界面未能加载");
+    }
+    let response = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
+        websocket_url,
+        &update_prompt_script(check),
+        false,
+        Duration::from_secs(5),
+    )
+    .await?;
+    if runtime_value(&response).and_then(serde_json::Value::as_bool) != Some(true) {
+        anyhow::bail!("更新公告界面未能打开");
+    }
+    Ok(())
+}
+
+fn update_prompt_script(check: &serde_json::Value) -> String {
+    format!(
+        r#"(() => {{
+  const overlay = window.__codeySettingsOverlay;
+  if (!overlay || overlay.__codeyLazyLoader || typeof overlay.open !== "function") return false;
+  overlay.open();
+  const update = {check};
+  window.__codeyPendingUpdatePrompt = update;
+  window.dispatchEvent(new CustomEvent("codey-update-prompt"));
+  return true;
+}})()"#
+    )
+}
+
 fn prepared_settings_overlay_load_script() -> Arc<str> {
     SETTINGS_OVERLAY_LOAD_SCRIPT
         .get_or_init(|| Arc::from(settings_overlay_load_script(SETTINGS_OVERLAY_SCRIPT)))

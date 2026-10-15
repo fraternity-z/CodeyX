@@ -425,7 +425,7 @@ fn gemini_terminal_validation_never_reports_truncation_or_errors_as_success() {
         json!({"candidates":[]}),
     ] {
         assert!(
-            response(&[value.clone()], "gemini-test", &bridge).is_err(),
+            response(std::slice::from_ref(&value), "gemini-test", &bridge).is_err(),
             "{value}"
         );
     }

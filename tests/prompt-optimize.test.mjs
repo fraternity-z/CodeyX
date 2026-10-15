@@ -679,16 +679,24 @@ test("mounts the optimize button for an enabled Codey route without a manual key
   assert.equal(env.snapshot().enabled, true);
 });
 
-test("keeps the original dark treatment at a 26px height", async () => {
+test("renders a transparent icon-only button with an accessible name and tooltip", async () => {
   const env = createEnvironment({ enabled: true, apiKeyConfigured: true });
   await flush();
 
   const button = env.getElementById("codey-prompt-optimize-button");
   const style = env.getElementById("codey-prompt-optimize-style");
-  assert.match(style.textContent, /height: 26px !important/);
-  assert.match(style.textContent, /background:\s*light-dark/);
-  assert.doesNotMatch(style.textContent, /--codey-ai-/);
-  assert.doesNotMatch(button.innerHTML, /codey-prompt-optimize-ai-gradient/);
+  const buttonStyle = style.textContent.split("#codey-prompt-optimize-button svg")[0];
+  assert.match(buttonStyle, /height: 26px !important/);
+  assert.match(buttonStyle, /background:\s*transparent/);
+  assert.match(buttonStyle, /border:\s*0/);
+  assert.match(buttonStyle, /box-shadow:\s*none/);
+  assert.match(buttonStyle, /:focus-visible/);
+  assert.doesNotMatch(buttonStyle, /light-dark/);
+  assert.match(button.innerHTML, /<svg data-codey-optimize-icon/);
+  assert.match(button.innerHTML, /<svg data-codey-optimize-spinner/);
+  assert.equal(button.innerHTML.replace(/<[^>]*>/g, "").trim(), "");
+  assert.equal(button.getAttribute("aria-label"), "请输入内容后优化");
+  assert.equal(button.title, "请输入内容后优化");
 });
 
 test("enables the optimize button only while the composer has content", async () => {
@@ -704,10 +712,13 @@ test("enables the optimize button only while the composer has content", async ()
   env.emitInput();
   assert.equal(button.disabled, false);
   assert.equal(button.getAttribute("aria-disabled"), "false");
+  assert.equal(button.getAttribute("aria-label"), "优化提示词");
+  assert.equal(button.title, "优化提示词");
 
   env.textarea.value = "";
   env.emitInput();
   assert.equal(button.disabled, true);
+  assert.equal(button.title, "请输入内容后优化");
 });
 
 test("does not mount the button when the feature is disabled", async () => {
@@ -1037,6 +1048,8 @@ test("shows a disabled loading state while optimization is pending", async () =>
   assert.equal(button.disabled, true);
   assert.equal(button.dataset.busy, "true");
   assert.equal(button.getAttribute("aria-busy"), "true");
+  assert.equal(button.getAttribute("aria-label"), "正在优化提示词");
+  assert.equal(button.title, "正在优化提示词");
   assert.equal(env.snapshot().buttonBusy, true);
 
   resolveOptimization({ optimized: "优化完成" });
@@ -1045,6 +1058,7 @@ test("shows a disabled loading state while optimization is pending", async () =>
   assert.equal(button.disabled, false);
   assert.equal(button.dataset.busy, "false");
   assert.equal(button.getAttribute("aria-busy"), "false");
+  assert.equal(button.title, "优化提示词");
   assert.equal(env.textarea.value, "优化完成");
 });
 

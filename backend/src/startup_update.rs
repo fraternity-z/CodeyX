@@ -62,6 +62,7 @@ impl StartupUpdateUi for NativeUpdateUi {
 trait StartupUpdateBackend: Send + Sync {
     async fn auto_check_enabled(&self) -> bool;
     async fn check(&self) -> Result<UpdateCandidate, String>;
+    async fn present_update(&self, candidate: &UpdateCandidate) -> bool;
     async fn download(&self, candidate: &UpdateCandidate) -> Result<UpdateDownload, String>;
     async fn install(&self, file_path: &str) -> Result<(), String>;
 }
@@ -78,6 +79,20 @@ impl StartupUpdateBackend for LiveBackend<'_> {
 
     async fn check(&self) -> Result<UpdateCandidate, String> {
         commands::check_for_update_candidate(self.state).await
+    }
+
+    async fn present_update(&self, candidate: &UpdateCandidate) -> bool {
+        let runtime = self.state.runtime.lock().await.clone();
+        let Some(runtime) = runtime else {
+            return false;
+        };
+        let result = tokio::time::timeout(Duration::from_secs(15), async {
+            let websocket_url = runtime.renderer_websocket_url().await;
+            crate::cdp::show_update_prompt(&websocket_url, &serde_json::json!(candidate.check))
+                .await
+        })
+        .await;
+        matches!(result, Ok(Ok(())))
     }
 
     async fn download(&self, candidate: &UpdateCandidate) -> Result<UpdateDownload, String> {
@@ -142,6 +157,13 @@ async fn run_with_mode(
         || !candidate.check.update_available
         || candidate.check.selected_asset.is_none()
     {
+        return StartupUpdateOutcome::Continue;
+    }
+
+    if matches!(mode, CheckMode::Background) && backend.present_update(&candidate).await {
+        return StartupUpdateOutcome::Continue;
+    }
+    if !backend.auto_check_enabled().await {
         return StartupUpdateOutcome::Continue;
     }
 
@@ -244,6 +266,8 @@ mod tests {
         checks: AtomicUsize,
         check_delay: Duration,
         check: Result<UpdateCandidate, String>,
+        client_ui_available: AtomicBool,
+        client_presentations: AtomicUsize,
         download: Result<UpdateDownload, String>,
         download_delay: Duration,
         downloads: AtomicUsize,
@@ -261,6 +285,11 @@ mod tests {
             self.checks.fetch_add(1, Ordering::Relaxed);
             tokio::time::sleep(self.check_delay).await;
             self.check.clone()
+        }
+
+        async fn present_update(&self, _candidate: &UpdateCandidate) -> bool {
+            self.client_presentations.fetch_add(1, Ordering::Relaxed);
+            self.client_ui_available.load(Ordering::Relaxed)
         }
 
         async fn download(&self, _candidate: &UpdateCandidate) -> Result<UpdateDownload, String> {
@@ -302,6 +331,8 @@ mod tests {
                 update_available,
                 selected_asset: installable.then(asset),
                 release_notes: None,
+                release_title: None,
+                release_url: None,
                 release_id: None,
                 prerelease: false,
             },
@@ -328,12 +359,46 @@ mod tests {
             checks: AtomicUsize::new(0),
             check_delay,
             check: Ok(candidate),
+            client_ui_available: AtomicBool::new(false),
+            client_presentations: AtomicUsize::new(0),
             download: Ok(download()),
             download_delay: Duration::ZERO,
             downloads: AtomicUsize::new(0),
             installs: AtomicUsize::new(0),
             install_error: None,
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn background_update_uses_the_client_announcement_without_native_installation() {
+        let backend = backend(Duration::ZERO, candidate(true, true));
+        backend.client_ui_available.store(true, Ordering::Relaxed);
+        let ui = FakeUi::default();
+        ui.confirm.store(true, Ordering::Relaxed);
+
+        assert_eq!(
+            run_with(&backend, &ui).await,
+            StartupUpdateOutcome::Continue
+        );
+        assert_eq!(backend.client_presentations.load(Ordering::Relaxed), 1);
+        assert_eq!(ui.confirmations.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.downloads.load(Ordering::Relaxed), 0);
+        assert_eq!(backend.installs.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn failed_launch_keeps_the_native_emergency_update_without_a_renderer() {
+        let backend = backend(Duration::ZERO, candidate(true, true));
+        backend.client_ui_available.store(true, Ordering::Relaxed);
+        let ui = FakeUi::default();
+
+        assert_eq!(
+            run_with_mode(&backend, &ui, CheckMode::AfterLaunchFailure).await,
+            StartupUpdateOutcome::Continue
+        );
+        assert_eq!(backend.client_presentations.load(Ordering::Relaxed), 0);
+        assert_eq!(ui.confirmations.load(Ordering::Relaxed), 1);
+        assert_eq!(backend.downloads.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test(start_paused = true)]

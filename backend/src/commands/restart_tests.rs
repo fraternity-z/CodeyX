@@ -1115,6 +1115,8 @@ async fn runtime_status_exposes_cached_available_update() {
         update_available: true,
         selected_asset: None,
         release_notes: None,
+        release_title: None,
+        release_url: None,
         release_id: None,
         prerelease: false,
     });

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import { join } from "node:path";
 import test from "node:test";
+import { releaseIdentity } from "../scripts/release-policy.mjs";
+import { parseReleaseNotes } from "../scripts/release-notes.mjs";
 
 const workflow = fs.readFileSync(
   new URL("../.github/workflows/build-desktop.yml", import.meta.url),
@@ -106,6 +109,63 @@ test("normal Releases builds do not require the upstream broadcast service", () 
   assert.doesNotMatch(publish, /CLOUDFLARE|release-admin|R2/);
   assert.match(publish, /softprops\/action-gh-release@v2/);
   assert.match(publish, /fail_on_unmatched_files: true/);
+});
+
+test("tag releases validate curated announcements before building and only publish drafts", () => {
+  const prepare = workflowJob("prepare", "notes");
+  const publish = workflowJob("publish", "managed-publish");
+  assert.match(prepare, /node scripts\/release-notes\.mjs/);
+  assert.match(publish, /readReleaseNotes\(identity\.version\)/);
+  assert.match(publish, /body_path: \$\{\{ steps\.release-metadata\.outputs\.notes_path \}\}/);
+  assert.match(publish, /draft: true/);
+  assert.match(publish, /generate_release_notes: false/);
+  assert.match(publish, /release\.draft/);
+});
+
+for (const scenario of [
+  { status: 404, draft: false, allowed: true },
+  { status: 200, draft: true, allowed: true },
+  { status: 200, draft: false, allowed: false },
+  { status: 401, draft: false, allowed: false },
+  { status: 500, draft: false, allowed: false },
+]) {
+  test(`release metadata never rewrites public releases or hides API failures: ${JSON.stringify(scenario)}`, async () => {
+    const publish = workflowJob("publish", "managed-publish");
+    const script = publish.match(/node --input-type=module <<'NODE'\r?\n([\s\S]+?)^\s+NODE$/m)?.[1]
+      .replace(/^          /gm, "").replace(/^import .+\r?\n/gm, "");
+    assert.ok(script);
+    const AsyncFunction = Object.getPrototypeOf(async () => {}).constructor;
+    const execute = new AsyncFunction("appendFileSync", "writeFileSync", "join", "releaseIdentity", "readReleaseNotes", "fetch", "process", script);
+    const notes = parseReleaseNotes("# CodeyX v1.2.6-beta.1 · 公告排版\n\n## 本次亮点\n\n完整正文。\n", "1.2.6-beta.1");
+    const writes = [];
+    const record = (path, content) => writes.push({ path, content });
+    const run = execute(record, record, join, releaseIdentity, version => {
+      assert.equal(version, "1.2.6-beta.1");
+      return notes;
+    }, async (url, options) => {
+      assert.equal(url, "https://api.github.com/repos/fraternity-z/CodeyX/releases/tags/v1.2.6-beta.1");
+      assert.equal(options.headers.Authorization, "Bearer unit-test-token");
+      return { status: scenario.status, ok: scenario.status === 200, json: async () => ({ draft: scenario.draft }) };
+    }, { env: { GITHUB_REF_NAME: "v1.2.6-beta.1", GITHUB_REPOSITORY: "fraternity-z/CodeyX", GH_TOKEN: "unit-test-token", RUNNER_TEMP: "release-test", GITHUB_OUTPUT: "release-output" } });
+    if (!scenario.allowed) {
+      await assert.rejects(run, /already public|HTTP/);
+      assert.deepEqual(writes, []);
+      return;
+    }
+    await run;
+    assert.deepEqual(writes[0], { path: join("release-test", "codeyx-release-notes.md"), content: notes.body });
+    assert.equal(writes[1].path, "release-output");
+    assert.match(writes[1].content, /^name=CodeyX v1\.2\.6-beta\.1 · 公告排版\n/);
+    assert.match(writes[1].content, /\nprerelease=true\ntag=v1\.2\.6-beta\.1\n$/);
+  });
+}
+
+test("local releases require an announcement before changing versions even when checks are skipped", () => {
+  const source = fs.readFileSync(new URL("../scripts/release.mjs", import.meta.url), "utf8");
+  const main = source.slice(source.indexOf("function main()"));
+  const notes = main.indexOf("readReleaseNotes(options.version)");
+  assert.ok(notes >= 0 && notes < main.indexOf("updatePackageJson(options.version)"));
+  assert.ok(notes < main.indexOf("if (!options.skipChecks)"));
 });
 
 test("local releases run the same locked Rust checks", () => {

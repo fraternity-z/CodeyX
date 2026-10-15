@@ -8,12 +8,13 @@ const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
 
-function harness(enabled, installReport = null) {
+function harness(enabled, installReport = null, initialOptions = {}) {
   const hooks = [], effects = [], timers = new Map(), requests = [];
   let cursor = 0, timerId = 0, result;
   const options = {
     embedded: !enabled, configLoaded: true, codeyUpdatePolicy: "stable",
     isBusy: false, setBusy() {}, setNotice() {}, setConfirmation() {}, beforeInstall: async () => {},
+    ...initialOptions,
   };
   const react = {
     useState(initial) {
@@ -253,7 +254,7 @@ test("detecting an update with an asset prompts the confirmation dialog", async 
   assert.match(confirmation.title, /1\.2\.0/);
 });
 
-test("发布更新日志会同时显示在检查结果和下载确认中", async () => {
+test("完整发布公告在弹窗显示，状态提示不再塞入 Markdown 源码", async () => {
   const h = harness(false);
   let confirmation = null;
   h.options.setConfirmation = value => { confirmation = value; };
@@ -270,8 +271,121 @@ test("发布更新日志会同时显示在检查结果和下载确认中", async
   assert.doesNotMatch(confirmation.description, /修复启动稳定性/);
   assert.match(confirmation.description, /当前版本/);
   assert.match(confirmation.description, /是否立即下载更新/);
-  assert.match(h.render().updateResult.text, /修复启动稳定性/);
+  assert.doesNotMatch(h.render().updateResult.text, /修复启动稳定性/);
 });
+
+test("下载和安装确认使用同一份完整公告与发布页信息", async () => {
+  const h = harness(false);
+  let confirmation;
+  h.options.setConfirmation = value => { confirmation = value; };
+  const asset = { fileName: "setup.exe", size: 100, url: "https://example.test/setup.exe", sha256: "a".repeat(64) };
+  const update = { ...available, releaseId: "42", selectedAsset: asset, releaseNotes: "    保留代码缩进\n\n## 完整公告\n\n**最后一段**\n", releaseTitle: "CodeyX v1.2.0 · 更新公告", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.2.0" };
+  const checking = h.render().checkForUpdates();
+  h.requests[0].resolve(update);
+  await checking;
+  for (const key of ["releaseNotes", "releaseTitle", "releaseUrl"]) assert.equal(confirmation[key], update[key]);
+  confirmation.run();
+  h.requests[1].resolve({ ...asset, asset, latestVersion: "1.2.0", releaseId: "42", filePath: "/updates/setup.exe" });
+  await settle();
+  assert.equal(confirmation.action, "install-update");
+  for (const key of ["releaseNotes", "releaseTitle", "releaseUrl"]) assert.equal(confirmation[key], update[key]);
+});
+
+for (const updateAvailable of [true, false]) {
+  test(`没有安装包或无需升级时仍能阅读完整公告：${updateAvailable}`, async () => {
+    const h = harness(false);
+    let confirmation;
+    h.options.setConfirmation = value => { confirmation = value; };
+    const update = { ...available, updateAvailable, releaseNotes: "## 本次亮点\n\n完整说明" };
+    const checking = h.render().checkForUpdates();
+    h.requests[0].resolve(update);
+    await checking;
+    assert.equal(confirmation.action, "view-update-notes");
+    assert.equal(confirmation.releaseNotes, update.releaseNotes);
+    confirmation.run();
+    assert.equal(h.requests.length, 1);
+  });
+}
+
+test("原生后台发现的更新等待配置加载后交给图文弹窗，不重复查询或提示", async () => {
+  const h = harness(false);
+  const confirmations = [];
+  h.options.setConfirmation = value => { confirmations.push(typeof value === "function" ? value(null) : value); };
+  h.options.configLoaded = false;
+  h.render();
+  const update = { ...available, selectedAsset: { fileName: "setup.exe" }, releaseNotes: "## 完整发布公告\n\n正文" };
+  h.window.__codeyPendingUpdatePrompt = update;
+  h.window.dispatchEvent(new Event("codey-update-prompt"));
+  assert.equal(confirmations.length, 0);
+  h.options.configLoaded = true;
+  h.render();
+  assert.equal(confirmations.length, 1);
+  assert.equal(confirmations[0].releaseNotes, update.releaseNotes);
+  assert.equal(h.window.__codeyPendingUpdatePrompt, null);
+  assert.equal(h.requests.length, 0);
+  h.window.__codeyPendingUpdatePrompt = update;
+  h.window.dispatchEvent(new Event("codey-update-prompt"));
+  assert.equal(confirmations.length, 1);
+});
+
+test("首次加载实验版策略不会丢失启动时已发现的公告", () => {
+  const h = harness(false, null, { configLoaded: false });
+  let confirmation = null;
+  h.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
+  h.render();
+  const update = { ...available, latestVersion: "1.2.0-beta.1", prerelease: true, selectedAsset: { fileName: "beta.exe" }, releaseNotes: "## 实验版公告\n\n完整正文" };
+  h.window.__codeyPendingUpdatePrompt = update;
+  h.window.dispatchEvent(new Event("codey-update-prompt"));
+  assert.equal(confirmation, null);
+  h.options.codeyUpdatePolicy = "experimental";
+  h.options.configLoaded = true;
+  h.render();
+  assert.equal(confirmation?.action, "download-update");
+  assert.equal(confirmation?.releaseNotes, update.releaseNotes);
+  assert.equal(h.window.__codeyPendingUpdatePrompt, null);
+});
+
+test("后台公告不会覆盖正在等待用户确认的其他操作", () => {
+  const h = harness(false);
+  const pending = { action: "delete-route", title: "确认删除线路" };
+  let confirmation = pending;
+  h.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
+  h.render();
+  h.window.__codeyPendingUpdatePrompt = { ...available, selectedAsset: { fileName: "setup.exe" }, releaseNotes: "## 更新公告" };
+  h.window.dispatchEvent(new Event("codey-update-prompt"));
+  assert.equal(confirmation, pending);
+  assert.equal(h.render().updateCheck.latestVersion, available.latestVersion);
+});
+
+test("用户手动检查后，迟到的后台公告不能替换新结果", async () => {
+  const h = harness(false);
+  let confirmation = null;
+  h.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
+  const current = { ...available, latestVersion: "1.3.0", selectedAsset: { fileName: "new.exe" } };
+  const checking = h.render().checkForUpdates();
+  h.requests[0].resolve(current);
+  await checking;
+  const manualConfirmation = confirmation;
+  h.window.__codeyPendingUpdatePrompt = { ...available, selectedAsset: { fileName: "old.exe" } };
+  h.window.dispatchEvent(new Event("codey-update-prompt"));
+  assert.equal(h.render().updateCheck, current);
+  assert.equal(h.window.__codeyUpdateAvailability, current);
+  assert.equal(confirmation, manualConfirmation);
+});
+
+for (const policy of ["off", "stable"]) {
+  test(`后台更新公告同样遵守更新策略：${policy}`, () => {
+    const h = harness(false);
+    let confirmation = null;
+    h.options.codeyUpdatePolicy = policy;
+    h.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
+    h.render();
+    h.window.__codeyPendingUpdatePrompt = { ...available, prerelease: true, selectedAsset: { fileName: "setup.exe" } };
+    h.window.dispatchEvent(new Event("codey-update-prompt"));
+    assert.equal(confirmation, null);
+    assert.equal(h.requests.length, 0);
+  });
+}
 
 test("发现更新后定时器链仍在，可用更新被清空后继续自动检查", async () => {
   const h = harness(true);

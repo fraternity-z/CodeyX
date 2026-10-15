@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import vm from "node:vm";
 
 const root = new URL("../", import.meta.url);
 
@@ -24,6 +25,25 @@ test("automatic update checks start after Codex launches and share runtime shutd
     library,
     /StartupUpdateOutcome::InstallScheduled \{[\s\S]*?return ShutdownReason::InstallUpdate;/,
   );
+});
+
+test("background updates hand the exact Release to the rendered client dialog without starting installation", async () => {
+  const source = await readFile(new URL("backend/src/cdp.rs", root), "utf8");
+  const match = source.match(/fn update_prompt_script\(check: &serde_json::Value\) -> String \{\s*format!\(\s*r#"(.*?)"#/s);
+  assert.ok(match, "the update prompt script must be independently testable");
+  const update = { latestVersion: "1.2.6", releaseNotes: "## 完整公告\n\n</script><script>throw new Error('unsafe')</script>\n\n最后一段", releaseUrl: "https://github.com/fraternity-z/CodeyX/releases/tag/v1.2.6" };
+  const script = match[1].replaceAll("{{", "{").replaceAll("}}", "}").replace("{check}", JSON.stringify(update));
+  let opened = 0;
+  const events = [];
+  const currentUpdate = { latestVersion: "1.3.0" };
+  const window = { __codeyUpdateAvailability: currentUpdate, __codeySettingsOverlay: { open() { opened++; } }, dispatchEvent(event) { events.push(event.type); } };
+  assert.equal(vm.runInNewContext(script, { window, CustomEvent }), true);
+  assert.equal(opened, 1);
+  assert.equal(window.__codeyUpdateAvailability, currentUpdate, "the client must accept the pending update before replacing a newer manual result");
+  assert.equal(JSON.stringify(window.__codeyPendingUpdatePrompt), JSON.stringify(update));
+  assert.ok(events.includes("codey-update-prompt"));
+  assert.doesNotMatch(script, /download_update|install_downloaded_update/);
+  assert.equal(vm.runInNewContext(script, { window: {}, CustomEvent }), false);
 });
 
 test("Windows startup update UI uses a dedicated message loop and custom task-dialog buttons", async () => {

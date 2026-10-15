@@ -29,3 +29,11 @@
 - `AppState::default()` 会读取本机配置；依赖特定配置的测试应显式初始化 `config`，不能只替换 `store`。
 - 运行依赖本地 HTTP mock 的 Rust 测试时，在测试进程中设置 `NO_PROXY=127.0.0.1,localhost,::1`，避免继承的代理改写回环请求；不要改动系统代理。
 - 验证 Codex 桌面兼容性时，以运行中 `runtime_status` 返回的 `codexAppVersion` 为准；Windows 卸载登记的 `DisplayVersion` 可能滞后，不能据此判断实际运行版本。
+- 更新公告回归运行 `node --test tests/release-notes*.test.mjs tests/app-updates.test.mjs tests/native-update-ui.test.mjs tests/release-quality-gates.test.mjs`；后端运行 `cargo test -p codey --lib --locked update`，保留上述回环代理设置。
+- 更新弹窗浏览器验证先运行 `pnpm run vite:dev`，打开 `/codey/tests/ui-browser.html?view=update&state=markdown`，用 Playwright CLI 的 `run-code --filename tests/release-notes-browser.playwright.js` 检查明暗主题、Shadow DOM、窄屏、滚动及键盘交互。
+- Windows 调试程序占用构建产物时，将 `CARGO_TARGET_DIR` 和 `CARGO_BUILD_BUILD_DIR` 同时设为独立验证目录，避免替换运行中的程序或复用被占用的中间产物；不要强制结束用户的客户端。
+
+## 发布公告
+
+- 每个版本使用 `releases/v<version>.md`，按 `releases/TEMPLATE.md` 编写；首行 `# CodeyX v<version> · 版本主题` 用作 Release 标题，其余内容为正文。只描述已经核实的版本差异，替换占位符并删除无内容的分类，图片优先使用固定版本的 HTTPS 地址。
+- 发布前运行 `node scripts/release-notes.mjs <version>` 校验公告；普通标签工作流只生成草稿，审核公告和安装包后再公开，不自动覆盖已发布版本。

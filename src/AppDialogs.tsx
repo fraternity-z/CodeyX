@@ -20,6 +20,7 @@ import type {
   OfficialModelState,
 } from "./App.types";
 import { ModelSettingsFields } from "./components/ModelSettingsFields";
+import { ReleaseNotes, githubReleaseUrl } from "./components/ReleaseNotes";
 import {
   filterModelOptions,
   MODEL_PICKER_PAGE_SIZE,
@@ -502,30 +503,17 @@ function ConfirmationDialogComponent({
     confirmation?.action === "delete-notification-channel" ||
     confirmation?.action === "delete-route" ||
     confirmation?.action === "delete-official-account";
-  const isUpdate =
+  const notesOnly = confirmation?.action === "view-update-notes";
+  const isUpdate = notesOnly ||
     confirmation?.action === "download-update" ||
     confirmation?.action === "install-update";
-  const noteGroups = useMemo(() => {
-    const groups: Array<{ title: string; lines: string[] }> = [];
-    if (!isUpdate) return groups;
-    let group = { title: "", lines: [] as string[] };
-    groups.push(group);
-    for (const line of confirmation?.releaseNotes?.split(/\r?\n/).map((line) => line.trim()).filter(Boolean) ?? []) {
-      const heading = /^\*\*(新增功能|体验优化|问题修复)\*\*$/.exec(line);
-      if (heading) {
-        group = { title: heading[1], lines: [] };
-        groups.push(group);
-      } else {
-        group.lines.push(line.replace(/^[-*•]\s+/, ""));
-      }
-    }
-    return groups.filter((group) => group.lines.length > 0);
-  }, [isUpdate, confirmation?.releaseNotes]);
+  const releaseNotes = isUpdate && confirmation?.releaseNotes?.trim() ? confirmation.releaseNotes : null;
+  const releaseUrl = githubReleaseUrl(confirmation?.releaseUrl);
   return (
     <Dialog open={Boolean(confirmation)} onOpenChange={(open) => !open && onClose()}>
       <DialogContent
         className={isUpdate
-          ? "confirmation-dialog update-confirmation-dialog sm:w-[560px] max-h-[calc(100dvh-32px)]"
+          ? "confirmation-dialog update-confirmation-dialog sm:w-[760px] max-h-[calc(100dvh-32px)]"
           : "confirmation-dialog"}
         container={container}
       >
@@ -535,36 +523,21 @@ function ConfirmationDialogComponent({
             {confirmation?.description}
           </DialogDescription>
         </DialogHeader>
-        {noteGroups.length > 0 && (
-          <section className="mt-4 flex min-h-0 flex-col gap-2">
-            <h3 className="m-0 shrink-0 text-xs font-medium text-foreground">更新日志</h3>
-            <div
-              className="update-release-notes min-h-0 max-h-[min(360px,45dvh)] overflow-y-auto overscroll-contain rounded-lg border border-default p-4 text-sm leading-7 text-muted [overflow-wrap:anywhere]"
-              role="region"
-              aria-label="更新日志内容"
-              tabIndex={0}
-            >
-              <div className="space-y-3">
-                {noteGroups.map((group, groupIndex) => (
-                  <div key={groupIndex}>
-                    {group.title && <h4 className="m-0 mb-1 text-xs font-semibold text-foreground">{group.title}</h4>}
-                    <ul className="m-0 list-disc space-y-2 pl-4">
-                      {group.lines.map((line, index) => (
-                        <li key={index} className="pl-1 whitespace-pre-wrap">
-                          {line}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ))}
-              </div>
+        {releaseNotes && (
+          <section className="update-announcement">
+            <div className="update-announcement-heading">
+              <h3>更新公告</h3>
+              {releaseUrl && <a href={releaseUrl} target="_blank" rel="noopener noreferrer">在 GitHub 查看</a>}
+            </div>
+            <div className="update-release-notes" role="region" aria-label="更新日志内容" tabIndex={0}>
+              <ReleaseNotes markdown={releaseNotes} title={confirmation?.releaseTitle} releaseUrl={releaseUrl} />
             </div>
           </section>
         )}
         <DialogFooter className={isUpdate ? "shrink-0" : undefined}>
-          <Button variant="outline" onClick={onClose}>
+          {!notesOnly && <Button variant="outline" onClick={onClose}>
             {isUpdate ? "稍后" : "取消"}
-          </Button>
+          </Button>}
           <Button
             variant={
               destructive
@@ -581,7 +554,7 @@ function ConfirmationDialogComponent({
               <Trash2 aria-hidden="true" />
             ) : confirmation?.action === "restart" ? (
               <RefreshCw aria-hidden="true" />
-            ) : isUpdate ? (
+            ) : isUpdate && !notesOnly ? (
               <CircleArrowUp aria-hidden="true" />
             ) : (
               <Check aria-hidden="true" />

@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { releaseIdentity } from "./release-policy.mjs";
+import { readReleaseNotes } from "./release-notes.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -220,6 +221,7 @@ function main() {
   assertGitRepository();
   const branch = assertBranch();
   assertCleanWorkingTree(options.includeExistingChanges);
+  try { readReleaseNotes(options.version); } catch (error) { fail(error.message); }
   assertTagDoesNotExist(options.tag, options.remote, options.push);
 
   console.log(`Preparing ${options.tag} from ${branch}`);
@@ -247,7 +249,7 @@ function main() {
   if (options.push) {
     run("git", ["push", options.remote, branch]);
     run("git", ["push", options.remote, options.tag]);
-    console.log(`Published ${options.tag}. GitHub Actions will build and attach the installers to this repository's GitHub Release.`);
+    console.log(`Pushed ${options.tag}. GitHub Actions will attach the announcement and installers to a draft Release. Review it on GitHub before publishing.`);
   } else {
     console.log(`Created local tag ${options.tag}. Push with: git push ${options.remote} ${branch} && git push ${options.remote} ${options.tag}`);
   }
