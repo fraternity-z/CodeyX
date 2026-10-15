@@ -1,8 +1,8 @@
-async (page) => {
+async (page, { baseURL = "http://127.0.0.1:1421" } = {}) => {
   const errors = [];
   page.on("pageerror", error => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto("http://127.0.0.1:1421/codey/tests/ui-browser.html?platform=windows");
+  await page.goto(`${baseURL}/codey/tests/ui-browser.html?platform=windows`);
   await page.getByRole("button", { name: "内置工具", exact: true }).click();
   const region = page.getByRole("region", { name: "内置工具", exact: true }).first();
   await region.getByRole("button", { name: "刷新", exact: true }).waitFor();

@@ -193,3 +193,89 @@ test("保存提示按 applyStatus 区分，重启提示不重复后端消息", a
   );
   assert.equal(controller.noticeSeq, 2);
 });
+
+test("版本冲突保留当前清单，显式刷新后使用新版本重新提交", async () => {
+  const h = createHarness();
+  h.render();
+  h.reads[0].resolve({ revision: "r1", mcps: [{ id: "demo", enabled: false }] });
+  await settle();
+  const before = h.render().inventory;
+
+  const saving = h.render().mutate({ action: "set_mcp_enabled", id: "demo", enabled: true });
+  assert.equal(h.writes[0].payload.revision, "r1");
+  h.writes[0].reject(new Error("配置已变化，请刷新后重新提交"));
+  assert.equal(await saving, "failed");
+  assert.deepEqual(h.render().inventory, before);
+  assert.equal(h.render().busy, false);
+  assert.match(h.render().error, /配置已变化/);
+  assert.equal(h.writes.length, 1, "冲突不能自动重放写入");
+
+  const refreshing = h.render().refresh();
+  h.reads[1].resolve({ revision: "r2", mcps: [{ id: "demo", enabled: false }] });
+  await refreshing;
+  const retrying = h.render().mutate({ action: "set_mcp_enabled", id: "demo", enabled: true });
+  assert.deepEqual(h.writes[1].payload.scope, { kind: "user" });
+  assert.equal(h.writes[1].payload.revision, "r2");
+  h.writes[1].resolve({ inventory: { revision: "r3", mcps: [{ id: "demo", enabled: true }] }, message: "已保存" });
+  assert.equal(await retrying, "ok");
+  assert.equal(h.render().inventory.mcps[0].enabled, true);
+  assert.equal(h.render().error, "");
+});
+
+test("写入结果不确定时刷新失败仍阻止提交，刷新确认后恢复写入", async () => {
+  const h = createHarness();
+  h.render();
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  const saving = h.render().mutate({ action: "save_mcp", id: "demo" });
+  h.writes[0].reject(new Error("操作等待超时，后台可能仍在执行，结果尚不确定。"));
+  assert.equal(await saving, "failed");
+
+  const failedRefresh = h.render().refresh();
+  h.reads[1].reject(new Error("连接暂时不可用"));
+  assert.equal(await failedRefresh, null);
+  assert.equal(h.render().uncertain, true);
+  assert.equal(h.render().loading, false);
+  assert.equal(await h.render().mutate({ action: "save_mcp", id: "demo" }), "failed");
+  assert.equal(h.writes.length, 1);
+
+  const confirmedRefresh = h.render().refresh();
+  h.reads[2].resolve({ revision: "r2" });
+  await confirmedRefresh;
+  assert.equal(h.render().uncertain, false);
+  const retrying = h.render().mutate({ action: "save_mcp", id: "demo" });
+  assert.equal(h.writes[1].payload.revision, "r2");
+  h.writes[1].resolve({ inventory: { revision: "r3" }, message: "已保存" });
+  assert.equal(await retrying, "ok");
+});
+
+test("迟到的旧刷新不能解除写入不确定状态或覆盖最新清单", async () => {
+  const h = createHarness();
+  h.render();
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  const saving = h.render().mutate({ action: "save_mcp" });
+  h.writes[0].reject(new Error("写入结果尚不确定"));
+  await saving;
+
+  const oldRefresh = h.render().refresh();
+  const currentRefresh = h.render().refresh();
+  h.reads[2].reject(new Error("最新刷新失败"));
+  await currentRefresh;
+  h.reads[1].resolve({ revision: "old" });
+  assert.equal(await oldRefresh, null);
+  assert.equal(h.render().inventory.revision, "r1");
+  assert.equal(h.render().uncertain, true);
+  assert.equal(h.render().error, "最新刷新失败");
+
+  const staleRefresh = h.render().refresh();
+  const confirmedRefresh = h.render().refresh();
+  h.reads[4].resolve({ revision: "r2" });
+  await confirmedRefresh;
+  h.reads[3].reject(new Error("过期的网络错误"));
+  assert.equal(await staleRefresh, null);
+  assert.equal(h.render().inventory.revision, "r2");
+  assert.equal(h.render().uncertain, false);
+  assert.equal(h.render().error, "");
+  assert.equal(h.writes.length, 1, "刷新只能读取，不得偷偷重试超时写入");
+});

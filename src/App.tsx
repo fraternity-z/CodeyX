@@ -43,7 +43,7 @@ import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
 import { RemoteControlPanel } from "./RemoteControlPanel";
 import { useModelSelection } from "./useModelSelection";
-import { useRuntimeStatus } from "./useRuntimeStatus";
+import { SETTINGS_OPENED_EVENT, useRuntimeStatus } from "./useRuntimeStatus";
 import { useAppUpdates } from "./useAppUpdates";
 import {
   NoticeLoadingText,
@@ -324,7 +324,12 @@ export function App({
   useEffect(() => {
     const refresh = () => refreshPluginRoutesRef.current();
     window.addEventListener("codey:plugin-routes-changed", refresh);
-    return () => window.removeEventListener("codey:plugin-routes-changed", refresh);
+    // 浮层关闭后 App 仍挂载；重新打开时通过草稿合并读取最新配置和版本。
+    window.addEventListener(SETTINGS_OPENED_EVENT, refresh);
+    return () => {
+      window.removeEventListener("codey:plugin-routes-changed", refresh);
+      window.removeEventListener(SETTINGS_OPENED_EVENT, refresh);
+    };
   }, []);
 
   async function load() {

@@ -3,7 +3,7 @@ name: Quality checks
 on:
   push:
     branches:
-      - master
+      - main
   pull_request:
 
 permissions:
@@ -19,8 +19,49 @@ env:
   # .cargo/config.toml redirects intermediate artifacts to ~/.cargo/build,
   # which rust-cache does not cache; keep them under target/ in CI.
   CARGO_BUILD_BUILD_DIR: target
+  NO_PROXY: 127.0.0.1,localhost,::1
 
 jobs:
+  browser:
+    name: Browser behavior
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout Codey
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.5.2"
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser behavior tests
+        run: pnpm run test:browser
+
+      - name: Upload browser failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-failure-diagnostics
+          path: output/playwright/
+          if-no-files-found: ignore
+          retention-days: 7
+
   quality:
     name: TypeScript, JavaScript, and Rust
     runs-on: ubuntu-latest

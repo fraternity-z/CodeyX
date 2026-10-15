@@ -32,6 +32,7 @@
 - 运行依赖本地 HTTP mock 的 Rust 测试时，在测试进程中设置 `NO_PROXY=127.0.0.1,localhost,::1`，避免继承的代理改写回环请求；不要改动系统代理。
 - 验证 Codex 桌面兼容性时，以运行中 `runtime_status` 返回的 `codexAppVersion` 为准；Windows 卸载登记的 `DisplayVersion` 可能滞后，不能据此判断实际运行版本。
 - 更新公告回归运行 `node --test tests/release-notes*.test.mjs tests/app-updates.test.mjs tests/native-update-ui.test.mjs tests/release-quality-gates.test.mjs`；后端运行 `cargo test -p codey --lib --locked update`，保留上述回环代理设置。
+- 浏览器自动回归先运行 `pnpm exec playwright install chromium`，再运行 `pnpm run test:browser`；测试自动启动独立 Vite 服务并使用模拟后端，失败截图、trace 和报告写入 `output/playwright/`。
 - 更新弹窗浏览器验证先运行 `pnpm run vite:dev`，打开 `/codey/tests/ui-browser.html?view=update&state=markdown`，用 Playwright CLI 的 `run-code --filename tests/release-notes-browser.playwright.js` 检查明暗主题、Shadow DOM、窄屏、滚动及键盘交互。
 - Windows 调试程序占用构建产物时，将 `CARGO_TARGET_DIR` 和 `CARGO_BUILD_BUILD_DIR` 同时设为独立验证目录，避免替换运行中的程序或复用被占用的中间产物；不要强制结束用户的客户端。
 
