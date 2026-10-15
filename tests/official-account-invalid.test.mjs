@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const panel = await readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8");
+const panel = await readFile(new URL("../src/features/official-accounts/OfficialAccountsPanel.tsx", import.meta.url), "utf8");
 const styles = await readFile(new URL("../src/styles.models.css", import.meta.url), "utf8");
 const types = await readFile(new URL("../src/App.types.ts", import.meta.url), "utf8");
 const mockApi = await readFile(new URL("../src/dev/mockApi.ts", import.meta.url), "utf8");
@@ -20,7 +20,7 @@ test("失效账号卡片使用红色背景并显示失效标识", () => {
   assert.match(styles, /\.official-account-item\.is-invalid \{[\s\S]*?background: rgba\(255, 59, 48/);
   assert.match(panel, /account\.invalid \? " is-invalid" : ""/);
   assert.match(panel, /<Badge variant="destructive" title=\{account\.invalidReason\}>/);
-  assert.match(panel, /账号已失效/);
+  assert.match(panel, /账号凭据已失效/);
 });
 
 test("仅有效的非默认账号卡片提供切换交互，后端也拒绝失效账号切换", () => {

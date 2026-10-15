@@ -1,2 +1,2 @@
-export { useOfficialAccountUsageController } from "./useOfficialAccountUsageController";
-export type { AccountUsageSnapshot } from "./types";
+export { OfficialAccountsPanel } from "./OfficialAccountsPanel";
+export type { OfficialAccountsPanelProps } from "./OfficialAccountsPanel";

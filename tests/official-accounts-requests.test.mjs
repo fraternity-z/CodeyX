@@ -6,7 +6,8 @@ import { deferred } from "./helpers/controller-harness.mjs";
 
 const source = {
   helper: await readFile(new URL("../src/officialAccountsRequests.ts", import.meta.url), "utf8"),
-  panel: await readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8"),
+  controller: await readFile(new URL("../src/features/official-accounts/useOfficialAccountsController.ts", import.meta.url), "utf8"),
+  requests: await readFile(new URL("../src/features/official-accounts/requests.ts", import.meta.url), "utf8"),
   models: await readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8"),
   logs: await readFile(new URL("../src/features/request-logs/requests.ts", import.meta.url), "utf8"),
   app: await readFile(new URL("../src/features/routes/useRoutesController.ts", import.meta.url), "utf8"),
@@ -20,8 +21,10 @@ test("官方账号列表共用短缓存，变更结果回写缓存", () => {
 });
 
 test("控制台各入口走共享读取，不再各自直接 invoke 列表", () => {
-  assert.match(source.panel, /listOfficialAccounts\(\{ force \}\)/);
-  assert.match(source.panel, /rememberOfficialAccounts\(result\)/);
+  assert.match(source.requests, /list: listOfficialAccounts/);
+  assert.match(source.requests, /remember: rememberOfficialAccounts/);
+  assert.match(source.controller, /officialAccountsRequests\.list\(\{ force \}\)/);
+  assert.match(source.controller, /officialAccountsRequests\.remember\(result\)/);
   assert.match(source.models, /await listOfficialAccounts\(\)/);
   assert.match(source.logs, /accounts: listOfficialAccounts/);
   assert.match(source.app, /rememberOfficialAccounts\(result\)/);

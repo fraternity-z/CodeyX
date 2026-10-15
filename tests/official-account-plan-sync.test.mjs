@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const panel = await readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8");
+const panel = await readFile(new URL("../src/features/official-accounts/OfficialAccountsPanel.tsx", import.meta.url), "utf8");
 const store = await readFile(new URL("../backend/src/official_accounts.rs", import.meta.url), "utf8");
 const commands = await readFile(new URL("../backend/src/commands.rs", import.meta.url), "utf8");
 

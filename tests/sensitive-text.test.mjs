@@ -8,7 +8,7 @@ const root = new URL("../", import.meta.url);
 const [sensitiveText, modelSectionSource, panelSource] = await Promise.all([
   loadTypeScriptModule(new URL("src/sensitiveText.ts", root)),
   readSource("src/ModelSection.tsx"),
-  readSource("src/OfficialAccountsPanel.tsx"),
+  readSource("src/features/official-accounts/OfficialAccountsPanel.tsx"),
 ]);
 
 test("url masking hides the host and keeps the scheme, port and path", () => {

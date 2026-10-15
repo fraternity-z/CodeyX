@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-const panel = await readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8");
+const panel = await readFile(new URL("../src/features/official-accounts/OfficialAccountsPanel.tsx", import.meta.url), "utf8");
+const controller = await readFile(new URL("../src/features/official-accounts/useOfficialAccountsController.ts", import.meta.url), "utf8");
+const requests = await readFile(new URL("../src/features/official-accounts/requests.ts", import.meta.url), "utf8");
 const api = await readFile(new URL("../src/api.ts", import.meta.url), "utf8");
 const mockApi = await readFile(new URL("../src/dev/mockApi.ts", import.meta.url), "utf8");
 const store = await readFile(new URL("../backend/src/official_accounts.rs", import.meta.url), "utf8");
@@ -14,8 +16,8 @@ const accountCommands = await readFile(
 
 test("添加官方账号可以手动粘贴 Refresh Token 或 OAuth JSON", () => {
   assert.match(panel, /手动输入/);
-  assert.match(panel, /import_official_account_credential/);
-  assert.match(panel, /const credential = manualInput\.trim\(\)/);
+  assert.match(requests, /import_official_account_credential/);
+  assert.match(controller, /const credential = manualInput\.trim\(\)/);
   assert.match(api, /"import_official_account_credential"/);
   assert.match(commands, /"import_official_account_credential"/);
   assert.match(accountCommands, /import_official_account_credential/);

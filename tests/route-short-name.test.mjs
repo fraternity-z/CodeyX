@@ -143,7 +143,7 @@ test("official route short names are required and only conflict with third-party
 test("official route settings are edited on the route card instead of the account row", async () => {
   const [modelSection, panel, app] = await Promise.all([
     readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/OfficialAccountsPanel.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/features/official-accounts/OfficialAccountsPanel.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/features/routes/useRoutesController.ts", import.meta.url), "utf8"),
   ]);
 

@@ -8,6 +8,7 @@ import type { AccountUsageSnapshot } from "./types";
 type Options = {
   active: boolean;
   accounts: OfficialAccount[] | null;
+  revision?: number;
   onAccountsChanged: (result: OfficialAccountsResult) => void;
   onError: (message: string) => void;
 };
@@ -15,7 +16,7 @@ type Options = {
 // 逐条读取之间留出间隔，避免同时向官方接口发起多项额度查询。
 const USAGE_QUERY_STAGGER_MS = 200;
 
-export function useOfficialAccountUsageController({ active, accounts, onAccountsChanged, onError }: Options) {
+export function useOfficialAccountUsageController({ active, accounts, revision = 0, onAccountsChanged, onError }: Options) {
   const [usages, setUsages] = useState<Record<string, AccountUsageSnapshot | null>>({});
   const [usagePending, setUsagePending] = useState<Record<string, number>>({});
   const session = useRef<object | null>(null);
@@ -87,7 +88,7 @@ export function useOfficialAccountUsageController({ active, accounts, onAccounts
       requestTokens.current.clear();
       window.clearTimeout(timer);
     };
-  }, [active, accountListKey, refreshUsage]);
+  }, [active, accountListKey, revision, refreshUsage]);
 
   return { usages, usagePending, refreshUsage };
 }
