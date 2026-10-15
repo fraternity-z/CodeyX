@@ -27,7 +27,8 @@ export function listOfficialAccounts(options?: { force?: boolean }) {
 
   const promise = invoke<OfficialAccountsResult>("list_official_accounts").then(
     (result) => {
-      rememberOfficialAccounts(result);
+      // 新读取或账号变更已经接管缓存时，迟到结果只返回给原调用方。
+      if (cache.promise === promise) rememberOfficialAccounts(result);
       return result;
     },
     (error) => {

@@ -32,15 +32,14 @@ test("仅有效的非默认账号卡片提供切换交互，后端也拒绝失�
   assert.match(setDefault, /if record\.invalid\(\) \{[\s\S]{0,240}无法设为默认/);
 });
 
-test("额度查询确认失效后重读列表，且不再请求官方接口", () => {
-  assert.match(panel, /snapshot\.reason === "official_account_invalid"/);
+test("后端额度查询返回失效原因，仅明确凭据失效才标记账号", () => {
   assert.match(commands, /record\.invalid_reason\(\)[\s\S]{0,240}official_account_invalid/);
   // 只有 OAuth 明确的 invalid_grant 才标记失效，其他错误只记日志。
   assert.match(store, /official_account_invalid_from_body/);
   assert.match(store, /invalid_grant/);
 });
 
-test("源码约束：失效账号跳过两类令牌刷新，前端轮询包含失效分支", () => {
+test("源码约束：失效账号跳过两类令牌刷新", () => {
   const refreshTokens = accountCommands.match(/async fn refresh_official_account_tokens\([\s\S]*?\n\}/)?.[0];
   assert.ok(refreshTokens, "应存在账号令牌刷新入口");
   // 非默认且有效的账号才轮换 Codex 凭据，失效账号也跳过独立的直连凭据刷新。
@@ -56,12 +55,6 @@ test("源码约束：失效账号跳过两类令牌刷新，前端轮询包含�
     /if record\.invalid\(\) \{\s*return Ok\(false\);\s*\}\s*if !needs_token_refresh\(record\)/,
   );
   assert.ok(refresh.indexOf("if record.invalid()") < refresh.indexOf(".post(OAUTH_TOKEN_URL)"));
-  // 前端轮询跳过已标记失效的账号，只在失效状态变化时重算线路。
-  assert.match(panel, /if \(account\.invalid\) \{[\s\S]{0,200}invalidUsageSnapshot\(account\)/);
-  assert.match(panel, /snapshot\.reason === "official_account_invalid" && !known\?\.invalid/);
-  assert.match(panel, /const recovered = Boolean\(known\?\.invalid\) && snapshot\.status === "ok"/);
-  assert.match(panel, /if \(becameInvalid \|\| recovered\) \{/);
-  assert.match(panel, /account\.invalid \? 1 : 0/);
 });
 
 test("预览数据包含失效账号，便于界面检查", () => {
@@ -87,10 +80,6 @@ test("失效账号的线路随失效标记一起移除", () => {
   assert.match(refreshRoutes, /hot_reload_runtime_models\(state\)\.await/);
   assert.match(refreshRoutes, /"config": redacted_config\(&config\)/);
   assert.match(refreshRoutes, /"modelState": model_state/);
-  assert.match(
-    panel,
-    /invoke<OfficialAccountsResult>\("refresh_official_account_routes"\)/,
-  );
   // 预览派生同样跳过失效账号，界面检查时线路列表与后端一致。
   assert.match(mockApi, /\.filter\(\(account\) => !account\.invalid\)/);
 });

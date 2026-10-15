@@ -4,24 +4,15 @@ import { IconAlertCircle, IconBrandOpenai, IconClipboard, IconClock, IconLogin2 
 import { invoke } from "./api";
 import { errorText } from "./appUtils";
 import { listOfficialAccounts, rememberOfficialAccounts } from "./officialAccountsRequests";
+import { useOfficialAccountUsageController, type AccountUsageSnapshot } from "./features/official-accounts";
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, TextArea, Tooltip } from "./components/ui";
 import { maskEmail } from "./sensitiveText";
 import type { Confirmation, OfficialAccount, OfficialAccountsResult } from "./App.types";
-
-type AccountUsageSnapshot = {
-  status: string; message?: string; reason?: string; fetchedAt?: number; stale?: boolean;
-  // 官方额度接口随额度一起返回的当前套餐，比账号记录里添加账号时的快照新。
-  planType?: string;
-  primary?: { usedPercent: number; windowMinutes: number; resetsAt?: number } | null;
-  secondary?: { usedPercent: number; windowMinutes: number; resetsAt?: number } | null;
-};
 
 type LoginStart = { loginId: string; authUrl: string; browserOpened?: boolean };
 type LoginPoll = OfficialAccountsResult & { status: "wait" | "ok" | "failed" | "expired"; message?: string };
 
 const LOGIN_POLL_INTERVAL_MS = 1500;
-// 账号较多时连续额度查询容易触发官方风控，逐条读取之间留出间隔。
-const USAGE_QUERY_STAGGER_MS = 200;
 
 function formatPlan(plan?: string) {
   if (!plan) return "";
@@ -97,15 +88,6 @@ function windowLabel(minutes: number) {
   if (minutes % 1440 === 0) return `${minutes / 1440} 天`;
   if (minutes % 60 === 0) return `${minutes / 60} 小时`;
   return `${minutes} 分钟`;
-}
-
-// 失效账号不再查询额度：卡片直接显示本地失效原因，重新添加账号后才恢复查询。
-function invalidUsageSnapshot(account: OfficialAccount): AccountUsageSnapshot {
-  return {
-    status: "error",
-    reason: "official_account_invalid",
-    message: account.invalidReason || "账号已失效，不再查询额度；重新添加该账号即可恢复",
-  };
 }
 
 function UsageLine({
@@ -223,8 +205,6 @@ export function OfficialAccountsPanel({
   const [loadError, setLoadError] = useState("");
   const [pending, setPending] = useState<string | null>(null);
   const [confirmAccount, setConfirmAccount] = useState<OfficialAccount | null>(null);
-  const [usages, setUsages] = useState<Record<string, AccountUsageSnapshot | null>>({});
-  const [usagePending, setUsagePending] = useState<Record<string, number>>({});
   const [login, setLogin] = useState<LoginStart | null>(null);
   const [loginError, setLoginError] = useState("");
   const [copied, setCopied] = useState(false);
@@ -271,80 +251,11 @@ export function OfficialAccountsPanel({
     void refresh();
   }, [refresh]);
 
-  // 官方线路随账号库派生：账号失效后线路从配置里移除，账号恢复后重新出现。
-  // 这里一次取回最新的账号列表、配置和模型状态。
-  const refreshRoutes = useCallback(async () => {
-    try {
-      const result = await invoke<OfficialAccountsResult>("refresh_official_account_routes");
-      applyResult(result);
-      setLoadError("");
-    } catch (error) {
-      setLoadError(errorText(error));
-    }
-  }, [applyResult]);
-
   const accountsRef = useRef<OfficialAccount[]>([]);
   accountsRef.current = accounts ?? [];
-
-  const refreshUsage = useCallback(async (accountId: string, force: boolean) => {
-    setUsagePending((current) => ({ ...current, [accountId]: (current[accountId] ?? 0) + 1 }));
-    setUsages((current) => ({ ...current, [accountId]: current[accountId] ?? null }));
-    try {
-      const snapshot = await invoke<AccountUsageSnapshot>("query_official_account_usage", {
-        accountId,
-        forceRefresh: force,
-      });
-      setUsages((current) => ({ ...current, [accountId]: snapshot }));
-      // 后端确认账号失效后重算线路：卡片随即标红、隐藏切换默认入口，失效
-      // 账号的线路同时从列表里移除。只在状态发生变化时重算一次，已标记失效的
-      // 账号再次返回失效原因不会重复触发。
-      const known = accountsRef.current.find((account) => account.id === accountId);
-      const becameInvalid =
-        snapshot.reason === "official_account_invalid" && !known?.invalid;
-      const recovered = Boolean(known?.invalid) && snapshot.status === "ok";
-      if (becameInvalid || recovered) {
-        void refreshRoutes();
-      }
-    } catch (error) {
-      setUsages((current) => ({ ...current, [accountId]: { status: "error", message: errorText(error) } }));
-    } finally {
-      setUsagePending((current) => ({ ...current, [accountId]: Math.max(0, (current[accountId] ?? 0) - 1) }));
-    }
-  }, [refreshRoutes]);
-
-  // 官方额度和套餐只在「线路与模型」菜单打开期间获取：每次打开都按当前账号
-  // 列表重取一遍（后端 60 秒缓存之外的请求会真的打到官方），菜单关闭后不再
-  // 后台轮询，账号卡片里的套餐也只在打开菜单时更新。查询跟随账号 id 与失效
-  // 状态，检测到失效后重读列表不会重启整轮查询。
-  const accountListKey =
-    accounts?.map((account) => `${account.id}:${account.invalid ? 1 : 0}`).join("\n") ?? "";
-  useEffect(() => {
-    if (!active) return;
-    const list = accountsRef.current;
-    if (list.length === 0) return;
-    let cancelled = false;
-    void (async () => {
-      // 逐个账号顺序读取额度，并在两次请求之间留出间隔，避免同时向官方接口发起多个请求。
-      let queried = 0;
-      for (const account of list) {
-        if (cancelled) return;
-        if (account.invalid) {
-          // 失效账号不再查询额度，卡片直接显示本地失效原因。
-          setUsages((current) => ({ ...current, [account.id]: invalidUsageSnapshot(account) }));
-          continue;
-        }
-        if (queried > 0) {
-          await new Promise((resolve) => setTimeout(resolve, USAGE_QUERY_STAGGER_MS));
-          if (cancelled) return;
-        }
-        queried += 1;
-        await refreshUsage(account.id, false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [active, accountListKey, refreshUsage]);
+  const { usages, usagePending, refreshUsage } = useOfficialAccountUsageController({
+    active, accounts, onAccountsChanged: applyResult, onError: setLoadError,
+  });
 
   // Poll a pending login until the callback completes or the user closes it.
   useEffect(() => {
