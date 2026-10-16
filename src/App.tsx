@@ -18,7 +18,7 @@ import { ModelPickerDialog } from "./AppDialogs";
 import { SystemSettingsDialog } from "./SystemSettingsDialog";
 import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
 import { ModelSection } from "./ModelSection";
-import { UsageAnalysisPanel } from "./UsageAnalysisPanel";
+import { UsageAnalysisPanel } from "./features/usage-analysis";
 import { OperationsPanel } from "./OperationsPanel";
 import { CodeyPluginsSection } from "./CodeyPluginsSection";
 import { BuiltinToolsPage } from "./features/builtin-tools";
@@ -822,12 +822,13 @@ export function App({
         </header>
       )}
 
-      {usageAnalysisOpen ? (
+      {usageAnalysisOpen && (
         <div className="page-scroll">
-          <UsageAnalysisPanel onBack={() => setUsageAnalysisOpen(false)} />
+          <UsageAnalysisPanel active={!embedded || modalVisible} onBack={() => setUsageAnalysisOpen(false)} />
         </div>
-      ) : (
+      )}
       <SettingsLayout
+        hidden={usageAnalysisOpen}
         contentRef={settingsScroll}
         sidebarFooter={
           <div className="sidebar-footer-bar">
@@ -992,7 +993,6 @@ export function App({
           ),
         }}
       />
-      )}
 
       <NoticeToast controller={noticeController} />
       <DiagnosticCleanupToast state={diagnosticCleanup} />

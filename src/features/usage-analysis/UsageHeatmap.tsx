@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
-import { Button, Select, Tooltip } from "./components/ui";
-import { formatUsageNumber, usageHeatmap, type LogAnalytics } from "./usageAnalysis";
+import { Button, Select, Tooltip } from "../../components/ui";
+import { formatUsageNumber, usageHeatmap } from "./state";
+import type { LogAnalytics } from "./types";
 
 const dateLabel = (timestamp: number) => new Date(timestamp).toISOString().slice(0, 10);
 

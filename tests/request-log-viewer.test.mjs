@@ -54,7 +54,7 @@ test("request log cache hit rate uses input tokens and preserves unknown usage",
 test("request log output speed uses one decimal and preserves unknown values", async () => {
   const [viewer, usage] = await Promise.all([
     readRequestLogs(),
-    readSource("src/usageAnalysis.ts"),
+    readSource("src/features/usage-analysis/types.ts"),
   ]);
   const source = viewer.match(/function formatTokensPerSecond\([\s\S]*?\n\}/)?.[0];
   assert.ok(source);

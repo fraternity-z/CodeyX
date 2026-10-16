@@ -52,7 +52,7 @@ function layoutHarness() {
     }, []);
     return jsx("page-probe", { id, active, instance, draft, edit, expanded, expand, result, complete });
   }
-  function render() {
+  function render(hidden = false) {
     const seen = new Set();
     const cleanup = fiber => { fiber.mounted = false; fiber.hooks.forEach(hook => hook?.cleanup?.()); };
     function visit(node, path) {
@@ -73,7 +73,7 @@ function layoutHarness() {
     const sections = Object.fromEntries(pages.map(id => [id, ["remote", "mcp", "skills"].includes(id)
       ? active => { callbacks.push({ id, active }); return jsx(Page, { id, active }); }
       : jsx(Page, { id })]));
-    tree = visit(jsx(exports.SettingsLayout, { sections }), "root");
+    tree = visit(jsx(exports.SettingsLayout, { sections, hidden }), "root");
     for (const [address, fiber] of fibers) if (!seen.has(address)) { cleanup(fiber); fibers.delete(address); }
     for (const fiber of fibers.values()) for (const effect of fiber.effects.splice(0)) effect();
   }
@@ -139,4 +139,28 @@ test("visited render callbacks receive active=false while hidden and latest acti
   harness.select("mcp");
   assert.equal(harness.page("mcp").active, true);
   assert.equal(harness.page("skills").active, false);
+});
+
+test("hiding the whole layout pauses visited pages and preserves selection, drafts and instances on return", () => {
+  const harness = layoutHarness();
+  harness.select("remote");
+  harness.select("mcp");
+  const previous = harness.page("mcp");
+  previous.edit("retained draft"); previous.expand(true);
+  harness.render(true);
+  const layout = () => harness.find("div").find(node => node.props.className === "settings-layout");
+  assert.equal(layout().props.hidden, true);
+  assert.equal(harness.page("remote").active, false);
+  assert.equal(harness.page("mcp").active, false);
+  assert.ok(harness.find("section").every(node => node.props.hidden));
+  assert.deepEqual(harness.unmounts, []);
+  harness.render(false);
+  assert.equal(layout().props.hidden, false);
+  assert.equal(harness.page("mcp").active, true);
+  assert.equal(harness.page("mcp").instance, previous.instance);
+  assert.equal(harness.page("mcp").draft, "retained draft");
+  assert.equal(harness.page("mcp").expanded, true);
+  assert.equal(harness.page("remote").active, false);
+  assert.deepEqual(harness.mounts, ["overview", "remote", "mcp"]);
+  assert.deepEqual(harness.unmounts, []);
 });

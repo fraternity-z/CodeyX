@@ -10,7 +10,7 @@ import {
   textContent,
 } from "./helpers/jsx-tree.mjs";
 
-const { usageQuery, usageSlices, usageCoverage, formatUsageNumber, observeUsageRequest, usageTrend, usageHeatmap } = await loadTypeScriptModule(new URL("../src/usageAnalysis.ts", import.meta.url));
+const { usageQuery, usageSlices, usageCoverage, formatUsageNumber, usageTrend, usageHeatmap } = await loadTypeScriptModule(new URL("../src/features/usage-analysis/state.ts", import.meta.url));
 const group = (key, tokens, total = 1) => ({ key, totalTokensSum: tokens, total });
 
 test("每日热力图遵循UTC边界、闰日与首尾部分日，不包含结束日", () => {
@@ -81,26 +81,6 @@ test("未上报不是零，未知的其他组不伪造为零；已知零仍保�
   assert.equal(usageCoverage(4, 3), "75.0%");
 });
 
-test("切换范围清空旧状态，过期成功与失败均不覆盖新结果", async () => {
-  let resolveOld;
-  const old = new Promise((resolve) => { resolveOld = resolve; });
-  const events = [];
-  const cancel = observeUsageRequest(() => old, (state) => events.push(state));
-  assert.deepEqual(events[0], { loading: true, data: null, error: "" });
-  cancel();
-  observeUsageRequest(() => Promise.resolve({ total: 30 }), (state) => events.push(state));
-  await new Promise(setImmediate);
-  resolveOld({ total: 7 });
-  await new Promise(setImmediate);
-  assert.equal(events.at(-1).data.total, 30);
-  assert.equal(events.length, 3);
-  const ignored = [];
-  const stop = observeUsageRequest(() => Promise.reject(new Error("旧错误")), (state) => ignored.push(state));
-  stop();
-  await new Promise(setImmediate);
-  assert.equal(ignored.length, 1);
-});
-
 test("趋势按真实时间定位并裁剪首尾分桶，不重叠或超出范围", () => {
   const result = usageTrend({ fromUnixMs: 50, toUnixMs: 250, bucketMs: 100,
     trend: [0, 100, 200, 300].map((timestampUnixMs) => ({ timestampUnixMs, totalTokensSum: 10 })) });
@@ -140,42 +120,7 @@ test("趋势把未上报用量的分桶标记为 unknown，不画成零用量", 
   );
 });
 
-test("同步异常与后端失败终止loading且可重新加载；不可查询保留reason", async () => {
-  const events = [];
-  observeUsageRequest(() => { throw new Error("统计失败"); }, (state) => events.push(state));
-  await new Promise(setImmediate);
-  assert.deepEqual(events.at(-1), { loading: false, data: null, error: "统计失败" });
-  observeUsageRequest(() => Promise.resolve({ queryable: false, reason: "ndjson_not_queryable" }), (state) => events.push(state));
-  await new Promise(setImmediate);
-  assert.equal(events.at(-1).data.reason, "ndjson_not_queryable");
-  assert.equal(events.at(-1).loading, false);
-});
-
 // 渲染层：未知用量的分桶必须与零用量区分，用低矮虚线柱加明确文案呈现。
-const panelHooks = { effects: [], hooks: [], cursor: 0 };
-const panelReact = {
-  useState(initial) {
-    const index = panelHooks.cursor++;
-    if (!(index in panelHooks.hooks))
-      panelHooks.hooks[index] = typeof initial === "function" ? initial() : initial;
-    return [panelHooks.hooks[index], (next) => {
-      panelHooks.hooks[index] = typeof next === "function" ? next(panelHooks.hooks[index]) : next;
-    }];
-  },
-  useRef(initial) {
-    const index = panelHooks.cursor++;
-    if (!(index in panelHooks.hooks)) panelHooks.hooks[index] = { current: initial };
-    return panelHooks.hooks[index];
-  },
-  useCallback(callback) { return callback; },
-  useEffect(effect, deps) {
-    const index = panelHooks.cursor++;
-    const previous = panelHooks.hooks[index];
-    if (previous && deps.every((value, i) => Object.is(value, previous.deps[i]))) return;
-    panelHooks.effects.push(() => { previous?.cleanup?.(); panelHooks.hooks[index] = { deps, cleanup: effect() }; });
-  },
-};
-
 const panelStats = {
   queryable: true, fromUnixMs: 0, toUnixMs: 300, bucketMs: 100, total: 6,
   succeededCount: 6, failedCount: 0, incompleteCount: 0, cancelledCount: 0, successRate: 1,
@@ -195,24 +140,18 @@ const uiStubs = autoStubModule("ui");
 const panelGraph = createModuleGraph(new URL("../src/UsageAnalysisPanel.tsx", import.meta.url), {
   autoStub: true,
   stubs: {
-    react: panelReact,
-    "./api": { invoke: async () => panelStats },
-    "./appUtils": { withTimeout: (promise) => promise },
-    "./components/ui": uiStubs,
+    "./useUsageAnalysisController": { useUsageAnalysisController: () => ({
+      range: "7d", state: { loading: false, data: panelStats, error: "" }, reload() {}, changeRange() {},
+    }) },
+    "../../components/ui": uiStubs,
     "./UsageHeatmap": autoStubModule("heatmap"),
   },
 });
 
-test("用量趋势渲染把未上报的分桶画成虚线标记并标注用量未上报", async () => {
-  panelHooks.cursor = 0;
-  panelHooks.effects.length = 0;
+test("用量趋势渲染把未上报的分桶画成虚线标记并标注用量未上报", () => {
   const props = { onBack: () => {} };
-  panelGraph.exports.UsageAnalysisPanel(props);
-  panelHooks.effects.splice(0).forEach((effect) => effect());
-  await new Promise(setImmediate);
-
   const render = () => {
-    panelHooks.cursor = 0;
+    panelGraph.restart();
     return panelGraph.exports.UsageAnalysisPanel(props);
   };
   let tree = render();

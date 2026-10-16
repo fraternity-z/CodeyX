@@ -27,12 +27,13 @@ type SettingsPageId = (typeof SETTINGS_PAGES)[number]["id"];
 type SettingsSection = ReactNode | ((active: boolean) => ReactNode);
 
 type SettingsLayoutProps = {
+  hidden?: boolean;
   sections: Record<SettingsPageId, SettingsSection>;
   sidebarFooter?: ReactNode;
   contentRef?: RefObject<HTMLDivElement | null>;
 };
 
-export function SettingsLayout({ sections, sidebarFooter, contentRef }: SettingsLayoutProps) {
+export function SettingsLayout({ hidden = false, sections, sidebarFooter, contentRef }: SettingsLayoutProps) {
   const [activePage, setActivePage] = useState<SettingsPageId>("overview");
   const [visitedPages, setVisitedPages] = useState<ReadonlySet<SettingsPageId>>(
     () => new Set(["overview"]),
@@ -48,7 +49,7 @@ export function SettingsLayout({ sections, sidebarFooter, contentRef }: Settings
   const extensionPages = SETTINGS_PAGES.filter((p) => p.group === "扩展生态");
 
   return (
-    <div className="settings-layout">
+    <div className="settings-layout" hidden={hidden}>
       <nav className="settings-sidebar" aria-label="配置功能菜单">
         <div className="settings-sidebar-menu">
         <div className="settings-nav-group">
@@ -99,7 +100,7 @@ export function SettingsLayout({ sections, sidebarFooter, contentRef }: Settings
       <div className="settings-content" id="codey-settings-content" tabIndex={-1}>
         {/* 首次访问时挂载模块，之后保留草稿、展开状态和异步加载结果。 */}
         {SETTINGS_PAGES.map((page) => {
-          const active = activePage === page.id;
+          const active = !hidden && activePage === page.id;
           const content = sections[page.id];
           return (
             <section
