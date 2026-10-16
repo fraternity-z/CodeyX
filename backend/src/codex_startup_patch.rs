@@ -1722,9 +1722,10 @@ mod tests {
             .unwrap();
         let original = std::fs::read(&confirmation).unwrap();
         for failed in [false, true] {
-            let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, || {
-                panic!("confirmed launches must not wait on a closed handshake listener")
-            });
+            let readiness =
+                CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, || {
+                    panic!("confirmed launches must not wait on a closed handshake listener")
+                });
             assert!(readiness.stream.is_none());
             if failed {
                 readiness.fail(&CliWrapperFailure {
@@ -1743,7 +1744,10 @@ mod tests {
             connected = true;
             Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
         });
-        assert!(connected, "a new desktop launch still requires its own handshake");
+        assert!(
+            connected,
+            "a new desktop launch still requires its own handshake"
+        );
     }
 
     #[test]
@@ -1763,16 +1767,20 @@ mod tests {
                 .unwrap();
             }
             let mut connected = false;
-            let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, || {
-                connected = true;
-                Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
-            });
+            let readiness =
+                CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, || {
+                    connected = true;
+                    Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+                });
             assert!(
                 connected,
                 "only a launcher confirmation may skip the handshake"
             );
             assert_eq!(
-                CliWrapperMarker::read(&marker_path).unwrap().unwrap().status,
+                CliWrapperMarker::read(&marker_path)
+                    .unwrap()
+                    .unwrap()
+                    .status,
                 CliWrapperMarkerStatus::Launching
             );
             readiness.executed();

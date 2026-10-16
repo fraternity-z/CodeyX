@@ -2747,9 +2747,9 @@ mod cli_wrapper_tests {
         .await
         .unwrap();
         sender.await.unwrap();
-        std::fs::remove_file(crate::codex_startup_patch::CliWrapperMarker::confirmation_path(
-            &marker_path,
-        ))
+        std::fs::remove_file(
+            crate::codex_startup_patch::CliWrapperMarker::confirmation_path(&marker_path),
+        )
         .unwrap();
         let error = install_startup_patch_with_cli_fallback(
             None,
@@ -2849,7 +2849,10 @@ mod cli_wrapper_tests {
                 assert!(!confirmation.exists());
             } else {
                 assert_eq!(
-                    CliWrapperMarker::read(&confirmation).unwrap().unwrap().status,
+                    CliWrapperMarker::read(&confirmation)
+                        .unwrap()
+                        .unwrap()
+                        .status,
                     CliWrapperMarkerStatus::Executed
                 );
                 std::fs::remove_file(confirmation).unwrap();
@@ -2909,7 +2912,10 @@ mod cli_wrapper_tests {
                 assert!(!confirmation.exists());
             } else {
                 assert_eq!(
-                    CliWrapperMarker::read(&confirmation).unwrap().unwrap().status,
+                    CliWrapperMarker::read(&confirmation)
+                        .unwrap()
+                        .unwrap()
+                        .status,
                     CliWrapperMarkerStatus::Executed
                 );
                 std::fs::remove_file(confirmation).unwrap();
@@ -3223,9 +3229,9 @@ mod cli_wrapper_tests {
         );
         let _ = std::fs::remove_file(script_path);
         let _ = std::fs::remove_file(marker_path);
-        std::fs::remove_file(crate::codex_startup_patch::CliWrapperMarker::confirmation_path(
-            &cli_marker_path,
-        ))
+        std::fs::remove_file(
+            crate::codex_startup_patch::CliWrapperMarker::confirmation_path(&cli_marker_path),
+        )
         .unwrap();
     }
 
@@ -3363,9 +3369,9 @@ mod cli_wrapper_tests {
         .await
         .unwrap();
         sender.await.unwrap();
-        std::fs::remove_file(crate::codex_startup_patch::CliWrapperMarker::confirmation_path(
-            &marker_path,
-        ))
+        std::fs::remove_file(
+            crate::codex_startup_patch::CliWrapperMarker::confirmation_path(&marker_path),
+        )
         .unwrap();
     }
 
