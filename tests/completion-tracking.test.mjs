@@ -337,6 +337,7 @@ function loadInjection({
     },
     MutationObserver,
     TextEncoder,
+    URL,
     URLSearchParams,
     window,
   });
@@ -561,6 +562,93 @@ test("native model routing retries when the local manager is cached after the fi
   scope.node.familyBindings.set({ kind: "signal-family" }, new Map([["local", manager]]));
   assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), manager.requestClient);
   assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
+});
+
+test("request-client discovery reuses parsed assets while retrying a late manager", async () => {
+  const manager = nativeRoutingManager();
+  const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
+  const importAsset = runtime.window.__codeyImportCodexAsset;
+  let ready = false;
+  let imports = 0;
+  const fetched = [];
+  runtime.document.scripts = [{ src: "app://-/assets/index-startup.js" }];
+  runtime.window.fetch = async (url) => {
+    fetched.push(url);
+    return { ok: true, text: async () => 'import "./app-initial-completion-reconcile.js";' };
+  };
+  runtime.window.__codeyImportCodexAsset = async (url) => {
+    imports += 1;
+    return ready ? importAsset(url) : {};
+  };
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+  }
+  assert.equal(imports, 3, "a cached asset must not freeze capability discovery");
+  assert.equal(fetched.length, 1, "startup retries must not reread the same bundle");
+  runtime.document.scripts.push({ src: "app://-/assets/index-late.js" });
+  ready = true;
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), manager.requestClient);
+  assert.deepEqual(fetched, ["app://-/assets/index-startup.js", "app://-/assets/index-late.js"]);
+});
+
+for (const failure of ["http", "network", "body"]) {
+  test(`request-client asset discovery retries a failed ${failure} read`, async () => {
+    const manager = nativeRoutingManager();
+    const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
+    runtime.document.scripts = [{ src: "app://-/assets/index-startup.js" }];
+    let reads = 0;
+    runtime.window.fetch = async () => {
+      reads += 1;
+      if (reads === 1 && failure === "network") throw new Error("not ready");
+      return {
+        ok: reads > 1 || failure !== "http",
+        text: async () => {
+          if (reads === 1 && failure === "body") throw new Error("interrupted");
+          return 'import "./app-initial-completion-reconcile.js";';
+        },
+      };
+    };
+    await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+    assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), manager.requestClient);
+    assert.equal(reads, 2, "failed reads must remain retryable");
+  });
+}
+
+test("request-client discovery caches empty assets but observes newly loaded modules", async () => {
+  const manager = nativeRoutingManager();
+  const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
+  runtime.document.scripts = [{ src: "app://-/assets/index-empty.js" }];
+  let reads = 0;
+  runtime.window.fetch = async () => {
+    reads += 1;
+    return { ok: true, text: async () => "export {};" };
+  };
+  await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+  await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+  runtime.document.scripts.push({ src: "app://-/assets/app-initial-completion-reconcile.js" });
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), manager.requestClient);
+  assert.equal(reads, 1);
+});
+
+test("manager discovery scans shared ancestors once and refreshes them on the next probe", () => {
+  const scope = cachedManagerScope([]);
+  const runtime = loadInjection({ initialSessionId: "", turnIds: ["one", "two"] });
+  let reads = 0;
+  const shared = {
+    get memoizedState() { reads += 1; return { scope }; },
+    return: null,
+  };
+  runtime.document.body.__reactFiber$test = shared;
+  for (let index = 0; index < 2; index += 1) {
+    runtime.getTurnRow(index).__reactFiber$test = { return: shared };
+  }
+  assert.equal(runtime.window.__codeyAppServerManagerFromReact(() => null), null);
+  assert.equal(reads, 1);
+  const manager = nativeRoutingManager();
+  assert.equal(runtime.window.__codeyAppServerManagerFromReact((candidate) => (
+    candidate === scope ? manager : null
+  )), manager);
+  assert.equal(reads, 2, "each probe must observe current page state");
 });
 
 test("native model routing cannot use a remote or incomplete client", async () => {

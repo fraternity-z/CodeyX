@@ -446,6 +446,11 @@ impl CliWrapperMarker {
         crate::fs_util::atomic_write_private_with_parent(path, &serde_json::to_vec(self)?)
     }
 
+    /// 启动器确认与包装器进度分开保存，避免后续 app-server 覆盖已完成的校验。
+    pub(crate) fn confirmation_path(path: &std::path::Path) -> std::path::PathBuf {
+        path.with_extension("confirmed.json")
+    }
+
     /// `Ok(None)` 表示文件尚不存在；内容无法解析时返回错误，由调用方决定是否继续等待。
     pub(crate) fn read(path: &std::path::Path) -> Result<Option<Self>> {
         match crate::fs_util::read_bounded(path, MAX_CLI_WRAPPER_MARKER_BYTES) {
@@ -955,14 +960,29 @@ impl CliWrapperReadiness {
         started: std::time::Instant,
         connect: impl FnOnce() -> Result<std::net::TcpStream>,
     ) -> Self {
+        let already_confirmed = marker.as_deref().is_some_and(|path| {
+            CliWrapperMarker::read(&CliWrapperMarker::confirmation_path(path))
+                .ok()
+                .flatten()
+                .is_some_and(|record| record.status == CliWrapperMarkerStatus::Executed)
+        });
         let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
             "launcher.cli_wrapper_started",
             serde_json::json!({
                 "pid": std::process::id(),
                 "markerPresent": marker.is_some(),
-                "handshakeRequired": handshake_required,
+                "handshakeRequired": handshake_required && !already_confirmed,
+                "alreadyConfirmed": already_confirmed,
             }),
         );
+        // 每次桌面启动使用独立路径；仅复用启动器已经接收的成功结果。
+        // 目标程序和运行时配置仍在每次 CLI 调用中正常校验。
+        if already_confirmed {
+            return Self {
+                stream: None,
+                marker: None,
+            };
+        }
         let readiness = Self {
             stream: None,
             marker,
@@ -1690,6 +1710,80 @@ mod tests {
         );
         assert!(cli_wrapper_handshake_required(Some(OsStr::new("0"))));
         assert!(!cli_wrapper_handshake_required(Some(OsStr::new("1"))));
+    }
+
+    #[test]
+    fn confirmed_cli_launch_skips_later_handshakes_and_preserves_confirmation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker_path = temporary.path().join("wrapper.json");
+        let confirmation = CliWrapperMarker::confirmation_path(&marker_path);
+        CliWrapperMarker::new(CliWrapperMarkerStatus::Executed)
+            .write(&confirmation)
+            .unwrap();
+        let original = std::fs::read(&confirmation).unwrap();
+        for failed in [false, true] {
+            let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, || {
+                panic!("confirmed launches must not wait on a closed handshake listener")
+            });
+            assert!(readiness.stream.is_none());
+            if failed {
+                readiness.fail(&CliWrapperFailure {
+                    message: "later launch failed".into(),
+                    retryable: false,
+                });
+            } else {
+                readiness.executed();
+            }
+            assert!(!marker_path.exists());
+            assert_eq!(std::fs::read(&confirmation).unwrap(), original);
+        }
+        let next_launch = temporary.path().join("next-launch.json");
+        let mut connected = false;
+        CliWrapperReadiness::begin_with(Some(next_launch), true, || {
+            connected = true;
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+        });
+        assert!(connected, "a new desktop launch still requires its own handshake");
+    }
+
+    #[test]
+    fn unconfirmed_or_invalid_cli_records_do_not_skip_handshake() {
+        let temporary = tempfile::tempdir().unwrap();
+        let marker_path = temporary.path().join("wrapper.json");
+        let confirmation = CliWrapperMarker::confirmation_path(&marker_path);
+        for state in [None, Some("launching"), Some("failed"), Some("invalid")] {
+            CliWrapperMarker::new(CliWrapperMarkerStatus::Executed)
+                .write(&marker_path)
+                .unwrap();
+            if let Some(state) = state {
+                std::fs::write(
+                    &confirmation,
+                    format!(r#"{{"status":"{state}","pid":1,"timestamp_ms":1}}"#),
+                )
+                .unwrap();
+            }
+            let mut connected = false;
+            let readiness = CliWrapperReadiness::begin_with(Some(marker_path.clone()), true, || {
+                connected = true;
+                Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+            });
+            assert!(
+                connected,
+                "only a launcher confirmation may skip the handshake"
+            );
+            assert_eq!(
+                CliWrapperMarker::read(&marker_path).unwrap().unwrap().status,
+                CliWrapperMarkerStatus::Launching
+            );
+            readiness.executed();
+        }
+        std::fs::write(&confirmation, "not json").unwrap();
+        let mut connected = false;
+        CliWrapperReadiness::begin_with(Some(marker_path), true, || {
+            connected = true;
+            Err(std::io::Error::from(std::io::ErrorKind::ConnectionRefused).into())
+        });
+        assert!(connected);
     }
 
     #[test]

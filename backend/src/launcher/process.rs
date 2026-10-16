@@ -2197,7 +2197,9 @@ async fn wait_for_cli_wrapper(
     handshake: CliWrapperHandshake,
     deadline: tokio::time::Instant,
 ) -> Result<()> {
-    use crate::codex_startup_patch::{CliWrapperFailure, MAX_CLI_WRAPPER_FAILURE_BYTES};
+    use crate::codex_startup_patch::{
+        CliWrapperFailure, CliWrapperMarker, CliWrapperMarkerStatus, MAX_CLI_WRAPPER_FAILURE_BYTES,
+    };
     use tokio::io::AsyncReadExt;
 
     let CliWrapperHandshake {
@@ -2264,6 +2266,20 @@ async fn wait_for_cli_wrapper(
         }
     })
     .await;
+    if matches!(&result, Ok(Ok(()))) {
+        // 后续 app-server 继承同一启动环境，可直接识别本次校验已完成。
+        // 独立确认文件不会被并发包装器的进度写入覆盖，按原有过期规则清理。
+        if let Err(error) = CliWrapperMarker::new(CliWrapperMarkerStatus::Executed)
+            .write(&CliWrapperMarker::confirmation_path(&marker_path))
+        {
+            error_log::record_failure(
+                "compatibility_fallback",
+                "confirm_cli_wrapper_handshake",
+                format!("{error:#}"),
+                serde_json::json!({}),
+            );
+        }
+    }
     let _ = std::fs::remove_file(&marker_path);
     result.with_context(|| {
         if authenticated {
@@ -2712,7 +2728,7 @@ mod cli_wrapper_tests {
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
-        let (handshake, _) = test_handshake(listener, b"token");
+        let (handshake, marker_path) = test_handshake(listener, b"token");
         let sender = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(45)).await;
             tokio::time::resume();
@@ -2731,6 +2747,10 @@ mod cli_wrapper_tests {
         .await
         .unwrap();
         sender.await.unwrap();
+        std::fs::remove_file(crate::codex_startup_patch::CliWrapperMarker::confirmation_path(
+            &marker_path,
+        ))
+        .unwrap();
         let error = install_startup_patch_with_cli_fallback(
             None,
             test_patch_options(),
@@ -2795,6 +2815,7 @@ mod cli_wrapper_tests {
     #[cfg(any(windows, target_os = "macos"))]
     #[tokio::test]
     async fn cli_handshake_requires_authenticated_exec_completion() {
+        use crate::codex_startup_patch::{CliWrapperMarker, CliWrapperMarkerStatus};
         use tokio::io::AsyncWriteExt;
 
         for failed in [false, true] {
@@ -2802,7 +2823,7 @@ mod cli_wrapper_tests {
                 .await
                 .unwrap();
             let address = listener.local_addr().unwrap();
-            let (handshake, _) = test_handshake(listener, b"token");
+            let (handshake, marker_path) = test_handshake(listener, b"token");
             let sender = tokio::spawn(async move {
                 let mut invalid = tokio::net::TcpStream::connect(address).await.unwrap();
                 invalid.write_all(b"invalid").await.unwrap();
@@ -2823,6 +2844,16 @@ mod cli_wrapper_tests {
             .await;
             assert_eq!(result.is_err(), failed);
             sender.await.unwrap();
+            let confirmation = CliWrapperMarker::confirmation_path(&marker_path);
+            if failed {
+                assert!(!confirmation.exists());
+            } else {
+                assert_eq!(
+                    CliWrapperMarker::read(&confirmation).unwrap().unwrap().status,
+                    CliWrapperMarkerStatus::Executed
+                );
+                std::fs::remove_file(confirmation).unwrap();
+            }
         }
     }
 
@@ -2873,7 +2904,64 @@ mod cli_wrapper_tests {
                 result.unwrap();
             }
             assert!(!marker_path.exists(), "the launcher removes its marker");
+            let confirmation = CliWrapperMarker::confirmation_path(&marker_path);
+            if failed {
+                assert!(!confirmation.exists());
+            } else {
+                assert_eq!(
+                    CliWrapperMarker::read(&confirmation).unwrap().unwrap().status,
+                    CliWrapperMarkerStatus::Executed
+                );
+                std::fs::remove_file(confirmation).unwrap();
+            }
         }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn cli_handshake_timeout_does_not_confirm_a_launch() {
+        use crate::codex_startup_patch::{CliWrapperMarker, CliWrapperMarkerStatus};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let (handshake, marker_path) = test_handshake(listener, b"token");
+        CliWrapperMarker::new(CliWrapperMarkerStatus::Launching)
+            .write(&marker_path)
+            .unwrap();
+        assert!(
+            wait_for_cli_wrapper(handshake, tokio::time::Instant::now())
+                .await
+                .is_err()
+        );
+        assert!(!marker_path.exists());
+        assert!(!CliWrapperMarker::confirmation_path(&marker_path).exists());
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn cli_confirmation_write_failure_does_not_reject_a_verified_launch() {
+        use crate::codex_startup_patch::{CliWrapperMarker, CliWrapperMarkerStatus};
+
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let marker_path = temporary.path().join("wrapper.json");
+        std::fs::create_dir(CliWrapperMarker::confirmation_path(&marker_path)).unwrap();
+        CliWrapperMarker::new(CliWrapperMarkerStatus::Executed)
+            .write(&marker_path)
+            .unwrap();
+        wait_for_cli_wrapper(
+            CliWrapperHandshake {
+                listener,
+                token: b"token".to_vec(),
+                marker_path,
+            },
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -3100,7 +3188,7 @@ mod cli_wrapper_tests {
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
-        let (handshake, _) = test_handshake(listener, b"token");
+        let (handshake, cli_marker_path) = test_handshake(listener, b"token");
         let marker_path = std::env::temp_dir().join(format!(
             "codey-startup-require-cli-fallback-{}.json",
             uuid::Uuid::new_v4().simple()
@@ -3135,6 +3223,10 @@ mod cli_wrapper_tests {
         );
         let _ = std::fs::remove_file(script_path);
         let _ = std::fs::remove_file(marker_path);
+        std::fs::remove_file(crate::codex_startup_patch::CliWrapperMarker::confirmation_path(
+            &cli_marker_path,
+        ))
+        .unwrap();
     }
 
     #[cfg(any(windows, target_os = "macos"))]
@@ -3207,12 +3299,13 @@ mod cli_wrapper_tests {
         let now = std::time::SystemTime::now();
         let old = now - Duration::from_secs(2 * 60 * 60);
         let stale = temp.path().join("stale.json");
+        let confirmed = temp.path().join("stale.confirmed.json");
         let fresh = temp.path().join("fresh.json");
         let other = temp.path().join("stale.txt");
-        for path in [&stale, &fresh, &other] {
+        for path in [&stale, &confirmed, &fresh, &other] {
             std::fs::write(path, "{}").unwrap();
         }
-        for path in [&stale, &other] {
+        for path in [&stale, &confirmed, &other] {
             std::fs::File::options()
                 .write(true)
                 .open(path)
@@ -3222,9 +3315,10 @@ mod cli_wrapper_tests {
         }
         assert_eq!(
             prune_cli_wrapper_markers(temp.path(), now, CLI_WRAPPER_MARKER_MAX_AGE),
-            1
+            2
         );
         assert!(!stale.exists());
+        assert!(!confirmed.exists());
         assert!(fresh.exists());
         assert!(other.exists());
         assert_eq!(
@@ -3250,7 +3344,7 @@ mod cli_wrapper_tests {
             .await
             .unwrap();
         let address = listener.local_addr().unwrap();
-        let (handshake, _) = test_handshake(listener, b"token");
+        let (handshake, marker_path) = test_handshake(listener, b"token");
         let sender = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(18)).await;
             tokio::time::resume();
@@ -3269,6 +3363,10 @@ mod cli_wrapper_tests {
         .await
         .unwrap();
         sender.await.unwrap();
+        std::fs::remove_file(crate::codex_startup_patch::CliWrapperMarker::confirmation_path(
+            &marker_path,
+        ))
+        .unwrap();
     }
 
     #[cfg(target_os = "macos")]

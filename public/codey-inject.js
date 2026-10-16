@@ -1904,6 +1904,8 @@
   };
   window.__codeyCodexAssetReferencesFromSource = codexAssetReferencesFromSource;
 
+  // 模块引用在同一页面内保持不变；只缓存成功读取的结果，页面状态仍每次重新探测。
+  const codexAssetReferenceCache = new Map();
   const discoverCodexAppAssetUrls = async () => {
     const loadedUrls = codexAppAssetUrls();
     const discoveredUrls = loadedUrls.filter((url) => (
@@ -1927,10 +1929,14 @@
     )).slice(0, 6);
     for (const scriptUrl of scriptUrls) {
       try {
-        const response = await fetchAsset(scriptUrl);
-        if (!response?.ok || typeof response.text !== "function") continue;
-        const source = await response.text();
-        for (const assetUrl of codexAssetReferencesFromSource(source, scriptUrl)) {
+        let references = codexAssetReferenceCache.get(scriptUrl);
+        if (!references) {
+          const response = await fetchAsset(scriptUrl);
+          if (!response?.ok || typeof response.text !== "function") continue;
+          references = codexAssetReferencesFromSource(await response.text(), scriptUrl);
+          codexAssetReferenceCache.set(scriptUrl, references);
+        }
+        for (const assetUrl of references) {
           if (!discoveredUrls.includes(assetUrl)) discoveredUrls.push(assetUrl);
         }
       } catch {
@@ -2060,9 +2066,12 @@
       document.body,
     ].filter((element) => element instanceof HTMLElement))].slice(0, 32);
     const seenScopes = new WeakSet();
+    const seenFibers = new WeakSet();
     for (const element of elements) {
       let fiber = reactFiberFromElement(element);
       for (let depth = 0; fiber && depth < 24; depth += 1, fiber = fiber.return) {
+        if (seenFibers.has(fiber)) continue;
+        seenFibers.add(fiber);
         const candidates = [];
         const seenValues = new WeakSet();
         collectAppServerScopeCandidates(fiber.memoizedState, candidates, seenValues);
