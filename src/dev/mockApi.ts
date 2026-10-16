@@ -5,6 +5,7 @@ import type { ProviderStatus, Config, ModelState, OfficialAccount, Profile } fro
 import { pluginConfigBusinessValuesEqual, validatePluginConfigText, type CodeyPlugin } from "../codeyPlugins";
 import { createCodexExtensionsPreview } from "./codexExtensionsMock";
 import { createBuiltinToolsPreview } from "./builtinToolsMock";
+import { createSessionsPreview } from "./sessionsMock";
 import {
   AUTO_REVIEW_MODEL,
   includesModelId,
@@ -586,6 +587,7 @@ if (import.meta.env.DEV) {
     const configHash = async (text: string) => Array.from(new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))), byte => byte.toString(16).padStart(2, "0")).join("");
     const extensionsPreview = createCodexExtensionsPreview(previewClientPlatform);
     const builtinToolsPreview = createBuiltinToolsPreview();
+    const sessionsPreview = createSessionsPreview();
     let computerUseReady = false;
     const previewPackageUploads = new Map<string, { name: string; size: number; signature: string }>();
     window.__codeyInvokeApi = async (command, args) => {
@@ -595,6 +597,7 @@ if (import.meta.env.DEV) {
 
       if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
       if (command === "builtin_tools") return builtinToolsPreview(args);
+      if (command === "list_codex_sessions" || command === "delete_codex_sessions") return sessionsPreview(command, args);
 
       if (command === "plugin_marketplace_status" || command === "repair_plugin_marketplace" || command === "prepare_computer_use") {
         const supported = previewClientPlatform === "macos" || previewClientPlatform === "windows";

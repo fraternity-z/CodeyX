@@ -417,6 +417,7 @@ async fn run_startup_session_maintenance(
     let maintenance_home = home.to_path_buf();
     let maintenance_result = tokio::task::spawn_blocking(move || {
         let stale_lock_recovery = maintenance_lock::recover_stale_locks(&maintenance_home);
+        let session_cleanup = crate::session_management::finish_pending(&maintenance_home);
         // A loaded Codex thread may have flushed a deleted turn after the live
         // request completed. Reapply durable tombstones after the old process
         // is stopped and before the new process can hydrate that stale data.
@@ -424,10 +425,10 @@ async fn run_startup_session_maintenance(
         // `session_index.jsonl` is also cleaned before spawn, while its
         // source snapshot is stable. The original file is backed up.
         let index_cleanup = session_index_cleanup::cleanup(&maintenance_home);
-        (stale_lock_recovery, message_delete_replay, index_cleanup)
+        (stale_lock_recovery, message_delete_replay, index_cleanup, session_cleanup)
     })
     .await;
-    let (stale_lock_recovery, message_delete_replay, index_cleanup) = match maintenance_result {
+    let (stale_lock_recovery, message_delete_replay, index_cleanup, session_cleanup) = match maintenance_result {
         Ok(result) => result,
         Err(error) => {
             let error = anyhow::Error::new(error).context("启动前会话修复任务异常退出");
@@ -501,6 +502,7 @@ async fn run_startup_session_maintenance(
             }),
         );
     }
+    session_cleanup.context("启动前会话清理失败；退出其他 Codex 实例后通过 CodeyX 重试启动")?;
     Ok(session_maintenance_summary(&index_cleanup))
 }
 

@@ -23,6 +23,7 @@ import { OperationsPanel } from "./OperationsPanel";
 import { CodeyPluginsSection } from "./features/codey-plugins";
 import { BuiltinToolsPage } from "./features/builtin-tools";
 import { CodexExtensionsPage } from "./features/codex-extensions";
+import { SessionsPage } from "./features/session-management";
 import { DiagnosticCleanupToast, useRuntimeMaintenanceController } from "./features/runtime-maintenance";
 import { useNotificationsController } from "./features/notifications";
 import { errorText } from "./appUtils";
@@ -733,6 +734,7 @@ export function App({
             />
           ),
           remote: (active) => <RemoteControlPanel active={active} />,
+          sessions: (active) => <SessionsPage active={active} isBusy={isBusy} onRestart={handleRestartCodex} container={popupContainer} />,
           tools: (active) => (
             <BuiltinToolsPage active={active} config={config} fastContextToolsStatus={fastContextToolsStatus}
               isBusy={isBusy} onConfigChange={handleConfigChange} />

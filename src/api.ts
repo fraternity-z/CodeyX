@@ -69,6 +69,8 @@ export const CODEY_API_COMMANDS = [
   "invoke_codey_plugin",
   "codex_extensions",
   "builtin_tools",
+  "list_codex_sessions",
+  "delete_codex_sessions",
   "conversation_git_status",
   "conversation_git_preview",
   "conversation_git_push_preview",

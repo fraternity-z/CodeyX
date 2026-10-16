@@ -20,6 +20,7 @@ mod official_accounts;
 mod plugins;
 mod prompt_optimization;
 mod runtime;
+mod sessions;
 mod updates;
 mod webhooks;
 mod wechat_claw;
@@ -1202,6 +1203,7 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "codex_extensions" => extensions::invoke(state, &args).await,
         "builtin_tools" => builtin_tools::invoke(state, &args).await,
+        "list_codex_sessions" | "delete_codex_sessions" => sessions::invoke(state, command, &args).await,
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         "prepare_computer_use" => prepare_computer_use().await,
         "get_codey_plugin_host_info"

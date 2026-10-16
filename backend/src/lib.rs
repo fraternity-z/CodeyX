@@ -43,6 +43,7 @@ mod provider_models;
 mod remote_control;
 mod route_request_log;
 mod session_index_cleanup;
+mod session_management;
 mod session_metadata;
 mod session_transfer;
 mod sqlite_util;

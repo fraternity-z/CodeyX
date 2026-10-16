@@ -1,6 +1,48 @@
 use super::*;
 
 #[tokio::test]
+async fn startup_finishes_confirmed_session_cleanup_before_rebuilding_indexes() {
+    let temp = tempfile::tempdir().unwrap();
+    let id = "11111111-1111-4111-8111-111111111111";
+    let folder = temp.path().join("archived_sessions");
+    std::fs::create_dir(&folder).unwrap();
+    let rollout = folder.join(format!("rollout-test-{id}.jsonl"));
+    std::fs::write(
+        &rollout,
+        serde_json::json!({"type":"session_meta","payload":{"id":id}}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        temp.path().join("session_index.jsonl"),
+        format!("{}\n", serde_json::json!({"id":id,"thread_name":"fixture"})),
+    )
+    .unwrap();
+    let pending = temp.path().join(".codey-session-cleanup-v1.json");
+    std::fs::write(
+        &pending,
+        serde_json::json!({"version":1,"ids":[id]}).to_string(),
+    )
+    .unwrap();
+    run_startup_session_maintenance(temp.path()).await.unwrap();
+    assert!(!rollout.exists());
+    assert!(!pending.exists());
+    assert!(
+        std::fs::read_to_string(temp.path().join("session_index.jsonl"))
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn startup_does_not_claim_success_when_session_cleanup_is_incomplete() {
+    let temp = tempfile::tempdir().unwrap();
+    let pending = temp.path().join(".codey-session-cleanup-v1.json");
+    std::fs::write(&pending, "{broken").unwrap();
+    assert!(run_startup_session_maintenance(temp.path()).await.is_err());
+    assert!(pending.exists());
+}
+
+#[tokio::test]
 async fn pet_state_failure_does_not_abort_startup_or_replace_state() {
     for slim_codex_pet in [true, false] {
         let temp = tempfile::tempdir().unwrap();
