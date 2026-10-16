@@ -11,7 +11,7 @@ import {
 } from "./helpers/jsx-tree.mjs";
 
 const [cardSource, policySource, stylesSource] = await Promise.all([
-  readSource("src/notifications/NotificationChannelsCard.tsx"),
+  readSource("src/features/notifications/NotificationChannelsCard.tsx"),
   readSource("src/FeaturePolicyCard.tsx"),
   readSource("src/styles.features.css"),
 ]);
@@ -19,12 +19,12 @@ const [cardSource, policySource, stylesSource] = await Promise.all([
 const ui = autoStubModule("ui");
 const icons = autoStubModule("icon");
 const graph = createModuleGraph(
-  new URL("../src/notifications/NotificationChannelsCard.tsx", import.meta.url),
+  new URL("../src/features/notifications/NotificationChannelsCard.tsx", import.meta.url),
   {
     autoStub: true,
     stubs: {
       "@tabler/icons-react": icons,
-      "../components/ui": ui,
+      "../../components/ui": ui,
       "./FeishuChannelEditor": autoStubModule("feishu-editor"),
       "./NotificationChannelDialog": autoStubModule("channel-dialog"),
       "./NtfyChannelEditor": autoStubModule("ntfy-editor"),

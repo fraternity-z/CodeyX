@@ -11,15 +11,15 @@ const updateSource = readFileSync(
   "utf8",
 );
 const dialogSource = readFileSync(
-  new URL("../src/notifications/NotificationChannelDialog.tsx", import.meta.url),
+  new URL("../src/features/notifications/useNotificationChannelController.ts", import.meta.url),
   "utf8",
 );
 
 test("notification dialog waits for the channel configuration to persist", () => {
   assert.match(dialogSource, /onSave: \(channel: NotificationChannel\) => Promise<boolean>/);
-  assert.match(dialogSource, /if \(await onSave\(draft\)\) onOpenChange\(false\)/);
-  assert.match(appSource, /async function persistNotificationChannels/);
-  assert.match(appSource, /await persist\(\{[\s\S]*?webhook:[\s\S]*?channels/);
+  assert.match(dialogSource, /if \(await onSave\(draft\) && current\(\)\) onOpenChange\(false\)/);
+  assert.match(appSource, /useNotificationsController\(/);
+  assert.doesNotMatch(appSource, /function (?:persistNotificationChannels|addNotificationChannel|updateNotificationChannel|removeNotificationChannel)/);
 });
 
 test("installing an update saves pending settings first", () => {

@@ -1,13 +1,12 @@
-import { memo, useLayoutEffect, useState } from "react";
+import { memo } from "react";
 import {
   IconCheck,
   IconLoader2 as LoaderCircle,
   IconSend,
 } from "@tabler/icons-react";
 
-import { invoke } from "../api";
-import { errorText, withTimeout } from "../appUtils";
 import { toast } from "@heroui/react";
+import { useNotificationChannelController } from "./useNotificationChannelController";
 import {
   Button,
   Dialog,
@@ -18,17 +17,15 @@ import {
   DialogTitle,
   Select,
   Switch,
-} from "../components/ui";
+} from "../../components/ui";
 import {
-  createNotificationChannel,
   getNotificationChannelDefinition,
   notificationChannelDefinitions,
 } from "./channelRegistry";
 import type { NotificationChannel, NotificationChannelKind } from "./types";
 
-const defaultNotificationChannelKind = notificationChannelDefinitions[0].kind;
-
 type NotificationChannelDialogProps = {
+  active?: boolean;
   container?: HTMLElement | null;
   popupContainer: HTMLElement | null;
   editingChannel: NotificationChannel | null;
@@ -39,6 +36,7 @@ type NotificationChannelDialogProps = {
 };
 
 function NotificationChannelDialogComponent({
+  active = true,
   container,
   popupContainer,
   editingChannel,
@@ -47,83 +45,13 @@ function NotificationChannelDialogComponent({
   onOpenChange,
   onSave,
 }: NotificationChannelDialogProps) {
-  const [draft, setDraft] = useState<NotificationChannel | null>(null);
-  const [isTesting, setIsTesting] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
+  const { draft, isTesting, isSaving, formBusy, canSave, updateDraft, selectChannel, changeOpen, closeDialog, saveChannel, testChannel } =
+    useNotificationChannelController({ active, open, editingChannel, isBusy, onOpenChange, onSave,
+      onFeedback: notice => notice.tone === "success" ? toast.success(notice.text) : toast.danger(notice.text) });
   const isEditing = editingChannel !== null;
   const definition = draft
     ? getNotificationChannelDefinition(draft.kind)
     : null;
-
-  useLayoutEffect(() => {
-    // 退出动画结束前保留表单，下次打开时再初始化。
-    if (!open) return;
-    setDraft(
-      editingChannel
-        ? { ...editingChannel }
-        : createNotificationChannel(defaultNotificationChannelKind),
-    );
-    setIsTesting(false);
-    setIsSaving(false);
-  }, [editingChannel?.id, open]);
-
-  function selectChannel(kind: NotificationChannelKind) {
-    if (draft?.kind === kind) return;
-    setDraft(createNotificationChannel(kind));
-  }
-
-  function updateDraft(patch: Partial<NotificationChannel>) {
-    setDraft((current) =>
-      current ? { ...current, ...patch } : current,
-    );
-  }
-
-  function closeDialog() {
-    if (!isBusy && !isTesting && !isSaving) onOpenChange(false);
-  }
-
-  async function saveChannel() {
-    if (
-      !draft ||
-      !definition?.isConfigured(draft)
-    ) {
-      return;
-    }
-    setIsSaving(true);
-    try {
-      if (await onSave(draft)) onOpenChange(false);
-    } finally {
-      setIsSaving(false);
-    }
-  }
-
-  async function testChannel() {
-    if (
-      !draft ||
-      !definition?.isConfigured(draft) ||
-      isBusy ||
-      isTesting
-    ) {
-      return;
-    }
-    setIsTesting(true);
-    try {
-      await withTimeout(
-        invoke("test_notification_channel", { channel: draft }),
-        12_000,
-        `${definition.addLabel}测试在 12 秒内没有完成，请检查渠道配置和网络`,
-      );
-      toast.success(
-        draft.kind === "wechatClaw"
-          ? "iLink 已接受测试消息，请在微信中确认接收"
-          : "测试发送成功",
-      );
-    } catch (error) {
-      toast.danger(errorText(error));
-    } finally {
-      setIsTesting(false);
-    }
-  }
 
   const ChannelEditor = definition?.Editor;
   const SelectedChannelIcon = definition?.Icon;
@@ -132,22 +60,18 @@ function NotificationChannelDialogComponent({
     label: item.displayName,
     value: item.kind,
   }));
-  const formBusy = isBusy || isTesting || isSaving;
-  const canTest = Boolean(draft && definition?.isConfigured(draft));
-  const canSave = Boolean(draft && definition?.isConfigured(draft));
+  const canTest = canSave;
 
   return (
-    <Dialog open={open} onOpenChange={(nextOpen) => {
-      if (nextOpen || (!isBusy && !isTesting && !isSaving)) onOpenChange(nextOpen);
-    }}>
+    <Dialog open={active && open} onOpenChange={changeOpen}>
       <DialogContent
         className="notification-channel-dialog"
         container={container ?? popupContainer ?? undefined}
         onEscapeKeyDown={(event) => {
-          if (isBusy || isTesting || isSaving) event.preventDefault();
+          if (formBusy) event.preventDefault();
         }}
         onPointerDownOutside={(event) => {
-          if (isBusy || isTesting || isSaving) event.preventDefault();
+          if (formBusy) event.preventDefault();
         }}
       >
         {draft && definition && ChannelEditor && SelectedChannelIcon ? (
@@ -211,6 +135,7 @@ function NotificationChannelDialogComponent({
             </div>
             <div className="notification-fields notification-dialog-fields">
               <ChannelEditor
+                active={active && open}
                 channel={draft}
                 disabled={formBusy}
                 onChange={updateDraft}

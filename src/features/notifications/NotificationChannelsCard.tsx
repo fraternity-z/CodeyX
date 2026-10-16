@@ -6,8 +6,8 @@ import {
   IconTrash,
 } from "@tabler/icons-react";
 
-import type { Config } from "../App.types";
-import { Badge, Button } from "../components/ui";
+import type { Config } from "../../App.types";
+import { Badge, Button } from "../../components/ui";
 import { getNotificationChannelDefinition } from "./channelRegistry";
 import { NotificationChannelDialog } from "./NotificationChannelDialog";
 import {
@@ -16,6 +16,7 @@ import {
 } from "./types";
 
 type NotificationChannelsCardProps = {
+  active?: boolean;
   config: Config;
   container?: HTMLElement | null;
   popupContainer: HTMLElement | null;
@@ -29,6 +30,7 @@ type NotificationChannelsCardProps = {
 };
 
 function NotificationChannelsCardComponent({
+  active = true,
   config,
   container,
   popupContainer,
@@ -175,6 +177,7 @@ function NotificationChannelsCardComponent({
         )}
       </ul>
       <NotificationChannelDialog
+        active={active}
         container={container ?? popupContainer}
         popupContainer={popupContainer}
         editingChannel={editingChannel}

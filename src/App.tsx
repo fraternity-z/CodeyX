@@ -24,10 +24,7 @@ import { CodeyPluginsSection } from "./features/codey-plugins";
 import { BuiltinToolsPage } from "./features/builtin-tools";
 import { CodexExtensionsPage } from "./features/codex-extensions";
 import { DiagnosticCleanupToast, useRuntimeMaintenanceController } from "./features/runtime-maintenance";
-import {
-  getNotificationChannelDefinition,
-} from "./notifications";
-import type { NotificationChannel } from "./notifications";
+import { useNotificationsController } from "./features/notifications";
 import { errorText } from "./appUtils";
 import type { DiagnosticStorageTarget } from "./diagnosticStorage";
 import { subagentUpdateNote } from "./modelSelectionNotice";
@@ -53,6 +50,7 @@ import type {
   AppProps,
   ProviderStatus,
   Config,
+  ConfigSaveResult,
   FastContextToolsStatus,
   ModelState,
   Profile,
@@ -85,6 +83,7 @@ export function App({
     editConfig,
     isOnlyNativeRouterToggle,
     adoptRouteConfig,
+    adoptSavedConfig,
     discardDraft,
   } = useDraftConfig();
   const { status, setStatus, markRestartInProgress, refreshStatus, refreshStatusForLoad,
@@ -139,6 +138,10 @@ export function App({
     markRestartInProgress, setRestartStatusError, setStatus, setBusy, setNotice, setConfirmation,
   });
   const isBusy = busy !== null || (injectionRepairRequested && !restartStatusError);
+  const { addNotificationChannel, updateNotificationChannel, askRemoveNotificationChannel } = useNotificationsController({
+    active: !embedded || modalVisible,
+    config, isBusy, onSaved: applySavedConfig, setBusy, setNotice, setConfirmation,
+  });
   const configLoaded = config !== null;
   const setSubagentOptimization = useCallback((enabled: boolean) => {
     setConfig((current) =>
@@ -349,30 +352,16 @@ export function App({
   }
 
   async function persist(next: Config) {
-    const result = await invoke<{
-      config: Config;
-      providerStatus?: ProviderStatus;
-      modelState?: ModelState;
-      restartRequired?: boolean;
-      modelHotReloaded?: boolean;
-      modelHotReloadError?: string;
-      routeRequestLogHotReloaded?: boolean;
-      routeRequestLogHealth?:
-        | "not_applicable"
-        | "unchanged"
-        | "enabled"
-        | "disabled"
-        | "superseded"
-        | "failed";
-      routeRequestLogHotReloadError?: string;
-      subagentConfigHotReloaded?: boolean;
-      subagentConfigRepaired?: boolean;
-      subagentConfigHealth?: string;
-      subagentConfigRepairReasons?: string[];
-      subagentConfigHotReloadError?: string;
-      fastContextToolsStatus?: FastContextToolsStatus;
-    }>("save_codey_config", { config: next });
-    setPersistedConfig(result.config);
+    const submitted = config ?? next;
+    const result = await invoke<ConfigSaveResult>("save_codey_config", { config: next });
+    applySavedConfig(result, submitted);
+    return result;
+  }
+
+  function applySavedConfig(result: ConfigSaveResult, submitted?: Config) {
+    const merged = submitted ? adoptSavedConfig(result.config, submitted) : adoptRouteConfig(result.config);
+    if (!merged) return false;
+    setDirty(merged.dirty);
     setFastContextToolsStatus(
       result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
     );
@@ -389,76 +378,9 @@ export function App({
         restartRequired: result.restartRequired,
       }));
     }
-    setDirty(false);
     // 保存结果已包含配置、模型和重启状态；其余运行状态在后台补充。
     void refreshStatus().catch(() => undefined);
-    return result;
-  }
-
-  async function persistNotificationChannels(
-    current: Config,
-    channels: NotificationChannel[],
-    successText: string,
-  ) {
-    if (isBusy) return false;
-    setBusy("save-notification-channel");
-    try {
-      await persist({
-        ...current,
-        webhook: {
-          ...current.webhook,
-          channels,
-        },
-      });
-      setNotice({ tone: "success", text: successText });
-      return true;
-    } catch (error) {
-      setNotice({ tone: "error", text: errorText(error) });
-      return false;
-    } finally {
-      setBusy(null);
-    }
-  }
-
-  async function addNotificationChannel(channel: NotificationChannel) {
-    if (!config) return false;
-    const channels = config.webhook.channels.some(
-      (existing) => existing.id === channel.id,
-    )
-      ? config.webhook.channels
-      : [...config.webhook.channels, channel];
-    return persistNotificationChannels(
-      config,
-      channels,
-      "通知渠道已保存，自动通知已生效",
-    );
-  }
-
-  async function updateNotificationChannel(
-    channelId: string,
-    patch: Partial<NotificationChannel>,
-  ) {
-    if (!config) return false;
-    const channels = config.webhook.channels.map((channel) =>
-      channel.id === channelId ? { ...channel, ...patch } : channel,
-    );
-    return persistNotificationChannels(
-      config,
-      channels,
-      "通知渠道已更新，自动通知已生效",
-    );
-  }
-
-  async function removeNotificationChannel(channelId: string) {
-    if (!config) return false;
-    const channels = config.webhook.channels.filter(
-      (channel) => channel.id !== channelId,
-    );
-    return persistNotificationChannels(
-      config,
-      channels,
-      "通知渠道已删除",
-    );
+    return true;
   }
 
   async function saveCurrent() {
@@ -531,18 +453,6 @@ export function App({
       description: "关闭后将丢弃尚未保存的配置修改。你可以取消关闭，继续编辑或保存。",
       confirmLabel: "放弃更改并关闭",
       run: closeSettings,
-    });
-  }
-
-  function askRemoveNotificationChannel(channel: NotificationChannel) {
-    const channelName = getNotificationChannelDefinition(channel.kind).addLabel;
-    setConfirmation({
-      action: "delete-notification-channel",
-      title: `删除${channelName}通知渠道？`,
-      description:
-        "将立即移除这个通知渠道，删除后不会再接收自动通知。",
-      confirmLabel: "删除渠道",
-      run: () => void removeNotificationChannel(channel.id),
     });
   }
 
@@ -886,7 +796,7 @@ export function App({
           </div>
         }
         sections={{
-          overview: (
+          overview: (active) => (
             <>
               <SettingsPageHeader
                 id="overview-title"
@@ -913,6 +823,7 @@ export function App({
                 showRestartAction={!embedded}
               />
               <FeaturePolicyCard
+                active={active && (!embedded || modalVisible)}
                 config={config}
                 isMacClient={status.clientPlatform === "macos"}
                 isWindowsClient={status.clientPlatform === "windows"}

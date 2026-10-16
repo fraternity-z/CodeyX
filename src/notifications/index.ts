@@ -1,12 +1,2 @@
-export { NotificationChannelsCard } from "./NotificationChannelsCard";
-export { MAX_NOTIFICATION_CHANNELS } from "./types";
-export {
-  createNotificationChannel,
-  getNotificationChannelDefinition,
-  notificationChannelDefinitions,
-} from "./channelRegistry";
-export type {
-  NotificationChannel,
-  NotificationChannelEditorProps,
-  NotificationChannelKind,
-} from "./types";
+export { NotificationChannelsCard, MAX_NOTIFICATION_CHANNELS } from "../features/notifications";
+export type { NotificationChannel, NotificationChannelEditorProps, NotificationChannelKind } from "../features/notifications";

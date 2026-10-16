@@ -6,8 +6,8 @@ import { NtfyChannelEditor } from "./NtfyChannelEditor";
 import { TelegramChannelEditor } from "./TelegramChannelEditor";
 import { WechatClawChannelEditor } from "./WechatClawChannelEditor";
 import { WecomChannelEditor } from "./WecomChannelEditor";
+import { channelLabels } from "./state";
 import type {
-  NotificationChannel,
   NotificationChannelEditorProps,
   NotificationChannelKind,
 } from "./types";
@@ -25,7 +25,6 @@ type NotificationChannelDefinition = {
   iconClassName?: string;
   Icon: ComponentType<NotificationChannelIconProps>;
   Editor: ComponentType<NotificationChannelEditorProps>;
-  isConfigured: (channel: NotificationChannel) => boolean;
 };
 
 function FeishuIcon({
@@ -104,73 +103,53 @@ const CHANNEL_DEFINITIONS: Record<
 > = {
   feishu: {
     kind: "feishu",
-    addLabel: "飞书",
+    addLabel: channelLabels.feishu,
     displayName: "飞书机器人",
     title: "飞书机器人 Webhook",
     description: "发送完成、失败和等待介入提醒",
     iconClassName: "feishu",
     Icon: FeishuIcon,
     Editor: FeishuChannelEditor,
-    isConfigured: (channel) =>
-      Boolean(channel.url.trim() || channel.urlConfigured),
   },
   wecom: {
     kind: "wecom",
-    addLabel: "企业微信",
+    addLabel: channelLabels.wecom,
     displayName: "企业微信机器人",
     title: "企业微信机器人 Webhook",
     description: "发送完成、失败和等待介入提醒",
     iconClassName: "wecom",
     Icon: WecomIcon,
     Editor: WecomChannelEditor,
-    isConfigured: (channel) =>
-      Boolean(channel.url.trim() || channel.urlConfigured),
   },
   telegram: {
     kind: "telegram",
-    addLabel: "Telegram",
+    addLabel: channelLabels.telegram,
     displayName: "Telegram Bot",
     title: "Telegram Bot",
     description: "发送完成、失败和等待介入提醒",
     iconClassName: "telegram",
     Icon: TelegramIcon,
     Editor: TelegramChannelEditor,
-    isConfigured: (channel) =>
-      Boolean(
-        (channel.botToken.trim() || channel.botTokenConfigured) &&
-          channel.chatId.trim(),
-      ),
   },
   wechatClaw: {
     kind: "wechatClaw",
-    addLabel: "微信 ClawBot",
+    addLabel: channelLabels.wechatClaw,
     displayName: "微信 ClawBot",
     title: "微信 ClawBot 通知",
     description: "扫码绑定后，把任务状态直接发送到个人微信",
     iconClassName: "wecom",
     Icon: WechatClawIcon,
     Editor: WechatClawChannelEditor,
-    isConfigured: (channel) =>
-      Boolean(
-        channel.sessionStatus !== "expired" &&
-          (channel.botToken.trim() || channel.botTokenConfigured) &&
-          (channel.contextToken.trim() || channel.contextTokenConfigured) &&
-          (channel.url.trim() || channel.urlConfigured) &&
-          channel.chatId.trim(),
-      ),
   },
   ntfy: {
     kind: "ntfy",
-    addLabel: "ntfy",
+    addLabel: channelLabels.ntfy,
     displayName: "ntfy",
     title: "ntfy 推送",
     description: "通过自建或公共 ntfy 服务器推送到手机与桌面",
     iconClassName: "ntfy",
     Icon: NtfyIcon,
     Editor: NtfyChannelEditor,
-    isConfigured: (channel) =>
-      Boolean(channel.url.trim() || channel.urlConfigured) &&
-      Boolean(channel.chatId.trim()),
   },
 };
 
@@ -184,27 +163,3 @@ export function getNotificationChannelDefinition(
   return CHANNEL_DEFINITIONS[kind];
 }
 
-export function createNotificationChannel(
-  kind: NotificationChannelKind,
-): NotificationChannel {
-  const id =
-    globalThis.crypto?.randomUUID?.() ??
-    `notification-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-  return {
-    id,
-    kind,
-    enabled: true,
-    url: "",
-    urlConfigured: false,
-    clearUrl: false,
-    botToken: "",
-    botTokenConfigured: false,
-    clearBotToken: false,
-    contextToken: "",
-    contextTokenConfigured: false,
-    clearContextToken: false,
-    getUpdatesBuf: "",
-    chatId: "",
-    sessionStatus: "active",
-  };
-}

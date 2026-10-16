@@ -3,19 +3,19 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const typesSource = readFileSync(
-  new URL("../src/notifications/types.ts", import.meta.url),
+  new URL("../src/features/notifications/types.ts", import.meta.url),
   "utf8",
 );
 const registrySource = readFileSync(
-  new URL("../src/notifications/channelRegistry.tsx", import.meta.url),
+  new URL("../src/features/notifications/channelRegistry.tsx", import.meta.url),
   "utf8",
 );
 const editorSource = readFileSync(
-  new URL("../src/notifications/WecomChannelEditor.tsx", import.meta.url),
+  new URL("../src/features/notifications/WecomChannelEditor.tsx", import.meta.url),
   "utf8",
 );
 const sharedEditorSource = readFileSync(
-  new URL("../src/notifications/WebhookChannelEditor.tsx", import.meta.url),
+  new URL("../src/features/notifications/WebhookChannelEditor.tsx", import.meta.url),
   "utf8",
 );
 

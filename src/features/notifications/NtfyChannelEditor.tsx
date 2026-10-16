@@ -1,7 +1,7 @@
 import { memo } from "react";
 
-import { Input } from "../components/ui";
-import { inputShellClass, insetInputClass } from "../uiClasses";
+import { Input } from "../../components/ui";
+import { inputShellClass, insetInputClass } from "../../uiClasses";
 import type { NotificationChannelEditorProps } from "./types";
 
 function NtfyChannelEditorComponent({

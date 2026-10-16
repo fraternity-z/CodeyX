@@ -5,10 +5,10 @@ import test from "node:test";
 const read = (relativePath) =>
   readFileSync(new URL(`../${relativePath}`, import.meta.url), "utf8");
 
-const typesSource = read("src/notifications/types.ts");
-const registrySource = read("src/notifications/channelRegistry.tsx");
-const editorSource = read("src/notifications/NtfyChannelEditor.tsx");
-const cardSource = read("src/notifications/NotificationChannelsCard.tsx");
+const typesSource = read("src/features/notifications/types.ts");
+const registrySource = read("src/features/notifications/channelRegistry.tsx");
+const editorSource = read("src/features/notifications/NtfyChannelEditor.tsx");
+const cardSource = read("src/features/notifications/NotificationChannelsCard.tsx");
 const styleSource = read("src/styles.features.css");
 const mockSource = read("src/dev/mockApi.ts");
 

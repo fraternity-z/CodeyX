@@ -34,8 +34,7 @@ import {
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { validateCodexLaunchProxy } from "./urlValidation";
 import type { DiagnosticStorageTarget } from "./diagnosticStorage";
-import { NotificationChannelsCard } from "./notifications/NotificationChannelsCard";
-import type { NotificationChannel } from "./notifications/types";
+import { NotificationChannelsCard, type NotificationChannel } from "./features/notifications";
 
 const GPU_LAUNCH_MODES = [
   { value: "off", label: "关闭" },
@@ -394,6 +393,7 @@ export function SubagentPolicyCardComponent({
 export const SubagentPolicyCard = memo(SubagentPolicyCardComponent);
 
 type FeaturePolicyCardProps = {
+  active?: boolean;
   config: Config;
   isMacClient: boolean;
   isWindowsClient: boolean;
@@ -433,6 +433,7 @@ const LAUNCH_PROXY_TOOLTIP_CONTENT = (
 );
 
 function FeaturePolicyCardComponent({
+  active = true,
   config,
   isMacClient,
   isWindowsClient,
@@ -720,6 +721,7 @@ function FeaturePolicyCardComponent({
       {onAddChannel && onChannelChange && onRequestRemoveChannel && (
         <section className="secondary-section notification-section" aria-labelledby="notification-title">
           <NotificationChannelsCard
+            active={active}
             config={config}
             container={popupContainer ?? null}
             popupContainer={popupContainer ?? null}

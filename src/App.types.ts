@@ -1,4 +1,4 @@
-import type { NotificationChannel } from "./notifications/types";
+import type { NotificationChannel } from "./features/notifications";
 
 export type UpstreamProtocol =
   | "official"
@@ -156,6 +156,24 @@ export type FastContextToolsStatus = {
   userConfigured: boolean;
   detectionFailed: boolean;
   serverId?: string;
+};
+
+export type ConfigSaveResult = {
+  config: Config;
+  providerStatus?: ProviderStatus;
+  modelState?: ModelState;
+  restartRequired?: boolean;
+  modelHotReloaded?: boolean;
+  modelHotReloadError?: string;
+  routeRequestLogHotReloaded?: boolean;
+  routeRequestLogHealth?: "not_applicable" | "unchanged" | "enabled" | "disabled" | "superseded" | "failed";
+  routeRequestLogHotReloadError?: string;
+  subagentConfigHotReloaded?: boolean;
+  subagentConfigRepaired?: boolean;
+  subagentConfigHealth?: string;
+  subagentConfigRepairReasons?: string[];
+  subagentConfigHotReloadError?: string;
+  fastContextToolsStatus?: FastContextToolsStatus;
 };
 
 export type Maintenance = {
