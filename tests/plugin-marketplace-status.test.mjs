@@ -7,14 +7,15 @@ import { readSource } from "./helpers/read-source.mjs";
 const root = new URL("../", import.meta.url);
 
 test("plugin marketplace repair is explicit and status checks stay read-only", async () => {
-  const [marketplaceSource, coreMarketplaceSource, embeddedSnapshot, pluginCommands, launcherSource, appSource, sectionsSource] =
+  const [marketplaceSource, coreMarketplaceSource, embeddedSnapshot, pluginCommands, launcherSource, requests, controller, sectionsSource] =
     await Promise.all([
       readSource("backend/src/plugin_marketplace.rs"),
       readSource("vendor/CodeyRuntime/crates/codey-runtime-core/src/plugin_marketplace.rs"),
       readFile(new URL("vendor/CodeyRuntime/assets/plugin-marketplaces/openai-curated-remote.zip", root)),
       readSource("backend/src/commands/plugins.rs"),
       readSource("backend/src/launcher.rs"),
-      readSource("src/App.tsx"),
+      readSource("src/features/runtime-maintenance/requests.ts"),
+      readSource("src/features/runtime-maintenance/useRuntimeMaintenanceController.ts"),
       readSource("src/OperationsPanel.tsx"),
     ]);
 
@@ -54,14 +55,14 @@ test("plugin marketplace repair is explicit and status checks stay read-only", a
   assert.match(pluginCommands, /async fn prepare_computer_use\(\)[\s\S]*?computer_use::prepare\(home\)/);
 
   assert.match(
-    appSource,
+    requests,
     /invoke<PluginMarketplaceStatus>\(\s*"plugin_marketplace_status"\s*,?\s*\)/,
   );
   assert.match(
-    appSource,
+    requests,
     /invoke<PluginMarketplaceStatus>\(\s*"repair_plugin_marketplace"\s*,?\s*\)/,
   );
-  assert.match(appSource, /initializedRemote/);
+  assert.match(controller, /initializedRemote/);
   assert.match(sectionsSource, /仅检查当前状态，不会在打开配置页时自动修复/);
   assert.match(sectionsSource, /CodeyX 内置市场：快照缺失/);
   assert.match(sectionsSource, /CodeyX 内置快照已接管，无需联网下载/);
@@ -69,7 +70,7 @@ test("plugin marketplace repair is explicit and status checks stay read-only", a
   assert.match(sectionsSource, /remoteRegistered/);
   assert.match(sectionsSource, /onRepairPluginMarketplace/);
   assert.match(sectionsSource, /手动修复/);
-  assert.match(appSource, /invoke<PluginMarketplaceStatus>\("prepare_computer_use"\)/);
+  assert.match(requests, /invoke<PluginMarketplaceStatus>\("prepare_computer_use"\)/);
   assert.match(sectionsSource, /onClick=\{onPrepareComputerUse\}/);
   assert.match(sectionsSource, /准备桌面插件/);
 });

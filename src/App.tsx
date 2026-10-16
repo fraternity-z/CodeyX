@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { toast } from "@heroui/react";
 import {
   IconBrandGithub,
   IconCheck,
@@ -24,15 +23,13 @@ import { OperationsPanel } from "./OperationsPanel";
 import { CodeyPluginsSection } from "./CodeyPluginsSection";
 import { BuiltinToolsPage } from "./features/builtin-tools";
 import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
-import { canRepairMainProcessInjection, isMainProcessInjectionConfirmed } from "./runtimeStatusPresentation";
-import { repairOperationResult } from "./injectionRepair";
+import { DiagnosticCleanupToast, useRuntimeMaintenanceController } from "./features/runtime-maintenance";
 import {
   getNotificationChannelDefinition,
 } from "./notifications";
 import type { NotificationChannel } from "./notifications";
-import { errorText, withTimeout } from "./appUtils";
-import type { DiagnosticStorageCleanup, DiagnosticStorageTarget } from "./diagnosticStorage";
-import { DiagnosticCleanupNotice } from "./DiagnosticCleanupNotice";
+import { errorText } from "./appUtils";
+import type { DiagnosticStorageTarget } from "./diagnosticStorage";
 import { subagentUpdateNote } from "./modelSelectionNotice";
 import { PromptOptimizationCard } from "./PromptOptimizationCard";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
@@ -58,8 +55,6 @@ import type {
   Config,
   FastContextToolsStatus,
   ModelState,
-  PluginMarketplaceStatus,
-  Notice,
   Profile,
 } from "./App.types";
 import { Badge, Button, Tooltip } from "./components/ui";
@@ -72,7 +67,6 @@ const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
   detectionFailed: true,
 };
 const CONFIG_LOAD_TIMEOUT_MS = 30_000;
-const PLUGIN_MARKETPLACE_STATUS_TIMEOUT_MS = 15_000;
 
 export function App({
   embedded = false,
@@ -100,9 +94,6 @@ export function App({
       active: !embedded || modalVisible,
       embedded,
     });
-  const [pluginMarketplaceStatus, setPluginMarketplaceStatus] =
-    useState<PluginMarketplaceStatus | null>(null);
-  const [computerUseNotice, setComputerUseNotice] = useState<Notice | null>(null);
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(
     null,
   );
@@ -128,13 +119,9 @@ export function App({
   }, [usageAnalysisOpen]);
   const [busy, setBusy] = useState<string | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [configRepairNotice, setConfigRepairNotice] = useState<{ tone: "info" | "success" | "error"; text: string } | null>(null);
-  const [injectionRepairRequested, setInjectionRepairRequested] = useState(false);
   const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
   const popupContainer = modalContainer ?? null;
   const noticeController = useAppNoticeController();
-  // 诊断清理结果用 HeroUI Toast 展示；同一次清理的“进行中 / 结果”共用一条提示，后者替换前者。
-  const cleanupToastKey = useRef<string | null>(null);
   const confirmationController = useConfirmationController();
   const setNotice = noticeController.set;
   const setConfirmation = confirmationController.set;
@@ -143,18 +130,16 @@ export function App({
   }, [restartStatusError, setNotice]);
 
   const provider = providerStatus?.provider;
+  const {
+    pluginMarketplaceStatus, computerUseNotice, configRepairNotice, injectionRepairRequested, diagnosticCleanup,
+    refreshPluginMarketplaceStatus, askRestartCodex, repairPluginMarketplace, prepareComputerUse,
+    repairMainProcessInjection, askRepairCodexConfig, analyzeDiagnosticStorage,
+  } = useRuntimeMaintenanceController({
+    active: !embedded || modalVisible,
+    config, dirty, isBusy: busy !== null, status, restartStatusError, persist, refreshStatus,
+    markRestartInProgress, setRestartStatusError, setStatus, setBusy, setNotice, setConfirmation,
+  });
   const isBusy = busy !== null || (injectionRepairRequested && !restartStatusError);
-  useEffect(() => {
-    if (!injectionRepairRequested || status.restartInProgress) return;
-    setInjectionRepairRequested(false);
-    const confirmed = isMainProcessInjectionConfirmed(status);
-    setNotice({
-      tone: status.startupError || !confirmed ? "error" : "success",
-      text: status.startupError || (confirmed
-        ? "主进程注入已修复，Codex 已自动重启"
-        : "尚未确认主进程注入修复成功，请查看运行状态或失败提示"),
-    });
-  }, [injectionRepairRequested, status.restartInProgress, status.startupError, status.running, status.maintenance, setNotice]);
   const configLoaded = config !== null;
   const setSubagentOptimization = useCallback((enabled: boolean) => {
     setConfig((current) =>
@@ -343,28 +328,6 @@ export function App({
       if (!current()) return;
       setLoadFailed(true);
       setNotice({ tone: "error", text: errorText(error) });
-    }
-  }
-
-  async function refreshPluginMarketplaceStatus(isCurrent: () => boolean = () => true) {
-    try {
-      const next = await withTimeout(
-        invoke<PluginMarketplaceStatus>("plugin_marketplace_status"),
-        PLUGIN_MARKETPLACE_STATUS_TIMEOUT_MS,
-        "插件市场状态查询超时",
-      );
-      if (!isCurrent()) return next;
-      setPluginMarketplaceStatus(next);
-      return next;
-    } catch (error) {
-      const next: PluginMarketplaceStatus = {
-        status: "error",
-        needsRepair: true,
-        message: errorText(error),
-      };
-      if (!isCurrent()) return next;
-      setPluginMarketplaceStatus(next);
-      return next;
     }
   }
 
@@ -572,29 +535,6 @@ export function App({
     });
   }
 
-  function askRestartCodex() {
-    if (restartStatusError) {
-      void runOperation("restart", async () => {
-        const next = await refreshStatus();
-        setNotice({
-          tone: next.startupError ? "error" : "info",
-          text: next.startupError || (next.restartInProgress
-            ? "Codex 仍在重启，请稍候"
-            : next.running ? "Codex 已运行" : "Codex 未运行"),
-        });
-      });
-      return;
-    }
-    setConfirmation({
-      action: "restart",
-      title: "重启 Codex？",
-      description:
-        "当前 Codex 客户端将被关闭并由 CodeyX 自动重新拉起，正在执行的本地任务会被中断。",
-      confirmLabel: "重启 Codex",
-      run: () => void restartCodex(),
-    });
-  }
-
   function askRemoveNotificationChannel(channel: NotificationChannel) {
     const channelName = getNotificationChannelDefinition(channel.kind).addLabel;
     setConfirmation({
@@ -604,161 +544,6 @@ export function App({
         "将立即移除这个通知渠道，删除后不会再接收自动通知。",
       confirmLabel: "删除渠道",
       run: () => void removeNotificationChannel(channel.id),
-    });
-  }
-
-  async function restartCodex() {
-    if (!config) return;
-    await runOperation("restart", async () => {
-      if (dirty) await persist(config);
-      setNotice({
-        tone: "info",
-        text: "正在重启 Codex，CodeyX 将自动重新拉起客户端…",
-      });
-      try {
-        await withTimeout(invoke("restart_codey"), 10_000,
-          "重启请求超时，暂时无法确认执行状态，请点击重新查询状态");
-      } catch (error) {
-        setRestartStatusError("暂时无法确认重启请求的执行状态，请点击重新查询状态");
-        throw error;
-      }
-      markRestartInProgress();
-    });
-  }
-
-  async function repairPluginMarketplace() {
-    await runOperation("repair-plugin-marketplace", async () => {
-      const result = await withTimeout(
-        invoke<PluginMarketplaceStatus>("repair_plugin_marketplace"),
-        30_000,
-        "插件市场修复超时，请稍后重试",
-      );
-      setPluginMarketplaceStatus(result);
-      if (result.status === "ready") {
-        setNotice({
-          tone: "success",
-          text:
-            result.configChanged ||
-            result.initializedRemote ||
-            result.configuredRemote
-              ? "插件市场已修复并立即生效，无需重启 Codex"
-              : "插件市场状态正常，无需修改",
-        });
-        return;
-      }
-      setNotice({
-        tone: "error",
-        text: "插件市场仍有缺失项，请检查本地市场文件后重试",
-      });
-    });
-  }
-
-  async function prepareComputerUse() {
-    await runOperation("prepare-computer-use", async () => {
-      setComputerUseNotice(null);
-      try {
-        const result = await withTimeout(
-          invoke<PluginMarketplaceStatus>("prepare_computer_use"),
-          30_000,
-          "桌面插件准备超时，请重新打开设置检查状态",
-        );
-        setPluginMarketplaceStatus(result);
-        setComputerUseNotice(result.computerUse?.ready
-          ? { tone: "success", text: "桌面插件已准备，请在 Codex 插件页面安装或更新 CodeyX Computer Use。" }
-          : { tone: "error", text: "桌面插件尚未准备完整，请重新准备。" });
-      } catch (error) {
-        setComputerUseNotice({ tone: "error", text: errorText(error) });
-      }
-    });
-  }
-
-  async function repairMainProcessInjection() {
-    if (!config || restartStatusError || !canRepairMainProcessInjection(status)) return;
-    await runOperation("repair-main-process-injection", async () => {
-      if (dirty) await persist(config);
-      setNotice({ tone: "info", text: "正在退出 Codex 并修复主进程注入，成功后将自动重启…" });
-      try {
-        await withTimeout(invoke("repair_main_process_injection"), 10_000,
-          "修复请求暂未确认，请稍后重新查询状态");
-        setInjectionRepairRequested(true);
-      } catch (error) {
-        const result = repairOperationResult(error);
-        setNotice({ tone: result.tone, text: result.text });
-        // 退出客户端会断开内嵌页面连接；后端明确拒绝才不会开始修复。
-        if (!result.unconfirmed) return;
-      }
-      markRestartInProgress();
-    });
-  }
-
-  function askRepairCodexConfig() {
-    if (isBusy) return;
-    setConfirmation({
-      action: "repair-codex-config",
-      title: "修复 Codex 配置？",
-      description: "将检查配置文件及相关路径，修改已有配置前自动备份，并修复能够确认的问题。修复成功后，请从 CodeyX 重启 Codex 使修改生效。",
-      confirmLabel: "确认修复",
-      run: () => void repairCodexConfig(),
-    });
-  }
-
-  async function repairCodexConfig() {
-    await runOperation("repair-codex-config", async () => {
-      const report = (notice: { tone: "info" | "success" | "error"; text: string }) => {
-        setConfigRepairNotice(notice);
-        setNotice(notice);
-      };
-      report({ tone: "info", text: "正在检查并修复 Codex 配置…" });
-      try {
-        const result = await invoke<{
-          message: string;
-          configPath: string;
-          repaired: boolean;
-          backupPath?: string | null;
-        }>("repair_codex_config");
-        const summary = result.message || (result.repaired
-          ? "Codex 配置已修复"
-          : "Codex 配置检查通过，无需修改");
-        report({
-          tone: "success",
-          text: [result.repaired ? "修复成功，请从 CodeyX 重启 Codex 使修改生效。" : null, summary, `配置文件：${result.configPath}`, result.backupPath ? `备份文件：${result.backupPath}` : null].filter(Boolean).join("\n"),
-        });
-      } catch (error) {
-        report({ tone: "error", text: `Codex 配置修复未完成：${errorText(error)}。请查看 CodeyX 错误日志；连接中断时可重新检查执行结果。` });
-      }
-    });
-  }
-
-  async function analyzeDiagnosticStorage(target: DiagnosticStorageTarget) {
-    await runOperation("clear-diagnostic-storage", async () => {
-      const title = target === "trace" ? "Trace 日志" : "Crashpad";
-      const replaceCleanupToast = (next: () => string) => {
-        if (cleanupToastKey.current) toast.close(cleanupToastKey.current);
-        cleanupToastKey.current = next();
-      };
-      replaceCleanupToast(() => toast(`${title}：正在分析并清理`, {
-        description: "正在统计占用并清理，请稍候…",
-        isLoading: true,
-        timeout: 0,
-      }));
-      try {
-        const result = await invoke<DiagnosticStorageCleanup>("clear_diagnostic_storage", { target });
-        setStatus((current) => ({
-          ...current,
-          traceLogWriteProtectionActive: result.traceLogWriteProtectionActive,
-        }));
-        const incomplete = result.status === "partial" || result.errors.length > 0;
-        replaceCleanupToast(() => toast(`${title}：${incomplete ? "部分项目未完成" : "分析并清理完成"}`, {
-          description: <DiagnosticCleanupNotice result={result} target={target} />,
-          variant: incomplete ? "warning" : "success",
-          timeout: 8_000,
-        }));
-      } catch (error) {
-        replaceCleanupToast(() => toast.danger(`${title}：清理结果未能确认`, {
-          description: `无法确认清理前后占用及清理情况：${errorText(error)}`,
-          timeout: 8_000,
-        }));
-      }
     });
   }
 
@@ -1209,6 +994,7 @@ export function App({
       )}
 
       <NoticeToast controller={noticeController} />
+      <DiagnosticCleanupToast state={diagnosticCleanup} />
 
       <ModelPickerDialog
         open={modelPickerVisible}

@@ -13,6 +13,7 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
     app,
     api,
     featurePolicy,
+    requests,
   ] = await Promise.all([
     readFile(
       new URL("../backend/src/crashpad_pending_guard.rs", import.meta.url),
@@ -32,6 +33,7 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
     readFile(new URL("../src/App.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/api.ts", import.meta.url), "utf8"),
     readFile(new URL("../src/FeaturePolicyCard.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/features/runtime-maintenance/requests.ts", import.meta.url), "utf8"),
   ]);
 
   assert.match(
@@ -78,7 +80,7 @@ test("Crashpad pending protection is bounded, allowlisted, and surfaced with Tra
   assert.match(diagnosticCommands, /"status": if errors\.is_empty\(\) \{ "ok" \} else \{ "partial" \}/);
   assert.doesNotMatch(runtime, /"crashpadPendingStats"|"traceLogStats"/);
 
-  assert.match(app, /invoke<DiagnosticStorageCleanup>\("clear_diagnostic_storage", \{ target \}\)/);
+  assert.match(requests, /invoke<DiagnosticStorageCleanup>\("clear_diagnostic_storage", \{ target \}\)/);
   assert.doesNotMatch(api, /"refresh_diagnostic_storage_stats"|"refresh_trace_log_stats"/);
   assert.match(api, /"clear_diagnostic_storage"/);
 });

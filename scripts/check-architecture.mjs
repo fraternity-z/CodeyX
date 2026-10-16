@@ -6,9 +6,7 @@ import ts from "typescript";
 // 既有扩展模块保留自己的分层测试；新功能目录自动纳入本检查。
 const legacyFeatures = new Set(["codex-extensions"]);
 const legacyAppCommands = new Set([
-  "codex_extensions", "load_codey_config", "plugin_marketplace_status", "save_codey_config",
-  "restart_codey", "repair_plugin_marketplace", "prepare_computer_use",
-  "repair_main_process_injection", "repair_codex_config", "clear_diagnostic_storage",
+  "codex_extensions", "load_codey_config", "save_codey_config",
 ]);
 const featureOf = (file) => /^src\/features\/([^/]+)\//.exec(file)?.[1];
 const layerOf = (file) => {

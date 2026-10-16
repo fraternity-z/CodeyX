@@ -1,0 +1,209 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { createControllerHarness, deferred, installControllerWindow } from "./helpers/controller-harness.mjs";
+import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
+import { elementProps } from "./helpers/jsx-tree.mjs";
+
+const api = await loadTypeScriptModule(new URL("../src/api.ts", import.meta.url));
+const presentation = await loadTypeScriptModule(new URL("../src/runtimeStatusPresentation.ts", import.meta.url));
+const ready = { status: "ready", computerUse: { supported: true, ready: true } };
+function fixture(extra = {}, repairAllowed = false) {
+  const calls = [], notices = [], busy = [], saves = [], statuses = [], restartErrors = [];
+  let confirmation = null, restarts = 0;
+  const options = {
+    active: true, config: { retained: "draft" }, dirty: false, isBusy: false,
+    status: { running: true }, restartStatusError: null,
+    persist: async config => { saves.push(config); },
+    refreshStatus: async () => options.status,
+    markRestartInProgress: () => { restarts++; options.status = { ...options.status, restartInProgress: true }; },
+    setRestartStatusError: error => { restartErrors.push(error); options.restartStatusError = error; },
+    setStatus: update => { options.status = update(options.status); statuses.push(options.status); },
+    setBusy: name => { busy.push(name); options.isBusy = name !== null; },
+    setNotice: notice => notices.push(notice), setConfirmation: value => { confirmation = value; }, ...extra,
+  };
+  const h = createControllerHarness(new URL("../src/features/runtime-maintenance/useRuntimeMaintenanceController.ts", import.meta.url), "useRuntimeMaintenanceController", {
+    "../../api": { invoke(command, args) { const call = { command, args, ...deferred() }; calls.push(call); return call.promise; } },
+    "../../runtimeStatusPresentation": repairAllowed ? { ...presentation, canRepairMainProcessInjection: () => true } : presentation,
+  });
+  return { ...h, options, calls, notices, busy, saves, statuses, restartErrors,
+    render: () => h.render(options), get confirmation() { return confirmation; }, get restarts() { return restarts; } };
+}
+
+test("市场读取独立于修复，过期成功、错误和加载轮次均不覆盖最新状态", async t => {
+  installControllerWindow(t);
+  for (const failed of [false, true]) {
+    const h = fixture(); const c = h.render();
+    const first = c.refreshPluginMarketplaceStatus();
+    const second = c.refreshPluginMarketplaceStatus();
+    h.calls[1].resolve(ready); await second;
+    if (failed) h.calls[0].reject(new Error("old")); else h.calls[0].resolve({ status: "needs_repair" });
+    await first; assert.deepEqual(h.render().pluginMarketplaceStatus, ready);
+    let current = true;
+    const stale = h.render().refreshPluginMarketplaceStatus(() => current); current = false;
+    h.calls[2].resolve({ status: "error" }); await stale;
+    assert.deepEqual(h.render().pluginMarketplaceStatus, ready);
+    assert.ok(h.calls.every(call => call.command === "plugin_marketplace_status")); h.unmount();
+  }
+});
+
+test("市场读取超时可恢复，写入作废旧读且同一轮重复提交被阻止", async t => {
+  const browser = installControllerWindow(t);
+  const h = fixture(); const read = h.render().refreshPluginMarketplaceStatus();
+  browser.tick(); await read; assert.match(h.render().pluginMarketplaceStatus.message, /查询超时/);
+  const oldRead = h.render().refreshPluginMarketplaceStatus(); const old = h.calls.at(-1);
+  const c = h.render(); const write = c.repairPluginMarketplace();
+  await c.repairPluginMarketplace(); await c.prepareComputerUse();
+  assert.equal(h.calls.length, 3);
+  h.calls.at(-1).resolve({ ...ready, initializedRemote: true }); await write;
+  old.reject(new Error("old read")); await oldRead;
+  assert.equal(h.render().pluginMarketplaceStatus.status, "ready");
+  assert.match(h.notices.at(-1).text, /立即生效，无需重启/);
+  assert.deepEqual(h.busy, ["repair-plugin-marketplace", null]);
+  h.calls[0].resolve({ status: "error" }); await h.flush();
+  assert.equal(h.render().pluginMarketplaceStatus.status, "ready"); h.unmount();
+});
+
+test("插件修复保留正常、未完成、失败语义，桌面准备反馈独立展示", async t => {
+  installControllerWindow(t);
+  const h = fixture();
+  for (const [result, tone, text] of [[ready, "success", /状态正常/], [{ status: "needs_repair" }, "error", /仍有缺失项/], [new Error("repair failed"), "error", /repair failed/]]) {
+    const work = h.render().repairPluginMarketplace();
+    if (result instanceof Error) h.calls.at(-1).reject(result); else h.calls.at(-1).resolve(result);
+    await work; assert.equal(h.notices.at(-1).tone, tone); assert.match(h.notices.at(-1).text, text);
+  }
+  for (const [result, tone] of [[ready, "success"], [{ status: "needs_repair" }, "error"], [new Error("prepare failed"), "error"]]) {
+    const before = h.notices.length; const work = h.render().prepareComputerUse();
+    assert.equal(h.calls.at(-1).command, "prepare_computer_use");
+    if (result instanceof Error) h.calls.at(-1).reject(result); else h.calls.at(-1).resolve(result);
+    await work; assert.equal(h.render().computerUseNotice.tone, tone); assert.equal(h.notices.length, before);
+  }
+  assert.deepEqual(h.options.config, { retained: "draft" }); h.unmount();
+});
+
+test("隐藏暂停读取和写入，重开丢弃旧结果并在后台写入结束后刷新", async t => {
+  installControllerWindow(t);
+  for (const mutation of [false, true]) for (const failed of [false, true]) {
+    const h = fixture(); const c = h.render();
+    const work = mutation ? c.prepareComputerUse() : c.refreshPluginMarketplaceStatus(); const old = h.calls[0];
+    h.options.active = false; h.render();
+    await h.render().refreshPluginMarketplaceStatus(); await h.render().prepareComputerUse(); assert.equal(h.calls.length, 1);
+    h.options.active = true; h.render();
+    if (mutation) { await h.render().prepareComputerUse(); assert.equal(h.calls.length, 1); }
+    if (failed) old.reject(new Error("late")); else old.resolve(ready);
+    await work; await h.flush();
+    assert.equal(h.render().pluginMarketplaceStatus, null); assert.equal(h.render().computerUseNotice, null);
+    assert.equal(h.notices.length, 0); assert.equal(h.calls.at(-1).command, "plugin_marketplace_status");
+    h.calls.at(-1).resolve(ready); await h.flush(); assert.deepEqual(h.render().pluginMarketplaceStatus, ready);
+    h.unmount();
+  }
+});
+
+test("全局忙碌、隐藏与卸载不提交维护命令；卸载释放超时并屏蔽迟到回写", async t => {
+  const browser = installControllerWindow(t);
+  for (const extra of [{ active: false }, { isBusy: true }]) {
+    const h = fixture(extra); const c = h.render();
+    c.askRestartCodex(); c.askRepairCodexConfig();
+    await c.prepareComputerUse(); await c.repairPluginMarketplace(); await c.analyzeDiagnosticStorage("trace");
+    assert.equal(h.confirmation, null); assert.equal(h.calls.length, 0); h.unmount();
+  }
+  for (const action of ["refreshPluginMarketplaceStatus", "prepareComputerUse", "repairPluginMarketplace", "analyzeDiagnosticStorage"]) {
+    for (const failed of [false, true]) {
+      const h = fixture(); const work = h.render()[action](...(action === "analyzeDiagnosticStorage" ? ["trace"] : []));
+      h.unmount(); assert.equal(browser.timers.size, 0);
+      const before = [h.notices.length, h.busy.length, h.statuses.length];
+      if (failed) h.calls[0].reject(new Error("late")); else h.calls[0].resolve(ready);
+      await work; assert.equal(h.writesAfterUnmount, 0);
+      assert.deepEqual([h.notices.length, h.busy.length, h.statuses.length], before);
+    }
+  }
+});
+
+test("重启确认使用最新草稿，先保存再重启；保存失败保留草稿且不重启", async t => {
+  installControllerWindow(t);
+  const save = deferred(); const h = fixture({ dirty: true, persist: config => { h.saves.push(config); return save.promise; } });
+  h.render().askRestartCodex(); assert.equal(h.confirmation.action, "restart"); assert.equal(h.calls.length, 0);
+  const latest = { retained: "latest draft" }; h.options.config = latest; h.render(); h.confirmation.run();
+  h.confirmation.run(); assert.deepEqual(h.saves, [latest]); assert.equal(h.calls.length, 0);
+  save.resolve(); await h.flush(); assert.equal(h.calls[0].command, "restart_codey");
+  h.calls[0].resolve(); await h.flush(); assert.equal(h.restarts, 1); h.unmount();
+  const failed = fixture({ dirty: true, persist: async () => { throw new Error("save failed"); } });
+  failed.render().askRestartCodex(); failed.confirmation.run(); await failed.flush();
+  assert.equal(failed.calls.length, 0); assert.match(failed.notices.at(-1).text, /save failed/);
+  assert.deepEqual(failed.options.config, { retained: "draft" }); failed.unmount();
+});
+
+test("重启请求超时只查询状态，不自动重放命令", async t => {
+  const browser = installControllerWindow(t); const h = fixture();
+  h.render().askRestartCodex(); h.confirmation.run(); browser.tick(); await h.flush();
+  assert.match(h.restartErrors[0], /无法确认/); assert.equal(h.restarts, 0);
+  h.render().askRestartCodex(); await h.flush(); assert.equal(h.calls.length, 1); assert.match(h.notices.at(-1).text, /Codex 已运行/);
+  h.calls[0].resolve(); await h.flush(); assert.equal(h.restarts, 0); h.unmount();
+});
+
+test("配置修复可在配置加载失败时确认执行，结果保留路径、备份和连接失败提示", async t => {
+  installControllerWindow(t); const h = fixture({ config: null });
+  for (const result of [{ repaired: true, configPath: "test/config.toml", backupPath: "test/backup.toml", message: "已修复" }, { repaired: false, configPath: "test/config.toml" }, new Error("disconnected")]) {
+    h.render().askRepairCodexConfig(); assert.equal(h.confirmation.action, "repair-codex-config");
+    const count = h.calls.length; h.confirmation.run(); h.confirmation.run(); assert.equal(h.calls.length, count + 1);
+    assert.equal(h.calls.at(-1).command, "repair_codex_config"); assert.equal(h.render().configRepairNotice.tone, "info");
+    if (result instanceof Error) h.calls.at(-1).reject(result); else h.calls.at(-1).resolve(result);
+    await h.flush(); const notice = h.render().configRepairNotice;
+    assert.deepEqual(notice, h.notices.at(-1));
+    assert.match(notice.text, result instanceof Error ? /未完成.*disconnected.*连接中断/ : result.repaired ? /重启[\s\S]*备份文件：test\/backup.toml/ : /无需修改/);
+  }
+  h.unmount();
+});
+
+test("注入修复遵守平台能力，支持时区分后端拒绝与连接中断", async t => {
+  installControllerWindow(t);
+  const disabled = fixture(); await disabled.render().repairMainProcessInjection(); assert.equal(disabled.calls.length, 0); disabled.unmount();
+  for (const error of [null, new api.CodeyApiError("rejected"), new Error("disconnected")]) {
+    const h = fixture({}, true); const work = h.render().repairMainProcessInjection();
+    assert.equal(h.calls[0].command, "repair_main_process_injection");
+    if (error) h.calls[0].reject(error); else h.calls[0].resolve(); await work;
+    if (error instanceof api.CodeyApiError) { assert.equal(h.restarts, 0); assert.match(h.notices.at(-1).text, /被拒绝/); }
+    else {
+      assert.equal(h.restarts, 1);
+      if (error) assert.match(h.notices.at(-1).text, /待确认/);
+      else {
+        assert.equal(h.render().injectionRepairRequested, true);
+        h.options.status = { running: true, restartInProgress: false, maintenance: { startupInjectionMode: "inspector" } };
+        h.render(); assert.match(h.notices.at(-1).text, /已修复.*已自动重启/);
+      }
+    }
+    h.unmount();
+  }
+});
+
+test("诊断清理传递目标并保留其他运行状态，失败与隐藏不回写旧结果", async t => {
+  installControllerWindow(t); const h = fixture();
+  for (const target of ["trace", "crashpad"]) {
+    const work = h.render().analyzeDiagnosticStorage(target);
+    assert.deepEqual(h.calls.at(-1).args, { target }); assert.equal(h.render().diagnosticCleanup.phase, "running");
+    h.calls.at(-1).resolve({ status: "partial", errors: ["locked"], traceLogWriteProtectionActive: true }); await work;
+    assert.equal(h.render().diagnosticCleanup.phase, "complete"); assert.equal(h.options.status.running, true);
+    assert.equal(h.options.status.traceLogWriteProtectionActive, true);
+  }
+  const failed = h.render().analyzeDiagnosticStorage("trace"); h.calls.at(-1).reject(new Error("unknown")); await failed;
+  assert.deepEqual(h.render().diagnosticCleanup, { phase: "failed", target: "trace", error: "unknown" });
+  const work = h.render().analyzeDiagnosticStorage("trace"); const old = h.calls.at(-1); const count = h.statuses.length;
+  h.options.active = false; h.render(); old.resolve({ status: "ok", errors: [] }); await work;
+  assert.equal(h.render().diagnosticCleanup, null); assert.equal(h.statuses.length, count); h.unmount();
+});
+
+test("诊断 Toast 替换进行态，保留部分成功和错误呈现，卸载关闭提示", () => {
+  const shown = [], closed = [];
+  const toast = (title, options) => { const key = String(shown.length); shown.push({ key, title, ...options }); return key; };
+  toast.danger = (title, options) => toast(title, { ...options, variant: "danger" }); toast.close = key => closed.push(key);
+  const h = createControllerHarness(new URL("../src/features/runtime-maintenance/DiagnosticCleanupToast.tsx", import.meta.url), "DiagnosticCleanupToast", {
+    "@heroui/react": { toast }, "../../DiagnosticCleanupNotice": { DiagnosticCleanupNotice: () => null },
+  });
+  h.render({ state: null }); assert.equal(shown.length, 0);
+  h.render({ state: { target: "trace", phase: "running" } }); assert.equal(shown[0].isLoading, true); assert.equal(shown[0].timeout, 0);
+  const result = { status: "partial", errors: ["locked"] };
+  h.render({ state: { target: "trace", phase: "complete", result } }); assert.deepEqual(closed, ["0"]);
+  assert.equal(shown[1].variant, "warning"); assert.deepEqual(elementProps(shown[1].description), { result, target: "trace" });
+  h.render({ state: { target: "crashpad", phase: "complete", result: { status: "ok", errors: [] } } }); assert.equal(shown[2].variant, "success");
+  h.render({ state: { target: "crashpad", phase: "failed", error: "unknown" } }); assert.match(shown[3].description, /无法确认.*unknown/);
+  h.unmount(); assert.deepEqual(closed, ["0", "1", "2", "3"]);
+});

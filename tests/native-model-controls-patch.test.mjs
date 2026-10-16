@@ -729,13 +729,14 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
 });
 
 test("starting or restarting Codex replaces the old runtime with one managed by Codey", async () => {
-  const [runtimeSource, launcherSource, launcherProcessSource, launcherPlatformSource, appSource] =
+  const [runtimeSource, launcherSource, launcherProcessSource, launcherPlatformSource, controller, requests] =
     await Promise.all([
     readSource("backend/src/commands/runtime.rs"),
     readSource("backend/src/launcher.rs"),
     readSource("backend/src/launcher/process.rs"),
     readSource("backend/src/launcher/platform.rs"),
-    readSource("src/App.tsx"),
+    readSource("src/features/runtime-maintenance/useRuntimeMaintenanceController.ts"),
+    readSource("src/features/runtime-maintenance/requests.ts"),
   ]);
   const launcherModules =
     `${launcherSource}\n${launcherProcessSource}\n${launcherPlatformSource}`;
@@ -785,7 +786,8 @@ test("starting or restarting Codex replaces the old runtime with one managed by 
   assert.match(launcherModules, /libc::SIGKILL/);
   assert.doesNotMatch(runtimeSource, /"close_codex"/);
   assert.doesNotMatch(runtimeSource, /show_manual_relaunch_prompt/);
-  assert.match(appSource, /await withTimeout\(invoke\("restart_codey"\),/);
-  assert.match(appSource, /CodeyX 将自动重新拉起客户端/);
-  assert.doesNotMatch(appSource, /关闭 Codex/);
+  assert.match(controller, /await withTimeout\(runtimeMaintenanceRequests\.restart\(\),/);
+  assert.match(requests, /invoke<void>\("restart_codey"\)/);
+  assert.match(controller, /CodeyX 将自动重新拉起客户端/);
+  assert.doesNotMatch(controller, /关闭 Codex/);
 });

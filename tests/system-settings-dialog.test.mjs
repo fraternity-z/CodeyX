@@ -164,7 +164,7 @@ test("App 把系统设置对话框接到修复命令与自动更新保存入口"
   assert.match(appSource, /onRepairCodexConfig=\{askRepairCodexConfig\}/);
   assert.match(appSource, /onCodeyUpdatePolicyChange=\{changeUpdatePolicy\}/);
   assert.match(appSource, /codeyUpdatePolicy=\{config\.codeyUpdatePolicy\}/);
-  assert.match(appSource, /invoke<[\s\S]{0,240}?>\("repair_codex_config"\)/);
+  assert.match(appSource, /useRuntimeMaintenanceController\(/);
   assert.match(appSource, /className="sidebar-footer-bar"/);
   assert.match(appSource, /className="sidebar-footer-left"/);
   assert.doesNotMatch(appSource, /className="sidebar-footer-brand"/);

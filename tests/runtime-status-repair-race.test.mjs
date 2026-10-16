@@ -3,9 +3,11 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
+import { createControllerHarness, installControllerWindow } from "./helpers/controller-harness.mjs";
 
 for (const operation of ["repair", "restart"]) {
-test(`starting ${operation} discards older status flights and queued injection refreshes`, async () => {
+test(`starting ${operation} discards older status flights and queued injection refreshes`, async t => {
+  installControllerWindow(t);
   const values = [];
   const requests = [];
   const react = {
@@ -47,29 +49,21 @@ test(`starting ${operation} discards older status flights and queued injection r
   if (operation === "repair") {
     hook.markRestartInProgress();
   } else {
-    const appSource = await readFile(new URL("../src/App.tsx", import.meta.url), "utf8");
-    const tree = ts.createSourceFile("App.tsx", appSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
-    let handler;
-    const visit = (node) => {
-      if (ts.isFunctionDeclaration(node) && node.name?.text === "restartCodex") handler = node.getText(tree);
-      ts.forEachChild(node, visit);
-    };
-    visit(tree);
-    assert.ok(handler);
     const calls = [];
-    const context = {
-      config: {}, dirty: false,
-      runOperation: async (_name, run) => run(),
-      setNotice: () => {},
-      withTimeout: (promise) => promise,
-      invoke: async (command) => { calls.push(command); },
+    let confirmation;
+    const maintenance = createControllerHarness(new URL("../src/features/runtime-maintenance/useRuntimeMaintenanceController.ts", import.meta.url), "useRuntimeMaintenanceController", {
+      "../../api": { invoke: async command => { calls.push(command); } },
+    });
+    maintenance.render({
+      active: true, config: {}, dirty: false, isBusy: false, status: { running: true }, restartStatusError: null,
+      setBusy: () => {}, setNotice: () => {}, setConfirmation: next => { confirmation = next; },
       setRestartStatusError: () => assert.fail("restart unexpectedly failed"),
       markRestartInProgress: hook.markRestartInProgress,
-    };
-    const compiledHandler = ts.transpileModule(handler, {}).outputText;
-    const restart = new Function(...Object.keys(context), `${compiledHandler}; return restartCodex;`)(...Object.values(context));
-    await restart();
+    }).askRestartCodex();
+    confirmation.run();
+    await maintenance.flush();
     assert.deepEqual(calls, ["restart_codey"]);
+    maintenance.unmount();
   }
   assert.equal(values[0].restartInProgress, true);
   const freshFlight = hook.refreshStatus();
