@@ -31,7 +31,7 @@ import type { NotificationChannel } from "./notifications";
 import { errorText } from "./appUtils";
 import type { DiagnosticStorageTarget } from "./diagnosticStorage";
 import { subagentUpdateNote } from "./modelSelectionNotice";
-import { PromptOptimizationCard } from "./PromptOptimizationCard";
+import { PromptOptimizationCard } from "./features/prompt-optimization";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
@@ -959,8 +959,9 @@ export function App({
               onRequestConfirmation={setConfirmation}
             />
           ),
-          prompt: (
+          prompt: (active) => (
             <PromptOptimizationCard
+              active={active && (!embedded || modalVisible)}
               config={config}
               isBusy={isBusy}
               subagentModelOptions={subagentModelOptions}

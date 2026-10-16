@@ -11,7 +11,7 @@ import {
 } from "./helpers/jsx-tree.mjs";
 
 const [promptSource, apiSource, backendSource] = await Promise.all([
-  readSource("src/PromptOptimizationCard.tsx"),
+  readSource("src/features/prompt-optimization/PromptOptimizationCard.tsx"),
   readSource("src/api.ts"),
   readSource("backend/src/commands.rs"),
 ]);
@@ -28,13 +28,12 @@ const promptCard = await createModuleGraph(
     stubs: {
       "@heroui/react": heroui,
       "@tabler/icons-react": icons,
-      "./api": { invoke: async () => ({}) },
-      "./appUtils": { errorText: String, withTimeout: (promise) => promise },
-      "./components/ManualModelCombobox": autoStubModule("manual-combobox"),
-      "./components/ModelCombobox": autoStubModule("combobox"),
-      "./components/ui": ui,
-      "./SettingsPageHeader": autoStubModule("settings-header"),
-      "./urlValidation": { validateOutboundApiUrl: () => "" },
+      "../../api": { invoke: async () => ({}) },
+      "../../components/ManualModelCombobox": autoStubModule("manual-combobox"),
+      "../../components/ModelCombobox": autoStubModule("combobox"),
+      "../../components/ui": ui,
+      "../../SettingsPageHeader": autoStubModule("settings-header"),
+      "../../urlValidation": { validateOutboundApiUrl: () => "" },
     },
   },
 );

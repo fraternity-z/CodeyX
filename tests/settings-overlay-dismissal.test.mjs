@@ -57,7 +57,7 @@ test("settings controls and popups share the modal busy and portal boundaries", 
     await Promise.all([
       readFile(new URL("src/App.tsx", root), "utf8"),
       readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
-      readFile(new URL("src/PromptOptimizationCard.tsx", root), "utf8"),
+      readFile(new URL("src/features/prompt-optimization/PromptOptimizationCard.tsx", root), "utf8"),
       readFile(new URL("src/notifications/NotificationChannelsCard.tsx", root), "utf8"),
       readFile(new URL("src/notifications/NotificationChannelDialog.tsx", root), "utf8"),
     ]);

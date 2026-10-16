@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const cardSource = readFileSync(
-  new URL("../src/PromptOptimizationCard.tsx", import.meta.url),
+  new URL("../src/features/prompt-optimization/PromptOptimizationCard.tsx", import.meta.url),
   "utf8",
 );
 const backendSource = readFileSync(
@@ -78,8 +78,10 @@ test("prompt optimization supports all manual upstream request formats", () => {
 test("prompt optimization connection tests use the shared toast instead of inline results", () => {
   assert.match(appSource, /<PromptOptimizationCard[\s\S]*?onNotice=\{setNotice\}/);
   assert.match(cardSource, /onNotice: \(notice: Notice\) => void/);
-  assert.match(cardSource, /showTestNotice\(\s*"success"/);
-  assert.match(cardSource, /showTestNotice\(\s*"error"/);
+  assert.match(cardSource, /toast\.success\(text\)/);
+  assert.match(cardSource, /toast\.danger\(text\)/);
+  assert.match(cardSource, /usePromptOptimizationController/);
+  assert.doesNotMatch(cardSource, /invoke|withTimeout|\.\/requests/);
   assert.doesNotMatch(cardSource, /<NoticeToast/);
   assert.doesNotMatch(cardSource, /\btestResult\b/);
 });

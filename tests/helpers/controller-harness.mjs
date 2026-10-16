@@ -13,6 +13,7 @@ export function createControllerHarness(url, name, stubs = {}) {
   let unmounted = false, writesAfterUnmount = 0;
   const same = (left, right) => left && right && left.length === right.length && left.every((item, index) => Object.is(item, right[index]));
   const react = {
+    memo: component => component,
     useState(initial) {
       const index = cursor++;
       if (!(index in hooks)) hooks[index] = { value: typeof initial === "function" ? initial() : initial };
