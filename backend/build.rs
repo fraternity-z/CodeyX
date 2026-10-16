@@ -10,16 +10,22 @@ fn main() {
         "../vite.remote.config.ts",
         "../package.json",
         "../pnpm-lock.yaml",
+        "../pnpm-workspace.yaml",
+        "../patches",
+        "../tsconfig.json",
+        "../.gitignore",
         "icons/Codey.ico",
         "../scripts/build-overlay.mjs",
         "../scripts/build-output.mjs",
+        "../scripts/overlay-build-cache.mjs",
         "../public",
+        "../dist-overlay",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
 
-    // scripts/build.mjs 已经先运行过 build-overlay.mjs，再由 release 构建脚本
-    // 重复执行一次 Vite 只会白花几秒；调用方设置该变量表示产物已就绪。
+    // 构建入口或发布检查先准备前端产物后，传入此标记避免重复调用。
+    // 直接运行 Cargo 时，前端脚本也会按输入和产物摘要复用已有构建。
     // include_str! 会把 dist-overlay 下的文件登记进 dep-info，跳过时改动产物
     // 仍会触发重新编译。
     println!("cargo:rerun-if-env-changed=CODEY_SKIP_OVERLAY_BUILD");
@@ -34,14 +40,13 @@ fn main() {
             "远程页面资源不存在，请先运行 pnpm run vite:build"
         );
     } else {
-        let npm = if cfg!(windows) { "npm.cmd" } else { "npm" };
-        match Command::new(npm)
-            .args(["run", "vite:build"])
+        match Command::new("node")
+            .arg("scripts/build-overlay.mjs")
             .current_dir(Path::new(".."))
             .status()
         {
             Err(error) => panic!(
-                "无法运行 npm 构建 Codey 配置页：{error}。请先安装 Node.js，并在仓库根目录执行 pnpm install"
+                "无法运行 Node.js 构建 Codey 配置页：{error}。请先安装 Node.js，并在仓库根目录执行 pnpm install"
             ),
             Ok(status) if !status.success() => panic!(
                 "Codey 配置页构建失败（退出码 {}）。请在仓库根目录执行 pnpm install 后重试",

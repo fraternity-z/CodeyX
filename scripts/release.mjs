@@ -87,11 +87,12 @@ function parseArguments(argv) {
   };
 }
 
-function run(command, args, { capture = false } = {}) {
+function run(command, args, { capture = false, env = process.env } = {}) {
   const result = spawnSync(command, args, {
     cwd: root,
     encoding: "utf8",
     stdio: capture ? ["ignore", "pipe", "pipe"] : "inherit",
+    env,
   });
   if (result.error) fail(result.error.message);
   if (result.status !== 0) {
@@ -205,15 +206,16 @@ function hasStagedChanges() {
   return diff.status === 1;
 }
 
-function runChecks() {
-  run("pnpm", ["install", "--frozen-lockfile"]);
-  run("pnpm", ["run", "check"]);
-  run("pnpm", ["run", "test:js"]);
-  run("pnpm", ["run", "vite:build"]);
-  run("cargo", ["fmt", "--all", "--", "--check"]);
-  run("cargo", ["test", "--workspace", "--locked"]);
-  run("cargo", ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"]);
-  run("git", ["diff", "--check"]);
+export function runChecks(execute = run, env = process.env) {
+  execute("pnpm", ["install", "--frozen-lockfile"]);
+  execute("pnpm", ["run", "check"]);
+  execute("pnpm", ["run", "test:js"]);
+  execute("pnpm", ["run", "vite:build"]);
+  const rustOptions = { env: { ...env, CODEY_SKIP_OVERLAY_BUILD: "1" } };
+  execute("cargo", ["fmt", "--all", "--", "--check"]);
+  execute("cargo", ["test", "--workspace", "--locked"], rustOptions);
+  execute("cargo", ["clippy", "--workspace", "--all-targets", "--locked", "--", "-D", "warnings"], rustOptions);
+  execute("git", ["diff", "--check"]);
 }
 
 function main() {
@@ -255,4 +257,4 @@ function main() {
   }
 }
 
-main();
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

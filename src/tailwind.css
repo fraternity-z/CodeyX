@@ -7,8 +7,10 @@
  */
 @layer theme, base, components, utilities;
 
-@import "tailwindcss";
+/* 限定前端与注入脚本范围，使后端或文档变更不影响前端构建缓存。 */
+@import "tailwindcss" source(".");
 @import "tw-animate-css";
+@source "../public";
 
 @import "@heroui/styles/base/base.css" layer(base);
 @import "@heroui/styles/base/scrollbar.css" layer(base);
