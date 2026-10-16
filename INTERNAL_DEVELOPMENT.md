@@ -5,7 +5,7 @@
 ## 架构与运行
 
 - Rust 主程序负责 Codex Electron 启停、配置、路由和本地数据维护；React 控制台与页面脚本通过 CDP 注入。前端、注入脚本、后端和运行规则分别位于 `src/`、`public/`、`backend/src/` 和 `backend/resources/`。
-- `vendor/CodeyRuntime/` 提供应用发现、CDP、配置事务、会话存储和平台能力；FastCtx 随程序分发。前端使用 HeroUI、React Aria 和 Tailwind，以 Shadow DOM 隔离样式，统一管理主题、焦点与弹层；依赖升级需验证隔离样式兼容性。
+- `vendor/CodeyRuntime/` 提供应用发现、CDP、配置事务、会话存储和平台能力；FastCtx 独立编译并随程序分发，与主程序共用 `codey-error-log`，主库仅在对话 Git 测试中依赖 FastCtx。前端使用 HeroUI、React Aria 和 Tailwind，以 Shadow DOM 隔离样式，统一管理主题、焦点与弹层；依赖升级需验证隔离样式兼容性。
 
 ### 启停与客户端兼容
 

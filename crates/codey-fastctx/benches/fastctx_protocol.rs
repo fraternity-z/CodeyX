@@ -1,7 +1,7 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use codey_lib::fastctx::protocol::{ResponseDisposition, response_disposition};
+use codey_fastctx::protocol::{ResponseDisposition, response_disposition};
 use serde_json::Value;
 
 const ITERATIONS: usize = 4_000;

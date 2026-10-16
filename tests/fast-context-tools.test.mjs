@@ -61,8 +61,8 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
 
 test("CodeyX keeps FastCtx in the dedicated sidecar", async () => {
   const [manifest, sidecarSource, mainSource, libSource, configSource, fastctxSource] = await Promise.all([
-    readFile(new URL("backend/Cargo.toml", root), "utf8"),
-    readFile(new URL("backend/src/bin/codey-fastctx.rs", root), "utf8"),
+    readFile(new URL("crates/codey-fastctx/Cargo.toml", root), "utf8"),
+    readFile(new URL("crates/codey-fastctx/src/main.rs", root), "utf8"),
     readFile(new URL("backend/src/main.rs", root), "utf8"),
     readFile(new URL("backend/src/lib.rs", root), "utf8"),
     readFile(new URL("backend/src/codex_config.rs", root), "utf8"),

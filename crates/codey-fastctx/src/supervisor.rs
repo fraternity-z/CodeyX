@@ -3,7 +3,7 @@ use std::process::{ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use codey_lib::fastctx::protocol::{
+use codey_fastctx::protocol::{
     FrameReader, ProtocolFrame, ProtocolLimits, ProtocolState, ResponseDisposition,
     response_disposition,
 };

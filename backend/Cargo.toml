@@ -16,10 +16,6 @@ crate-type = ["rlib"]
 name = "codey"
 path = "src/main.rs"
 
-[[bin]]
-name = "codey-fastctx"
-path = "src/bin/codey-fastctx.rs"
-
 [dependencies]
 anyhow.workspace = true
 arc-swap.workspace = true
@@ -30,11 +26,11 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 codey-runtime-core = { path = "../vendor/CodeyRuntime/crates/codey-runtime-core" }
 codey-plugin-sdk = { path = "../crates/codey-plugin-sdk" }
 codey-codex-extensions = { path = "../crates/codey-codex-extensions" }
+codey-error-log = { path = "../crates/codey-error-log" }
 libloading = "0.8"
 zip.workspace = true
 tempfile.workspace = true
 directories.workspace = true
-fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "22b40ea324a186a921dfe38c205e3ffacdf6546d", default-features = false }
 fs2.workspace = true
 futures-util.workspace = true
 flate2 = "1"
@@ -51,7 +47,7 @@ ring = "0.17"
 rusqlite = { workspace = true, features = ["hooks"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 semver = "1"
-serde.workspace = true
+serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
 sha2.workspace = true
 socket2 = { version = "0.6.5", features = ["all"] }
@@ -63,11 +59,9 @@ webpki-roots = "0.26"
 zstd = "0.13"
 
 [dev-dependencies]
+# 对话 Git 回归使用真实替换回执；桌面构建不依赖 FastCtx。
+fastctx.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
-
-[[bench]]
-name = "fastctx_protocol"
-harness = false
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -30,6 +30,8 @@ const cargo = spawnSync(
     "--release",
     "-p",
     "codey",
+    "-p",
+    "codey-fastctx",
     "--bins",
     "--manifest-path",
     join(root, "Cargo.toml"),

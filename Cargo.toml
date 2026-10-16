@@ -2,6 +2,8 @@
 members = [
   "backend",
   "crates/codey-codex-extensions",
+  "crates/codey-error-log",
+  "crates/codey-fastctx",
   "crates/codey-plugin-sdk",
   "vendor/CodeyRuntime/crates/codey-runtime-core",
   "vendor/CodeyRuntime/crates/codey-runtime-data",
@@ -19,6 +21,7 @@ arc-swap = "1"
 base64 = "0.22"
 bytes = "1"
 directories = "6"
+fastctx = { git = "https://github.com/yc-duan/fastctx", rev = "22b40ea324a186a921dfe38c205e3ffacdf6546d", default-features = false }
 fs2 = "0.4"
 futures-util = "0.3"
 reqwest = { version = "0.12", features = ["http2", "json", "stream", "rustls-tls", "rustls-tls-native-roots", "system-proxy"], default-features = false }

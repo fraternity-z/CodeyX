@@ -15,8 +15,7 @@ mod crashpad_pending_guard;
 #[cfg(windows)]
 mod desktop_instance;
 mod electron_fuses;
-mod error_log;
-pub mod fastctx;
+use codey_error_log as error_log;
 mod fastctx_route_gate;
 mod fs_util;
 mod hook_io;

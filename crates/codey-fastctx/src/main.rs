@@ -6,12 +6,12 @@
 
 use std::ffi::OsStr;
 
-#[path = "codey-fastctx/supervisor.rs"]
+#[path = "supervisor.rs"]
 mod fastctx_supervisor;
 
 const CODEY_FASTCTX_MCP_ARGUMENT: &str = "--codey-fastctx-mcp";
 const CODEY_FASTCTX_MCP_WORKER_ARGUMENT: &str = "--codey-fastctx-mcp-worker";
-// 集成测试（backend/tests/fastctx_supervisor.rs）专用：监督器通过
+// 集成测试（tests/fastctx_supervisor.rs）专用：监督器通过
 // CODEY_FASTCTX_TEST_WORKER_ARGUMENT 把 worker 子进程换成该模式的可脚本化
 // MCP 桩，以确定性构造大行输出与可恢复退出。真实宿主不会传入此参数。
 const CODEY_FASTCTX_TEST_WORKER_ARGUMENT: &str = "--codey-fastctx-mcp-test-worker";
@@ -21,12 +21,12 @@ const TEST_WORKER_EOF_BEHAVIOR_ENV: &str = "CODEY_FASTCTX_TEST_WORKER_EOF_BEHAVI
 
 fn main() {
     let mode = FastCtxMode::from_arguments(std::env::args_os());
-    codey_lib::install_crash_log_hook("fastctx", mode.stage());
+    codey_error_log::install_panic_hook("fastctx", mode.stage());
     if let Err(error) = run(mode) {
         let error = format!("{error:#}");
         let event = classify_fastctx_failure(&error);
         let recoverable = mode.failure_is_recoverable(event);
-        codey_lib::record_process_failure_with_recoverability(
+        codey_error_log::record_process_failure_with_recoverability(
             event,
             mode.operation(),
             error.clone(),
@@ -79,7 +79,7 @@ fn run(mode: FastCtxMode) -> anyhow::Result<()> {
     result
 }
 
-/// 可脚本化的 MCP 桩，仅服务 backend/tests/fastctx_supervisor.rs：
+/// 可脚本化的 MCP 桩，仅服务 tests/fastctx_supervisor.rs：
 /// - `initialize`：回最小 capabilities；
 /// - `test/large_response`（参数 `bytes`）：按请求字节数分块写出单行大响应，
 ///   强迫监督器跨多次 poll 读取；

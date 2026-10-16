@@ -404,6 +404,18 @@ fn supervisor_stops_recovering_after_repeated_worker_disconnects() {
         !status.success(),
         "supervisor must bail after repeated recoveries"
     );
+
+    let log = std::fs::read_to_string(
+        temp.path()
+            .join("home/.codex-session-delete/codey-errors.log"),
+    )
+    .unwrap();
+    let failure: Value = serde_json::from_str(log.lines().last().unwrap()).unwrap();
+    assert_eq!(failure["event"], "fastctx_process_failed");
+    assert_eq!(failure["operation"], "run_fastctx_mcp");
+    assert_eq!(failure["stage"], "runtime.fastctx_mcp");
+    assert_eq!(failure["recoverable"], false);
+    assert_eq!(failure["versions"]["codey"], env!("CARGO_PKG_VERSION"));
 }
 
 #[cfg(unix)]

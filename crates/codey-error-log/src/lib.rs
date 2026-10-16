@@ -1,3 +1,5 @@
+//! Shared failure logging for the desktop application and standalone helpers.
+
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{Read, Write};
@@ -59,7 +61,7 @@ impl ErrorVersions {
     }
 }
 
-pub(crate) fn cached_codex_app_version() -> Option<String> {
+pub fn cached_codex_app_version() -> Option<String> {
     CODEX_APP_VERSION
         .get_or_init(|| RwLock::new(None))
         .read()

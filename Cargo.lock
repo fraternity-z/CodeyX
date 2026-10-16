@@ -394,6 +394,7 @@ dependencies = [
  "bytes",
  "chrono",
  "codey-codex-extensions",
+ "codey-error-log",
  "codey-plugin-sdk",
  "codey-runtime-core",
  "directories",
@@ -453,6 +454,36 @@ dependencies = [
  "toml_edit",
  "uuid",
  "zip",
+]
+
+[[package]]
+name = "codey-error-log"
+version = "1.1.1"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "codey-runtime-core",
+ "fs2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "codey-fastctx"
+version = "1.1.1"
+dependencies = [
+ "anyhow",
+ "codey-error-log",
+ "fastctx",
+ "libc",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "windows 0.58.0",
 ]
 
 [[package]]

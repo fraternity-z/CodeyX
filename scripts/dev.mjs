@@ -156,13 +156,13 @@ function main() {
     return;
   }
 
-  // `cargo run` 只构建被运行的 bin；先完整 build 一次，确保 codey-fastctx
-  // sidecar 与主程序位于同一目录（`--` 之后的运行时参数不属于 build）。
+  // sidecar 独立构建，主程序交给下方的 cargo run，避免联合构建后切换
+  // 依赖特性集合而重编译。两端仍共用输出目录；`--` 后的参数只用于运行。
   const separator = args.indexOf("--");
   const cargoArgs = separator === -1 ? args : args.slice(0, separator);
   const build = spawnSync(
     "cargo",
-    ["build", "--manifest-path", join(projectRoot, "Cargo.toml"), ...cargoArgs],
+    ["build", "-p", "codey-fastctx", "--bins", "--manifest-path", join(projectRoot, "Cargo.toml"), ...cargoArgs],
     { cwd: projectRoot, stdio: "inherit" },
   );
   if (build.status !== 0) {
@@ -172,7 +172,7 @@ function main() {
 
   const cargo = spawnSync(
     "cargo",
-    ["run", "--manifest-path", join(projectRoot, "Cargo.toml"), ...args],
+    ["run", "-p", "codey", "--manifest-path", join(projectRoot, "Cargo.toml"), ...args],
     { cwd: projectRoot, stdio: "inherit" },
   );
   process.exitCode = cargo.status ?? 1;
