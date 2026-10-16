@@ -110,6 +110,8 @@ fn build_bridge_script_for_session(binding_name: &str, session_token: &str) -> S
         r#"
 (() => {{
   const bridgeSession = {session_token};
+  const bridgeDocument = globalThis.crypto?.randomUUID?.()
+    ?? (Date.now().toString(36) + "-" + Math.random().toString(36).slice(2));
   // 重新注入会替换回调表，先把上一代表里仍在等待的调用全部置为失败，
   // 否则它们的 Promise 永远挂起，调用方（如会话时间戳刷新）会被一次性卡死。
   const previousCallbacks = window.__codexSessionDeleteCallbacks;
@@ -145,7 +147,7 @@ fn build_bridge_script_for_session(binding_name: &str, session_token: &str) -> S
     callback.resolve({{ status: "failed", code: "bridge_request_failed", message }});
   }};
   window.__codexSessionDeleteBridge = (path, payload, options = {{}}) => new Promise((resolve) => {{
-    const id = String(++window.__codexSessionDeleteSeq);
+    const id = bridgeSession + ":" + bridgeDocument + ":" + String(++window.__codexSessionDeleteSeq);
     const configuredTimeout = Number(options?.timeoutMs);
     const timeoutMs = Number.isFinite(configuredTimeout)
       ? Math.max(250, Math.min(configuredTimeout, 60_000))
@@ -334,7 +336,10 @@ pub async fn install_bridge(
         if let Err(error) = run_bridge_pump(session, task_closing, task_shutdown).await {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "bridge.pump_failed",
-                json!({ "message": error.to_string() }),
+                json!({
+                    "message": error.to_string(),
+                    "protocolFailure": error.downcast_ref::<ProtocolFailure>(),
+                }),
             );
         }
     });
@@ -378,11 +383,74 @@ struct BridgeCall {
     request_id: String,
     path: String,
     payload: Value,
+    context: BridgeContext,
 }
 
 enum BridgeCompletion {
-    Resolve { request_id: String, result: Value },
-    Reject { request_id: String, message: String },
+    Resolve {
+        request_id: String,
+        result: Value,
+        context: BridgeContext,
+    },
+    Reject {
+        request_id: String,
+        message: String,
+        context: BridgeContext,
+    },
+}
+
+impl BridgeCompletion {
+    fn context(&self) -> BridgeContext {
+        match self {
+            Self::Resolve { context, .. } | Self::Reject { context, .. } => *context,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BridgeContext {
+    id: Option<u64>,
+    generation: u64,
+}
+
+#[derive(Default)]
+struct BridgeContexts {
+    generation: u64,
+    active: HashMap<Option<u64>, u64>,
+}
+
+impl BridgeContexts {
+    fn for_call(&mut self, message: &Value) -> BridgeContext {
+        let id = message
+            .pointer("/params/executionContextId")
+            .and_then(Value::as_u64);
+        let generation = *self.active.entry(id).or_insert_with(|| {
+            self.generation += 1;
+            self.generation
+        });
+        BridgeContext { id, generation }
+    }
+
+    fn is_current(&self, context: BridgeContext) -> bool {
+        self.active.get(&context.id) == Some(&context.generation)
+    }
+
+    fn observe(&mut self, message: &Value) {
+        match message.get("method").and_then(Value::as_str) {
+            Some("Runtime.executionContextsCleared") => self.active.clear(),
+            Some("Runtime.executionContextDestroyed") => {
+                if let Some(id) = message
+                    .pointer("/params/executionContextId")
+                    .and_then(Value::as_u64)
+                {
+                    self.active.remove(&Some(id));
+                }
+                // Legacy calls without a context cannot be safely attributed.
+                self.active.remove(&None);
+            }
+            _ => {}
+        }
+    }
 }
 
 enum ParsedBridgeDispatch {
@@ -399,7 +467,7 @@ async fn run_bridge_pump(
 ) -> anyhow::Result<()> {
     let CdpSession {
         socket,
-        mut binding_calls,
+        mut events,
         handler,
         binding_session,
         unsafe_eval_supported,
@@ -416,17 +484,27 @@ async fn run_bridge_pump(
     let mut serial = FuturesUnordered::<BridgeCallFuture>::new();
     let mut git_work = FuturesUnordered::<BridgeCallFuture>::new();
     let mut stream_open = true;
+    let mut contexts = BridgeContexts::default();
+    let mut pending_responses = VecDeque::new();
 
-    while let Some(message) = binding_calls.pop_front() {
-        queue_bridge_dispatch(
-            parse_bridge_binding_call(message, binding_session.as_deref()),
-            &mut pending_concurrent,
-            &mut pending_serial,
-            &mut ready,
-        );
+    while let Some(message) = events.pop_front() {
+        contexts.observe(&message);
+        if message.get("method").and_then(Value::as_str) == Some("Runtime.bindingCalled") {
+            let context = contexts.for_call(&message);
+            queue_bridge_dispatch(
+                parse_bridge_binding_call(message, binding_session.as_deref(), context),
+                &mut pending_concurrent,
+                &mut pending_serial,
+                &mut ready,
+            );
+        }
     }
 
     loop {
+        // Navigation invalidates queued work and replies, but never replays a
+        // handler that has already started. Its result belongs to the old page.
+        pending_concurrent.retain(|call| contexts.is_current(call.context));
+        pending_serial.retain(|call| contexts.is_current(call.context));
         while let Some(index) = pending_concurrent.iter().position(|call| {
             if bridge_path_is_git_work(&call.path) {
                 git_work.len() < 4
@@ -449,7 +527,17 @@ async fn run_bridge_pump(
         }
 
         if let Some(completion) = ready.pop_front() {
-            send_bridge_completion(&mut writer, completion, unsafe_eval_supported).await?;
+            let context = completion.context();
+            if contexts.is_current(context) {
+                let id =
+                    send_bridge_completion(&mut writer, completion, unsafe_eval_supported).await?;
+                // A stalled renderer must not grow this receipt cache forever.
+                // Receipts are observed without blocking subsequent bridge calls.
+                if pending_responses.len() == BRIDGE_MAX_PENDING_CALLS {
+                    pending_responses.pop_front();
+                }
+                pending_responses.push_back((id, context));
+            }
             continue;
         }
         if closing.load(Ordering::Acquire) {
@@ -493,25 +581,37 @@ async fn run_bridge_pump(
             message = reader.next(), if can_read => {
                 match message {
                     Some(Ok(Message::Text(text))) => {
-                        let value = serde_json::from_str::<Value>(&text)
-                            .context("failed to parse CDP message")?;
+                        let value = devtools::parse_text_message(&text)?;
+                        contexts.observe(&value);
                         if value.get("method").and_then(Value::as_str)
                             == Some("Runtime.bindingCalled")
                         {
+                            let context = contexts.for_call(&value);
                             queue_bridge_dispatch(
-                                parse_bridge_binding_call(value, binding_session.as_deref()),
+                                parse_bridge_binding_call(value, binding_session.as_deref(), context),
                                 &mut pending_concurrent,
                                 &mut pending_serial,
                                 &mut ready,
                             );
+                        } else if let Some(id) = value.get("id").and_then(Value::as_u64)
+                            && let Some(index) = pending_responses.iter().position(|(pending, _)| *pending == id)
+                        {
+                            let (_, context) = pending_responses.remove(index).unwrap();
+                            if contexts.is_current(context) {
+                                ensure_runtime_evaluate_succeeded(command_result(value, "Runtime.evaluate", id)?)?;
+                            }
                         }
                     }
                     Some(Ok(Message::Close(_))) | None => {
                         stream_open = false;
                     }
+                    Some(Ok(Message::Ping(_))) => devtools::flush_socket(&mut writer).await?,
+                    Some(Ok(Message::Binary(_))) => {
+                        return Err(ProtocolFailure::new("receive", FailureKind::InvalidMessage, None, None).into());
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => {
-                        return Err(error).context("failed to read CDP websocket message");
+                        return Err(error).context(ProtocolFailure::new("receive", FailureKind::Connection, None, None));
                     }
                 }
             }
@@ -525,6 +625,7 @@ async fn run_bridge_pump(
 fn parse_bridge_binding_call(
     message: Value,
     binding_session: Option<&str>,
+    context: BridgeContext,
 ) -> Option<ParsedBridgeDispatch> {
     let payload_text = message
         .get("params")
@@ -537,6 +638,7 @@ fn parse_bridge_binding_call(
             return Some(ParsedBridgeDispatch::Completion(BridgeCompletion::Reject {
                 request_id,
                 message: format!("failed to parse bridge payload: {error}"),
+                context,
             }));
         }
     };
@@ -558,6 +660,7 @@ fn parse_bridge_binding_call(
         request_id,
         path,
         payload,
+        context,
     }))
 }
 
@@ -610,10 +713,12 @@ fn execute_bridge_call(handler: BridgeHandler, call: BridgeCall) -> BridgeCallFu
             Ok(result) => BridgeCompletion::Resolve {
                 request_id: call.request_id,
                 result,
+                context: call.context,
             },
             Err(error) => BridgeCompletion::Reject {
                 request_id: call.request_id,
                 message: error.to_string(),
+                context: call.context,
             },
         }
     })
@@ -623,19 +728,23 @@ async fn send_bridge_completion<S>(
     writer: &mut S,
     completion: BridgeCompletion,
     unsafe_eval_supported: bool,
-) -> anyhow::Result<()>
+) -> anyhow::Result<u64>
 where
     S: Sink<Message> + Unpin,
     S::Error: std::error::Error + Send + Sync + 'static,
 {
+    let context = completion.context();
     let (request_id, expression, failure_event) = match completion {
-        BridgeCompletion::Resolve { request_id, result } => {
+        BridgeCompletion::Resolve {
+            request_id, result, ..
+        } => {
             let expression = resolve_bridge_expression(&request_id, &result)?;
             (request_id, expression, "bridge.resolve_failed")
         }
         BridgeCompletion::Reject {
             request_id,
             message,
+            ..
         } => {
             let expression = reject_bridge_expression(&request_id, &message)?;
             (request_id, expression, "bridge.reject_failed")
@@ -643,6 +752,9 @@ where
     };
     let message_id = next_message_id();
     let mut params = runtime_evaluate_params(&expression);
+    if let Some(id) = context.id {
+        params["contextId"] = id.into();
+    }
     if !unsafe_eval_supported {
         params
             .as_object_mut()
@@ -660,13 +772,14 @@ where
             }),
         );
     }
-    sent.with_context(|| format!("failed to send bridge response for request {request_id}"))
+    sent?;
+    Ok(message_id)
 }
 
 struct CdpSession<S> {
     socket: S,
     responses: HashMap<u64, Value>,
-    binding_calls: VecDeque<Value>,
+    events: VecDeque<Value>,
     handler: Option<BridgeHandler>,
     binding_session: Option<String>,
     unsafe_eval_supported: bool,
@@ -684,7 +797,7 @@ where
         Self {
             socket,
             responses: HashMap::new(),
-            binding_calls: VecDeque::new(),
+            events: VecDeque::new(),
             handler: None,
             binding_session: None,
             unsafe_eval_supported: true,
@@ -787,8 +900,15 @@ where
             return Ok(None);
         };
 
-        if value.get("method").and_then(Value::as_str) == Some("Runtime.bindingCalled") {
-            self.binding_calls.push_back(value);
+        if matches!(
+            value.get("method").and_then(Value::as_str),
+            Some(
+                "Runtime.bindingCalled"
+                    | "Runtime.executionContextDestroyed"
+                    | "Runtime.executionContextsCleared"
+            )
+        ) {
+            self.events.push_back(value);
             return Ok(Some(json!({})));
         }
 
@@ -847,6 +967,10 @@ mod tests {
             request_id: request_id.to_string(),
             path: path.to_string(),
             payload: json!({}),
+            context: BridgeContext {
+                id: None,
+                generation: 0,
+            },
         })
     }
 

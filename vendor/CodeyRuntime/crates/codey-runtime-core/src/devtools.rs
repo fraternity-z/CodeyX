@@ -206,37 +206,10 @@ where
 {
     loop {
         match socket.next().await {
-            Some(Ok(Message::Text(text))) => {
-                let value: Value = serde_json::from_str(&text).map_err(|_| {
-                    ProtocolFailure::new("receive", FailureKind::InvalidMessage, None, None)
-                })?;
-                if !value.is_object() {
-                    return Err(ProtocolFailure::new(
-                        "receive",
-                        FailureKind::InvalidMessage,
-                        None,
-                        None,
-                    )
-                    .into());
-                }
-                return Ok(Some(value));
-            }
+            Some(Ok(Message::Text(text))) => return parse_text_message(&text).map(Some),
             Some(Ok(Message::Close(_))) | None => return Ok(None),
             Some(Ok(Message::Ping(_))) => {
-                tokio::time::timeout(COMMAND_TIMEOUT, socket.flush())
-                    .await
-                    .context(ProtocolFailure::new(
-                        "receive",
-                        FailureKind::Timeout,
-                        None,
-                        None,
-                    ))?
-                    .context(ProtocolFailure::new(
-                        "receive",
-                        FailureKind::Connection,
-                        None,
-                        None,
-                    ))?;
+                flush_socket(socket).await?;
             }
             Some(Ok(Message::Binary(_))) => {
                 return Err(ProtocolFailure::new(
@@ -258,6 +231,36 @@ where
             }
         }
     }
+}
+
+pub(crate) fn parse_text_message(text: &str) -> anyhow::Result<Value> {
+    let invalid = || ProtocolFailure::new("receive", FailureKind::InvalidMessage, None, None);
+    let value: Value = serde_json::from_str(text).map_err(|_| invalid())?;
+    if !value.is_object() {
+        return Err(invalid().into());
+    }
+    Ok(value)
+}
+
+pub(crate) async fn flush_socket<S>(socket: &mut S) -> anyhow::Result<()>
+where
+    S: Sink<Message> + Unpin,
+    S::Error: std::error::Error + Send + Sync + 'static,
+{
+    tokio::time::timeout(COMMAND_TIMEOUT, socket.flush())
+        .await
+        .context(ProtocolFailure::new(
+            "receive",
+            FailureKind::Timeout,
+            None,
+            None,
+        ))?
+        .context(ProtocolFailure::new(
+            "receive",
+            FailureKind::Connection,
+            None,
+            None,
+        ))
 }
 
 pub fn command_result(response: Value, method: &str, id: u64) -> anyhow::Result<Value> {

@@ -2607,3 +2607,6 @@ mod model_delivery_test_support;
 
 #[cfg(all(test, unix))]
 mod tests;
+
+#[cfg(test)]
+mod watchdog_tests;

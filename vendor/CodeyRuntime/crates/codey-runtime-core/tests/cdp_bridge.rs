@@ -1390,6 +1390,320 @@ async fn git_work_does_not_block_status_cancellation_or_serial_settings() {
     pump.close().await;
 }
 
+#[tokio::test]
+async fn bridge_pump_answers_ping_without_waiting_for_a_business_call() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = websocket_url(listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_installed_bridge(&listener).await;
+        socket
+            .send(Message::Ping(vec![1, 2, 3].into()))
+            .await
+            .unwrap();
+        let pong = tokio::time::timeout(Duration::from_secs(1), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert_eq!(pong, Message::Pong(vec![1, 2, 3].into()));
+        close_socket(&mut socket).await;
+    });
+    let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, noop_handler(), &[])
+        .await
+        .unwrap();
+    server.await.unwrap();
+    pump.close().await;
+}
+
+#[tokio::test]
+async fn bridge_pump_stops_on_invalid_frames() {
+    for message in [
+        Message::Text("private payload".into()),
+        Message::Text("[]".into()),
+        Message::Binary(b"private payload".to_vec().into()),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = websocket_url(listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = accept_installed_bridge(&listener).await;
+            socket.send(message).await.unwrap();
+            assert_bridge_disconnected(&mut socket).await;
+        });
+        let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, noop_handler(), &[])
+            .await
+            .unwrap();
+        server.await.unwrap();
+        wait_for_bridge_exit(&pump).await;
+        pump.close().await;
+    }
+}
+
+#[tokio::test]
+async fn bridge_pump_observes_failed_receipts_without_replaying_the_handler() {
+    for failure in [
+        json!({"error":{"code":-32601,"message":"private payload"}}),
+        json!({"error":{"code":-32602,"message":"private payload"}}),
+        json!({"error":{"code":-32000,"message":"Cannot find context with specified id"}}),
+        json!({"result":{"exceptionDetails":{"text":"private payload"}}}),
+        json!({"result":null}),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = websocket_url(listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = accept_installed_bridge(&listener).await;
+            // Only receipts for commands issued by this pump belong to it.
+            send_json(&mut socket, json!({"id":0,"error":{"code":-32601}})).await;
+            send_json(
+                &mut socket,
+                context_binding("mutation", "/settings/set", Some(11)),
+            )
+            .await;
+            let response = recv_json(&mut socket).await;
+            assert_expression_contains_request(&response, "mutation");
+            assert_eq!(response["params"]["contextId"], 11);
+            let mut failure = failure;
+            failure["id"] = response["id"].clone();
+            send_json(&mut socket, failure).await;
+            assert_bridge_disconnected(&mut socket).await;
+        });
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: bridge::BridgeHandler = {
+            let calls = calls.clone();
+            Arc::new(move |_, _| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(json!({"status":"ok"})) })
+            })
+        };
+        let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[])
+            .await
+            .unwrap();
+        server.await.unwrap();
+        wait_for_bridge_exit(&pump).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        pump.close().await;
+    }
+}
+
+#[tokio::test]
+async fn bridge_navigation_discards_old_queued_calls_and_in_flight_results() {
+    for (event, context_id) in [
+        (
+            json!({"method":"Runtime.executionContextsCleared","params":{}}),
+            Some(11),
+        ),
+        (
+            json!({"method":"Runtime.executionContextDestroyed","params":{"executionContextId":11}}),
+            Some(11),
+        ),
+        (
+            json!({"method":"Runtime.executionContextsCleared","params":{}}),
+            None,
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = websocket_url(listener.local_addr().unwrap());
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler: bridge::BridgeHandler = {
+            let started = started.clone();
+            let release = release.clone();
+            let calls = calls.clone();
+            Arc::new(move |path, _| {
+                let started = started.clone();
+                let release = release.clone();
+                let calls = calls.clone();
+                Box::pin(async move {
+                    match path.as_str() {
+                        "/old-running" => {
+                            calls.fetch_or(1, Ordering::SeqCst);
+                            started.notify_one();
+                            release.notified().await;
+                        }
+                        "/old-queued" => {
+                            calls.fetch_or(2, Ordering::SeqCst);
+                        }
+                        "/new" => {
+                            calls.fetch_or(4, Ordering::SeqCst);
+                        }
+                        "/backend/health" => {
+                            calls.fetch_or(8, Ordering::SeqCst);
+                        }
+                        _ => panic!("unexpected path"),
+                    }
+                    Ok(json!({"status":"ok"}))
+                })
+            })
+        };
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = accept_installed_bridge(&listener).await;
+            send_json(
+                &mut socket,
+                context_binding("old-running", "/old-running", context_id),
+            )
+            .await;
+            tokio::time::timeout(Duration::from_secs(1), started.notified())
+                .await
+                .unwrap();
+            send_json(
+                &mut socket,
+                context_binding("old-queued", "/old-queued", context_id),
+            )
+            .await;
+            send_json(&mut socket, event).await;
+            // Reusing the numeric context id must still create a new generation.
+            send_json(
+                &mut socket,
+                context_binding("new-health", "/backend/health", context_id),
+            )
+            .await;
+            let health = recv_json(&mut socket).await;
+            assert_expression_contains_request(&health, "new-health");
+            send_json(&mut socket, json!({"id":health["id"],"result":{}})).await;
+            release.notify_one();
+            send_json(
+                &mut socket,
+                context_binding("new-request", "/new", context_id),
+            )
+            .await;
+            let response = recv_json(&mut socket).await;
+            assert_expression_contains_request(&response, "new-request");
+            if let Some(id) = context_id {
+                assert_eq!(response["params"]["contextId"], id);
+            } else {
+                assert!(response["params"].get("contextId").is_none());
+            }
+            send_json(&mut socket, json!({"id":response["id"],"result":{}})).await;
+            close_socket(&mut socket).await;
+        });
+        let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[])
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1 | 4 | 8);
+        pump.close().await;
+    }
+}
+
+#[tokio::test]
+async fn bridge_ignores_late_receipt_failures_from_destroyed_contexts() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = websocket_url(listener.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = accept_installed_bridge(&listener).await;
+        send_json(
+            &mut socket,
+            context_binding("old", "/backend/health", Some(11)),
+        )
+        .await;
+        let old = recv_json(&mut socket).await;
+        send_json(&mut socket, json!({"method":"Runtime.executionContextDestroyed","params":{"executionContextId":11}})).await;
+        send_json(
+            &mut socket,
+            context_binding("new", "/backend/health", Some(11)),
+        )
+        .await;
+        let new = recv_json(&mut socket).await;
+        assert_expression_contains_request(&new, "new");
+        send_json(&mut socket, json!({"id":old["id"],"error":{"code":-32000,"message":"Cannot find context with specified id"}})).await;
+        send_json(&mut socket, json!({"id":new["id"],"result":{}})).await;
+        send_json(
+            &mut socket,
+            context_binding("still-healthy", "/backend/health", Some(11)),
+        )
+        .await;
+        let response = recv_json(&mut socket).await;
+        assert_expression_contains_request(&response, "still-healthy");
+        send_json(&mut socket, json!({"id":response["id"],"result":{}})).await;
+        close_socket(&mut socket).await;
+    });
+    let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, noop_handler(), &[])
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    pump.close().await;
+}
+
+#[tokio::test]
+async fn bridge_install_preserves_navigation_order_before_starting_queued_calls() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let handler: bridge::BridgeHandler = {
+        let calls = calls.clone();
+        Arc::new(move |path, _| {
+            assert_eq!(path, "/new");
+            calls.fetch_add(1, Ordering::SeqCst);
+            Box::pin(async { Ok(json!({"status":"ok"})) })
+        })
+    };
+    let (url, done) = spawn_cdp_server(|mut socket| async move {
+        for id in 1..=4 {
+            assert_eq!(recv_json(&mut socket).await["id"], id);
+            send_json(&mut socket, json!({"id":id,"result":{}})).await;
+        }
+        let evaluate = recv_json(&mut socket).await;
+        send_json(&mut socket, context_binding("old", "/old", Some(11))).await;
+        send_json(
+            &mut socket,
+            json!({"method":"Runtime.executionContextsCleared","params":{}}),
+        )
+        .await;
+        send_json(&mut socket, context_binding("new", "/new", Some(11))).await;
+        send_json(&mut socket, json!({"id":evaluate["id"],"result":{}})).await;
+        let response = recv_json(&mut socket).await;
+        assert_expression_contains_request(&response, "new");
+        assert_eq!(response["params"]["contextId"], 11);
+        send_json(&mut socket, json!({"id":response["id"],"result":{}})).await;
+        close_socket(&mut socket).await;
+    })
+    .await;
+    let pump = bridge::install_bridge(&url, BRIDGE_BINDING_NAME, handler, &[])
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(2), done)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    pump.close().await;
+}
+
+fn context_binding(id: &str, path: &str, context_id: Option<u64>) -> serde_json::Value {
+    let mut message = json!({
+        "method":"Runtime.bindingCalled",
+        "params":{"payload":json!({"id":id,"path":path,"payload":{}}).to_string()},
+    });
+    if let Some(id) = context_id {
+        message["params"]["executionContextId"] = id.into();
+    }
+    message
+}
+
+async fn assert_bridge_disconnected(socket: &mut TestSocket) {
+    let message = tokio::time::timeout(Duration::from_secs(1), socket.next())
+        .await
+        .expect("failed pump must close promptly so the watchdog can rebuild it");
+    assert!(
+        matches!(message, None | Some(Err(_)) | Some(Ok(Message::Close(_)))),
+        "failed receipt must not replay an operation: {message:?}"
+    );
+}
+
+async fn wait_for_bridge_exit(pump: &bridge::BridgePumpHandle) {
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !pump.is_finished() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("message pump should finish");
+}
+
 type TestSocket = tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>;
 
 async fn accept_installed_bridge(listener: &TcpListener) -> (TestSocket, String) {
