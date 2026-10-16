@@ -610,6 +610,22 @@ fn disable_windows_packaged_environment(package_full_name: &str) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn acquire_released_journal(directory: &Path) -> LaunchJournal {
+        use std::time::{Duration, Instant};
+
+        // 并行测试可能短暂占用系统资源；使用真实时间，避免暂停的 Tokio 时钟跳过等待。
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match LaunchJournal::acquire(directory) {
+                Ok(journal) => return journal,
+                Err(_) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(10))
+                }
+                Err(error) => panic!("启动锁未在释放后及时恢复：{error:#}"),
+            }
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn activation_keeps_feedback_until_delayed_helper_resumes_target() {
         use super::super::windows_activation::ActivationSupervisor;
@@ -663,7 +679,7 @@ mod tests {
         assert_eq!(response.await.unwrap().unwrap(), 42);
         task.await.unwrap().unwrap();
         assert!(!path.exists());
-        assert!(LaunchJournal::acquire(directory.path()).is_ok());
+        drop(acquire_released_journal(directory.path()));
     }
 
     #[tokio::test(start_paused = true)]
@@ -837,7 +853,7 @@ mod tests {
         assert!(failure.is_err());
         assert!(journal.path.exists());
         drop(journal); // A process exit releases the lock without removing the pending record.
-        let restarted = LaunchJournal::acquire(directory.path()).unwrap();
+        let restarted = acquire_released_journal(directory.path());
         let mut calls = 0;
         restarted
             .recover(|package| {
@@ -853,23 +869,11 @@ mod tests {
 
     #[test]
     fn journal_serializes_live_launches_and_releases_lock_on_drop() {
-        use std::time::{Duration, Instant};
-
         let directory = tempfile::tempdir().unwrap();
         let first = LaunchJournal::acquire(directory.path()).unwrap();
         assert!(LaunchJournal::acquire(directory.path()).is_err());
         drop(first);
-        // 并行测试可能短暂耗尽文件描述符，重试有上限，仍要求锁被及时释放。
-        let deadline = Instant::now() + Duration::from_secs(2);
-        loop {
-            match LaunchJournal::acquire(directory.path()) {
-                Ok(_) => break,
-                Err(_) if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10))
-                }
-                Err(error) => panic!("启动锁未在释放后及时恢复：{error:#}"),
-            }
-        }
+        drop(acquire_released_journal(directory.path()));
     }
 
     #[test]
