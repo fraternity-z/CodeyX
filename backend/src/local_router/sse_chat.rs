@@ -1,3 +1,8 @@
+use super::sse::{
+    SseCursor, SseFrameAccumulator, collect_sse_frames, compact_sse_buffer,
+    ensure_sse_buffer_within_limit, parse_sse_frames, sse_frame_data, sse_json_frame,
+    take_next_sse_frame,
+};
 use super::*;
 
 #[cfg(test)]
@@ -503,6 +508,23 @@ impl ChatSseAccumulator {
                 .insert("usage".to_string(), usage);
         }
         Ok(chat)
+    }
+}
+
+impl SseFrameAccumulator for ChatSseAccumulator {
+    const PROTOCOL_LABEL: &'static str = "Chat Completions";
+    const READ_OPERATION: &'static str = "读取 Chat Completions SSE 流失败";
+
+    fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()> {
+        if data.trim() == "[DONE]" {
+            self.done = true;
+            return Ok(());
+        }
+        self.ingest(&sse_json_frame(data, Self::PROTOCOL_LABEL, trailing)?)
+    }
+
+    fn finished(&self) -> bool {
+        self.done
     }
 }
 

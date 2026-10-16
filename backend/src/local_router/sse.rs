@@ -1,9 +1,32 @@
-use super::*;
+use std::borrow::Cow;
+
+use anyhow::{Context, Result};
+use serde_json::Value;
+
+use crate::route_request_log::RouteRequestLogProbe;
+
+use super::MAX_UPSTREAM_RESPONSE_BYTES;
+use super::native_response_fix::NativeResponseFix;
+use super::resource_budget::RetainedMemoryBudget;
+use super::response_failure::{ResponseRetryAdvice, normalize_response_failure};
+use super::upstream_response::{PreparedUpstreamResponse, read_prepared_upstream_chunk};
+
+pub(crate) const MAX_UPSTREAM_SSE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
+
+pub(crate) fn ensure_sse_buffer_within_limit(buffer: &[u8], cursor: usize) -> Result<()> {
+    ensure_sse_buffer_limit(buffer, cursor, MAX_UPSTREAM_SSE_BUFFER_BYTES)
+}
+
+fn ensure_sse_buffer_limit(buffer: &[u8], cursor: usize, limit: usize) -> Result<()> {
+    if buffer.len().saturating_sub(cursor) > limit {
+        anyhow::bail!("上游 SSE 单帧超过 Codey 安全上限");
+    }
+    Ok(())
+}
 
 /// Protocol-specific accumulation of one SSE `data:` payload. The frame
 /// splitting, buffering and tail handling are shared by [`collect_sse_frames`]
-/// and [`parse_sse_frames`]; only the payload interpretation differs between
-/// Anthropic Messages and Chat Completions upstreams.
+/// and [`parse_sse_frames`]; protocol adapters own the payload interpretation.
 pub(crate) trait SseFrameAccumulator {
     const PROTOCOL_LABEL: &'static str;
     const READ_OPERATION: &'static str;
@@ -22,36 +45,6 @@ pub(crate) fn sse_json_frame(data: &str, protocol: &str, trailing: bool) -> Resu
     })
 }
 
-impl SseFrameAccumulator for AnthropicSseAccumulator {
-    const PROTOCOL_LABEL: &'static str = "Anthropic Messages";
-    const READ_OPERATION: &'static str = "读取 Anthropic Messages SSE 流失败";
-
-    fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()> {
-        self.ingest(&sse_json_frame(data, Self::PROTOCOL_LABEL, trailing)?)
-    }
-
-    fn finished(&self) -> bool {
-        self.stopped
-    }
-}
-
-impl SseFrameAccumulator for ChatSseAccumulator {
-    const PROTOCOL_LABEL: &'static str = "Chat Completions";
-    const READ_OPERATION: &'static str = "读取 Chat Completions SSE 流失败";
-
-    fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()> {
-        if data.trim() == "[DONE]" {
-            self.done = true;
-            return Ok(());
-        }
-        self.ingest(&sse_json_frame(data, Self::PROTOCOL_LABEL, trailing)?)
-    }
-
-    fn finished(&self) -> bool {
-        self.done
-    }
-}
-
 /// Drain a buffered (non-streaming to the client) upstream SSE body into the
 /// accumulator, stopping at the protocol's terminal frame.
 pub(crate) async fn collect_sse_frames<A: SseFrameAccumulator>(
@@ -66,9 +59,7 @@ pub(crate) async fn collect_sse_frames<A: SseFrameAccumulator>(
     {
         compact_sse_buffer(&mut buffer, &mut cursor);
         buffer.extend_from_slice(&chunk);
-        if buffer.len().saturating_sub(cursor.consumed) > A::MAX_BUFFER_BYTES {
-            anyhow::bail!("上游 SSE 单帧超过 Codey 安全上限");
-        }
+        ensure_sse_buffer_limit(&buffer, cursor.consumed, A::MAX_BUFFER_BYTES)?;
         while let Some(frame) = take_next_sse_frame(&buffer, &mut cursor) {
             let Some(data) = sse_frame_data(frame)? else {
                 continue;
@@ -434,6 +425,27 @@ pub(crate) fn current_unix_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::local_router::xai::XaiResponseFix;
+    use reqwest::header::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn sse_buffer_limit_counts_only_unconsumed_bytes() {
+        let buffer = vec![b'x'; MAX_UPSTREAM_SSE_BUFFER_BYTES + 1];
+        assert!(ensure_sse_buffer_within_limit(&[], 0).is_ok());
+        assert!(
+            ensure_sse_buffer_within_limit(&buffer[..MAX_UPSTREAM_SSE_BUFFER_BYTES], 0).is_ok()
+        );
+        assert!(ensure_sse_buffer_within_limit(&buffer, 1).is_ok());
+        assert!(ensure_sse_buffer_within_limit(&buffer, buffer.len()).is_ok());
+        assert!(ensure_sse_buffer_within_limit(&buffer, usize::MAX).is_ok());
+        assert!(ensure_sse_buffer_limit(&buffer, 0, MAX_UPSTREAM_RESPONSE_BYTES).is_ok());
+        assert_eq!(
+            ensure_sse_buffer_within_limit(&buffer, 0)
+                .unwrap_err()
+                .to_string(),
+            "上游 SSE 单帧超过 Codey 安全上限",
+        );
+    }
 
     fn rewrite_chunks(input: &[u8], chunk_size: usize, normalize: bool) -> Vec<u8> {
         let mut rewriter = ResponsesSseRewriter::new(None, normalize, None);

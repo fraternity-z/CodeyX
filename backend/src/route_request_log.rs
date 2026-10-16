@@ -2890,17 +2890,29 @@ pub(crate) fn query_route_request_log_stats(
     let transaction = connection.transaction()?;
     let optional_columns = sqlite_optional_columns(&transaction, &path)?;
     if query.all_time {
-        // Use the same filters and snapshot as the aggregates, excluding future timestamps.
         query.cursor_mode = true;
         query.from_unix_ms = Some(0);
         query.to_unix_ms = Some(to);
-        let (where_clause, values) =
-            sqlite_query_filters(&query, optional_columns.official_account);
-        let earliest: Option<u64> = transaction.query_row(
-            &format!("SELECT MIN(timestamp_unix_ms) FROM route_request_logs{where_clause}"),
-            params_from_iter(values.iter()),
-            |row| row_optional_u64(row, 0),
-        )?;
+    }
+    let (mut where_clause, mut values) =
+        sqlite_query_filters(&query, optional_columns.official_account);
+    let summary_columns = summary_columns();
+    // Find the all-time boundary during the summary scan, using the same
+    // filters and snapshot and excluding future timestamps.
+    let earliest_column = if query.all_time {
+        "MIN(timestamp_unix_ms)"
+    } else {
+        "NULL"
+    };
+    let (summary, earliest) = transaction.query_row(
+        &format!(
+            "SELECT {summary_columns}, {earliest_column} FROM route_request_logs{where_clause}"
+        ),
+        params_from_iter(values.iter()),
+        |row| Ok((summary_from_row(row)?, row_optional_u64(row, 19)?)),
+    )?;
+    result.summary = summary;
+    if query.all_time {
         result.from_unix_ms = earliest.unwrap_or(from);
         query.from_unix_ms = Some(result.from_unix_ms);
         let span = to - result.from_unix_ms;
@@ -2909,14 +2921,8 @@ pub(crate) fn query_route_request_log_stats(
         } else {
             span.div_ceil(366 * DAY_MS).max(1) * DAY_MS
         };
+        (where_clause, values) = sqlite_query_filters(&query, optional_columns.official_account);
     }
-    let (where_clause, values) = sqlite_query_filters(&query, optional_columns.official_account);
-    let summary_columns = summary_columns();
-    result.summary = transaction.query_row(
-        &format!("SELECT {summary_columns} FROM route_request_logs{where_clause}"),
-        params_from_iter(values.iter()),
-        summary_from_row,
-    )?;
     if let Some(group_by) = &query.group_by
         && (group_by != "official_account" || optional_columns.official_account)
     {
@@ -2954,16 +2960,27 @@ pub(crate) fn query_route_request_log_stats(
     }
     // The range and adaptive UTC bucket width produce at most 367 buckets.
     let bucket_ms = result.bucket_ms;
+    // Hour and day buckets fit exactly inside UTC days. Reuse their additive
+    // counts and token sums; duration/TTFT/speed averages stay in their SQL query.
+    let daily_from_trend = query.include_daily_trend && bucket_ms <= DAY_MS;
+    let known_tokens_column = if daily_from_trend {
+        "COUNT(total_tokens)"
+    } else {
+        "0"
+    };
     let sql = format!("SELECT timestamp_unix_ms / {bucket_ms} * {bucket_ms} AS bucket,
         COUNT(*), SUM(total_tokens), AVG(CASE WHEN total_duration_ms >= 0 THEN total_duration_ms END),
         AVG(CASE WHEN COALESCE(downstream_first_content_ms, ttft_ms) >= 0 THEN COALESCE(downstream_first_content_ms, ttft_ms) END),
         {OUTPUT_SPEED_SUM_SQL},
-        AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END)
+        AVG(CASE WHEN downstream_first_content_ms >= 0 THEN downstream_first_content_ms END),
+        {known_tokens_column}
         FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket");
-    result.trend = transaction
-        .prepare(&sql)?
-        .query_map(params_from_iter(values.iter()), |row| {
-            Ok(RouteRequestLogTrend {
+    {
+        let mut statement = transaction.prepare(&sql)?;
+        let mut rows = statement.query(params_from_iter(values.iter()))?;
+        let mut daily_tokens_sum: Option<i64> = None;
+        while let Some(row) = rows.next()? {
+            let trend = RouteRequestLogTrend {
                 timestamp_unix_ms: row_u64(row, 0)?,
                 total: row_u64(row, 1)?,
                 total_tokens_sum: row_optional_u64(row, 2)?,
@@ -2971,10 +2988,41 @@ pub(crate) fn query_route_request_log_stats(
                 avg_ttft: row.get(4)?,
                 avg_output_tokens_per_second: row.get(5)?,
                 avg_downstream_first_content: row.get(6)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    if query.include_daily_trend {
+            };
+            if daily_from_trend {
+                let day_timestamp = trend.timestamp_unix_ms / DAY_MS * DAY_MS;
+                if result
+                    .daily_trend
+                    .last()
+                    .is_none_or(|day| day.timestamp_unix_ms != day_timestamp)
+                {
+                    result.daily_trend.push(RouteRequestLogDailyTrend {
+                        timestamp_unix_ms: day_timestamp,
+                        total: 0,
+                        total_tokens_sum: None,
+                        total_tokens_known_count: 0,
+                    });
+                    daily_tokens_sum = None;
+                }
+                let day = result.daily_trend.last_mut().unwrap();
+                day.total += trend.total;
+                day.total_tokens_known_count += row_u64(row, 7)?;
+                // Preserve NULL and signed legacy values until the daily sum
+                // is complete, matching SQLite SUM followed by row_optional_u64.
+                if let Some(tokens) = row.get::<_, Option<i64>>(2)? {
+                    daily_tokens_sum = Some(
+                        daily_tokens_sum
+                            .unwrap_or(0)
+                            .checked_add(tokens)
+                            .ok_or_else(|| anyhow::anyhow!("每日 token 总数超出统计上限"))?,
+                    );
+                }
+                day.total_tokens_sum = daily_tokens_sum.and_then(|sum| u64::try_from(sum).ok());
+            }
+            result.trend.push(trend);
+        }
+    }
+    if query.include_daily_trend && !daily_from_trend {
         let sql = format!(
             "SELECT timestamp_unix_ms / {DAY_MS} * {DAY_MS} AS day,
             COUNT(*), SUM(total_tokens), COUNT(total_tokens)
@@ -3582,6 +3630,10 @@ fn rename_if_exists(source: &Path, destination: &Path) -> std::io::Result<()> {
         Err(error) => Err(error),
     }
 }
+
+#[cfg(test)]
+#[path = "route_request_log_bench.rs"]
+mod analytics_bench;
 
 #[cfg(test)]
 mod tests {
@@ -4441,6 +4493,187 @@ mod tests {
             .unwrap();
         assert_eq!(prune_sqlite_logs(&sqlite.connection, 0).unwrap(), 1_000);
         assert_eq!(prune_sqlite_logs(&sqlite.connection, 0).unwrap(), 501);
+    }
+
+    #[test]
+    fn sqlite_statistics_keep_one_snapshot_and_refresh_after_clear() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(SQLITE_FILE_NAME);
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        let entries = (0..100)
+            .map(|index| queued(sample_entry(&format!("snapshot-{index}"))))
+            .collect::<Vec<_>>();
+        sink.write_batch(&entries).unwrap();
+        let query = RouteRequestLogQuery {
+            from_unix_ms: Some(0),
+            to_unix_ms: Some(DAY_MS),
+            group_by: Some("status".into()),
+            include_daily_trend: true,
+            ..Default::default()
+        };
+        let barrier = std::sync::Barrier::new(2);
+        thread::scope(|scope| {
+            let writer_path = &path;
+            let writer_barrier = &barrier;
+            let writer = scope.spawn(move || {
+                let connection = Connection::open(writer_path).unwrap();
+                writer_barrier.wait();
+                for _ in 0..30 {
+                    connection
+                        .execute(
+                            "UPDATE route_request_logs SET total_tokens = total_tokens + 1",
+                            [],
+                        )
+                        .unwrap();
+                }
+            });
+            barrier.wait();
+            for _ in 0..10 {
+                let stats = query_route_request_log_stats(
+                    directory.path(),
+                    RouteRequestLogBackend::Sqlite,
+                    query.clone(),
+                )
+                .unwrap();
+                assert_eq!(stats.summary.total, 100);
+                assert_eq!(
+                    stats.groups[0].summary.total_tokens_sum,
+                    stats.summary.total_tokens_sum
+                );
+                assert_eq!(
+                    stats.trend[0].total_tokens_sum,
+                    stats.summary.total_tokens_sum
+                );
+                assert_eq!(
+                    stats.daily_trend[0].total_tokens_sum,
+                    stats.summary.total_tokens_sum
+                );
+            }
+            writer.join().unwrap();
+        });
+        // A cancelled reader must not affect later reads or keep files open.
+        let connection = open_query_connection(&path).unwrap();
+        connection.progress_handler(1, Some(|| true));
+        let interrupted = connection
+            .query_row(
+                "SELECT SUM(total_tokens) FROM route_request_logs",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap_err();
+        assert_eq!(
+            interrupted.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::OperationInterrupted)
+        );
+        drop(connection);
+        let refreshed = query_route_request_log_stats(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            query.clone(),
+        )
+        .unwrap();
+        assert_eq!(refreshed.summary.total_tokens_sum, Some(4500));
+        drop(sink);
+        assert_eq!(
+            clear_route_request_log_files(directory.path(), false).status,
+            "ok"
+        );
+        let empty = query_route_request_log_stats(
+            directory.path(),
+            RouteRequestLogBackend::Sqlite,
+            query.clone(),
+        )
+        .unwrap();
+        assert_eq!(empty.summary.total, 0);
+        assert!(empty.daily_trend.is_empty());
+        let mut sink = SqliteSink::open(&path, 30).unwrap();
+        sink.write_batch(&[queued(sample_entry("new-database"))])
+            .unwrap();
+        let recreated =
+            query_route_request_log_stats(directory.path(), RouteRequestLogBackend::Sqlite, query)
+                .unwrap();
+        assert_eq!(recreated.summary.total, 1);
+        assert_eq!(recreated.summary.total_tokens_sum, Some(15));
+    }
+
+    #[test]
+    fn sqlite_daily_trend_matches_direct_aggregation_for_hour_and_day_buckets() {
+        for days in [3, 30] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut sink = SqliteSink::open(&directory.path().join(SQLITE_FILE_NAME), 30).unwrap();
+            let from = DAY_MS + 100;
+            let to = (days + 1) * DAY_MS + 100;
+            let entries = [
+                ("before", from - 1, Some(99)),
+                ("negative-history", from, Some(1)),
+                ("positive", from + DAY_MS / 24, Some(50)),
+                ("unknown", 2 * DAY_MS, None),
+                ("zero", 3 * DAY_MS, Some(0)),
+                ("last", to - 1, Some(10)),
+                ("after", to, Some(99)),
+            ]
+            .into_iter()
+            .map(|(id, timestamp, tokens)| {
+                let mut entry = sample_entry(id);
+                entry.timestamp_unix_ms = timestamp;
+                entry.token_usage.total_tokens = tokens;
+                queued(entry)
+            })
+            .collect::<Vec<_>>();
+            sink.write_batch(&entries).unwrap();
+            sink.connection.execute(
+                "UPDATE route_request_logs SET total_tokens = -40 WHERE request_id = 'negative-history'",
+                [],
+            ).unwrap();
+            let stats = query_route_request_log_stats(
+                directory.path(),
+                RouteRequestLogBackend::Sqlite,
+                RouteRequestLogQuery {
+                    from_unix_ms: Some(from),
+                    to_unix_ms: Some(to),
+                    include_daily_trend: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert_eq!(
+                stats.bucket_ms,
+                if days == 3 { DAY_MS / 24 } else { DAY_MS }
+            );
+            let expected = sink
+                .connection
+                .prepare(&format!(
+                    "SELECT timestamp_unix_ms / {DAY_MS} * {DAY_MS},
+                 COUNT(*), SUM(total_tokens), COUNT(total_tokens)
+                 FROM route_request_logs WHERE timestamp_unix_ms >= ? AND timestamp_unix_ms < ?
+                 GROUP BY 1 ORDER BY 1"
+                ))
+                .unwrap()
+                .query_map(params![from, to], |row| {
+                    Ok((
+                        row_u64(row, 0)?,
+                        row_u64(row, 1)?,
+                        row_optional_u64(row, 2)?,
+                        row_u64(row, 3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap();
+            let actual = stats
+                .daily_trend
+                .iter()
+                .map(|day| {
+                    (
+                        day.timestamp_unix_ms,
+                        day.total,
+                        day.total_tokens_sum,
+                        day.total_tokens_known_count,
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected);
+        }
     }
 
     #[test]

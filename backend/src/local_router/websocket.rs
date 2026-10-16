@@ -1,3 +1,7 @@
+use super::sse::{
+    SseCursor, compact_sse_buffer, ensure_sse_buffer_within_limit, sse_frame_data,
+    take_next_sse_frame,
+};
 use super::*;
 
 pub(crate) enum IdleDownstreamWait {

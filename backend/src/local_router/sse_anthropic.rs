@@ -1,3 +1,8 @@
+use super::sse::{
+    SseCursor, SseFrameAccumulator, collect_sse_frames, compact_sse_buffer,
+    ensure_sse_buffer_within_limit, parse_sse_frames, sse_frame_data, sse_json_frame,
+    take_next_sse_frame,
+};
 use super::*;
 
 #[cfg(test)]
@@ -443,6 +448,19 @@ pub(crate) fn anthropic_sse_block_into_value(block: AnthropicSseBlock) -> Result
     }
 }
 
+impl SseFrameAccumulator for AnthropicSseAccumulator {
+    const PROTOCOL_LABEL: &'static str = "Anthropic Messages";
+    const READ_OPERATION: &'static str = "读取 Anthropic Messages SSE 流失败";
+
+    fn ingest_frame(&mut self, data: &str, trailing: bool) -> Result<()> {
+        self.ingest(&sse_json_frame(data, Self::PROTOCOL_LABEL, trailing)?)
+    }
+
+    fn finished(&self) -> bool {
+        self.stopped
+    }
+}
+
 pub(crate) async fn collect_anthropic_message_sse(
     prepared: &mut PreparedUpstreamResponse,
     model: &str,
@@ -667,13 +685,6 @@ pub(crate) fn anthropic_stream_block_start(
         "thinking" | "redacted_thinking" => Ok(Vec::new()),
         other => anyhow::bail!("不支持的 Anthropic content block 类型 {other}"),
     }
-}
-
-pub(crate) fn ensure_sse_buffer_within_limit(buffer: &[u8], cursor: usize) -> Result<()> {
-    if buffer.len().saturating_sub(cursor) > MAX_UPSTREAM_SSE_BUFFER_BYTES {
-        anyhow::bail!("上游 SSE 单帧超过 Codey 安全上限");
-    }
-    Ok(())
 }
 
 pub(crate) fn streaming_failure_message(

@@ -1,3 +1,7 @@
+use super::sse::{
+    SseCursor, SseFrameAccumulator, collect_sse_frames, compact_sse_buffer,
+    ensure_sse_buffer_within_limit, sse_frame_data, sse_json_frame, take_next_sse_frame,
+};
 use super::*;
 
 pub(crate) fn validate_gemini_part(part: &Value) -> Result<()> {

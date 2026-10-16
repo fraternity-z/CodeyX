@@ -77,7 +77,6 @@ const MAX_REQUEST_BYTES: usize = 64 * 1024 * 1024;
 const MAX_HEADER_BYTES: usize = 64 * 1024;
 const MAX_UPSTREAM_ERROR_BYTES: usize = crate::route_request_log::MAX_LOG_ERROR_BYTES;
 const MAX_UPSTREAM_RESPONSE_BYTES: usize = 128 * 1024 * 1024;
-const MAX_UPSTREAM_SSE_BUFFER_BYTES: usize = 2 * 1024 * 1024;
 const RETAINED_RESPONSE_BUDGET_BYTES: usize = 512 * 1024 * 1024;
 const MAX_CACHED_RESPONSE_IDS: usize = 1024;
 const DOWNSTREAM_WEBSOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(5 * 60);
@@ -172,8 +171,8 @@ tokio::task_local! {
 }
 
 // The router used to be one 18.7K-line file. Each submodule owns one concern
-// and exposes `pub(crate)` items; the glob re-exports keep every existing
-// `local_router::…` path (and the `use super::*` inside submodules) working.
+// and exposes `pub(crate)` items. Re-exports preserve existing `local_router::…`
+// paths; touched internal callers import shared capabilities from their owner.
 mod adapt;
 mod anthropic_request;
 mod auth;
