@@ -34,7 +34,7 @@ import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
 import { RemoteControlPanel } from "./features/remote-control";
 import { useModelSelection } from "./useModelSelection";
-import { useRuntimeStatus } from "./useRuntimeStatus";
+import { useRuntimeStatusController } from "./features/runtime-status";
 import { useAppUpdatesController } from "./features/app-updates";
 import {
   NoticeLoadingText,
@@ -88,7 +88,7 @@ export function App({
   } = useDraftConfig();
   const { status, setStatus, markRestartInProgress, refreshStatus, refreshStatusForLoad,
     restartStatusError, setRestartStatusError } =
-    useRuntimeStatus({
+    useRuntimeStatusController({
       active: !embedded || modalVisible,
       embedded,
     });
@@ -317,16 +317,16 @@ export function App({
         refreshPluginMarketplaceStatus(current),
       ]);
       if (!current()) return;
-      const startupError = next.startupError || result.startupError;
+      const startupError = next?.startupError || result.startupError;
       const loadErrors = [
         startupError && `自动启动失败：${startupError}`,
         result.configLoadError,
       ].filter(Boolean);
       if (loadErrors.length > 0) {
         setNotice({ tone: "error", text: loadErrors.join("；") });
-      } else if (next.restartRequired) {
+      } else if (next?.restartRequired) {
         setNotice({ tone: "info", text: "已保存的配置需重启 Codex 后生效" });
-      } else if (!next.running) {
+      } else if (next && !next.running) {
         setNotice({ tone: "info", text: "CodeyX 运行时已就绪" });
       }
     } catch (error) {

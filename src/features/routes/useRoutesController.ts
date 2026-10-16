@@ -2,7 +2,7 @@ import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import type { Config, Confirmation, ModelContextConfig, Notice, OfficialAccountsResult, Profile, ProviderStatus, RuntimeStatus } from "../../App.types";
 import type { useDraftConfig } from "../../useDraftConfig";
 import type { useModelSelection } from "../../useModelSelection";
-import { SETTINGS_OPENED_EVENT } from "../../useRuntimeStatus";
+import { SETTINGS_OPENED_EVENT } from "../runtime-status";
 import { useStableEvent } from "../../useStableEvent";
 import { errorText } from "../../appUtils";
 import { modelIdsEqual } from "../../modelIds";

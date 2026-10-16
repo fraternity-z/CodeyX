@@ -48,7 +48,7 @@ function createRoutesHarness(overrides = {}, handlers = {}) {
   const harness = createControllerHarness(new URL("../src/features/routes/useRoutesController.ts", import.meta.url), "useRoutesController", {
     "../../api": { invoke },
     "../../officialAccountsRequests": { rememberOfficialAccounts: (value) => remembered.push(value) },
-    "../../useRuntimeStatus": { SETTINGS_OPENED_EVENT: "codey-settings-opened" },
+    "../runtime-status": { SETTINGS_OPENED_EVENT: "codey-settings-opened" },
   });
   const render = () => harness.render(options);
   return { ...harness, render, options, calls, notices, completions, starts, saved, remembered };

@@ -4,8 +4,11 @@ import test from "node:test";
 import { flushMicrotasks } from "./helpers/flush.mjs";
 
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 
 const root = new URL("../", import.meta.url);
+const { createStatusPollScheduler } = createModuleGraph(new URL("src/features/runtime-status/useStatusPollingController.ts", root)).exports;
+const { createStatusPollTask, STATUS_POLL_MAX_CONSECUTIVE_ERRORS } = await loadTypeScriptModule(new URL("src/features/runtime-status/state.ts", root));
 
 function createFakeClock() {
   let currentTime = 0;
@@ -187,14 +190,6 @@ test("injection status summary separates internal failures from feature verifica
 });
 
 test("status poll scheduler coalesces due work and stops after bounded failures", async () => {
-  const {
-    createStatusPollScheduler,
-    createStatusPollTask,
-    STATUS_POLL_MAX_CONSECUTIVE_ERRORS,
-  } = await loadTypeScriptModule(
-    new URL("src/runtimeStatusPollScheduler.ts", root),
-  );
-
   {
     const fake = createFakeClock();
     const requests = [];
@@ -243,10 +238,6 @@ test("status poll scheduler coalesces due work and stops after bounded failures"
 });
 
 test("status poll scheduler never overlaps requests and clear cancels queued work", async () => {
-  const { createStatusPollScheduler, createStatusPollTask } =
-    await loadTypeScriptModule(
-      new URL("src/runtimeStatusPollScheduler.ts", root),
-    );
   const fake = createFakeClock();
   let requests = 0;
   let releaseRequest;
@@ -278,8 +269,6 @@ test("status poll scheduler never overlaps requests and clear cancels queued wor
 });
 
 test("restart polling reports exhaustion and can resume after a manual status query", async () => {
-  const { createStatusPollScheduler, createStatusPollTask } =
-    await loadTypeScriptModule(new URL("src/runtimeStatusPollScheduler.ts", root));
   for (const outcome of ["errors", "deadline", "completed"]) {
     const fake = createFakeClock();
     let exhausted = 0;
@@ -307,6 +296,35 @@ test("restart polling reports exhaustion and can resume after a manual status qu
     assert.equal(exhausted, outcome === "completed" ? 0 : 1);
   }
 });
+
+for (const outcome of ["success", "error"]) {
+  test(`cleared poll ${outcome} cannot release the lock of a newer polling request`, async () => {
+    const fake = createFakeClock();
+    const requests = [];
+    const scheduler = createStatusPollScheduler(() => new Promise((resolve, reject) => requests.push({ resolve, reject })), fake.clock);
+    const addTask = (kind) => scheduler.add(createStatusPollTask({
+      kind, delays: [1], pending: () => false, refreshesInjectionStatus: kind === "injection",
+    }, 1000, fake.clock.now()));
+    addTask("restart");
+    await fake.runNext();
+    scheduler.clear();
+    addTask("restart");
+    await fake.runNext();
+    assert.equal(requests.length, 2);
+    if (outcome === "success") requests[0].resolve({ running: false });
+    else requests[0].reject(new Error("stale"));
+    await flushMicrotasks();
+    addTask("injection");
+    assert.equal(await fake.runNext(), false, "new poll still owns the request lock");
+    requests[1].resolve({ running: true });
+    await flushMicrotasks();
+    assert.equal(await fake.runNext(), true);
+    assert.equal(requests.length, 3);
+    requests[2].resolve({ running: true });
+    await flushMicrotasks();
+    assert.equal(await fake.runNext(), false);
+  });
+}
 
 test("a timed-out status request cannot commit a late response", async () => {
   const { withTimeout } = await loadTypeScriptModule(new URL("src/appUtils.ts", root));

@@ -1,33 +1,48 @@
-import type { RuntimeStatus } from "./App.types";
+import { useEffect, useRef } from "react";
+import type { RuntimeStatus } from "../../App.types";
+import { createStatusPollTask, hasPendingBuiltinInjection, INJECTION_PROBE_DELAYS_MS,
+  INJECTION_PROBE_MAX_DURATION_MS, STATUS_POLL_MAX_CONSECUTIVE_ERRORS, STATUS_POLL_MAX_DURATION_MS } from "./state";
+import type { StatusPollClock, StatusPollScheduler, StatusPollTask } from "./types";
 
-export const STATUS_POLL_MAX_DURATION_MS = 5 * 60 * 1_000;
-export const STATUS_POLL_MAX_CONSECUTIVE_ERRORS = 5;
-export const INJECTION_PROBE_DELAYS_MS = [500, 1_000, 2_000, 5_000] as const;
-export const INJECTION_PROBE_MAX_DURATION_MS = 60_000;
-
-export type StatusPollTask = {
-  deadline: number;
-  delayIndex: number;
-  delays: readonly number[];
-  errors: number;
-  kind: "injection" | "restart";
-  nextAt: number;
-  pending: (next: RuntimeStatus) => boolean;
-  refreshesInjectionStatus: boolean;
-  onExhausted?: () => void;
+type Options = {
+  active: boolean;
+  revision: number;
+  status: RuntimeStatus;
+  restartStatusError: string | null;
+  setRestartStatusError: (error: string | null) => void;
+  requestRuntimeStatus: (refreshInjectionStatus: boolean) => Promise<RuntimeStatus>;
 };
 
-export type StatusPollScheduler = {
-  add: (task: StatusPollTask) => void;
-  clear: () => void;
-  remove: (task: StatusPollTask) => void;
-};
+export function useStatusPollingController({ active, revision, status, restartStatusError, setRestartStatusError, requestRuntimeStatus }: Options) {
+  const schedulerRef = useRef<StatusPollScheduler | null>(null);
+  if (schedulerRef.current === null) schedulerRef.current = createStatusPollScheduler(requestRuntimeStatus);
+  const scheduler = schedulerRef.current;
+  const builtinInjectionProbePending = hasPendingBuiltinInjection(status);
 
-export type StatusPollClock = {
-  now: () => number;
-  setTimeout: (callback: () => void, delay: number) => number;
-  clearTimeout: (timer: number) => void;
-};
+  useEffect(() => () => scheduler.clear(), [active, revision, scheduler]);
+  useEffect(() => {
+    if (!active || !builtinInjectionProbePending) return;
+    const task = createStatusPollTask({
+      kind: "injection", delays: INJECTION_PROBE_DELAYS_MS, pending: hasPendingBuiltinInjection,
+      refreshesInjectionStatus: true,
+    }, INJECTION_PROBE_MAX_DURATION_MS, Date.now());
+    scheduler.add(task);
+    return () => scheduler.remove(task);
+  }, [active, revision, builtinInjectionProbePending, scheduler]);
+
+  useEffect(() => {
+    if (!active || !status.restartInProgress || restartStatusError) return;
+    const task = createStatusPollTask({
+      kind: "restart", delays: [500], pending: (next) => Boolean(next.restartInProgress),
+      refreshesInjectionStatus: false,
+      onExhausted: () => setRestartStatusError("暂时无法确认 Codex 是否重启完成，请点击重新查询状态"),
+    }, STATUS_POLL_MAX_DURATION_MS, Date.now());
+    scheduler.add(task);
+    return () => scheduler.remove(task);
+  }, [active, revision, status.restartInProgress, restartStatusError, scheduler]);
+
+  return scheduler;
+}
 
 const browserStatusPollClock: StatusPollClock = {
   now: () => Date.now(),
@@ -44,6 +59,7 @@ export function createStatusPollScheduler(
   const tasks = new Map<StatusPollTask["kind"], StatusPollTask>();
   let timer = 0;
   let requestInProgress = false;
+  let generation = 0;
 
   const schedule = () => {
     if (requestInProgress) return;
@@ -69,10 +85,12 @@ export function createStatusPollScheduler(
     }
 
     requestInProgress = true;
+    const requestGeneration = generation;
     try {
       const next = await requestRuntimeStatus(
         dueTasks.some((task) => task.refreshesInjectionStatus),
       );
+      if (requestGeneration !== generation) return;
       const completedAt = clock.now();
       for (const task of dueTasks) {
         if (tasks.get(task.kind) !== task) continue;
@@ -92,6 +110,7 @@ export function createStatusPollScheduler(
           (task.kind === "restart" ? 500 : task.delays[task.delayIndex]);
       }
     } catch {
+      if (requestGeneration !== generation) return;
       const failedAt = clock.now();
       for (const task of dueTasks) {
         if (tasks.get(task.kind) !== task) continue;
@@ -115,8 +134,10 @@ export function createStatusPollScheduler(
             : task.delays[task.delayIndex]);
       }
     } finally {
-      requestInProgress = false;
-      schedule();
+      if (requestGeneration === generation) {
+        requestInProgress = false;
+        schedule();
+      }
     }
   };
 
@@ -126,6 +147,8 @@ export function createStatusPollScheduler(
       schedule();
     },
     clear() {
+      generation++;
+      requestInProgress = false;
       tasks.clear();
       clock.clearTimeout(timer);
       timer = 0;
@@ -136,19 +159,5 @@ export function createStatusPollScheduler(
         schedule();
       }
     },
-  };
-}
-
-export function createStatusPollTask(
-  task: Omit<StatusPollTask, "deadline" | "delayIndex" | "errors" | "nextAt">,
-  duration: number,
-  now = Date.now(),
-): StatusPollTask {
-  return {
-    ...task,
-    deadline: now + duration,
-    delayIndex: 0,
-    errors: 0,
-    nextAt: now + task.delays[0],
   };
 }

@@ -141,7 +141,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
 
 test("runtime polling preserves referentially stable status slices", async () => {
   const { reconcileRuntimeStatus } = await loadTypeScriptModule(
-    new URL("../src/runtimeStatusSnapshot.ts", import.meta.url),
+    new URL("../src/features/runtime-status/state.ts", import.meta.url),
   );
   const current = {
     running: false,

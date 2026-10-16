@@ -16,7 +16,7 @@ import remoteControlStyles from "./remote-control.css?inline";
 import responsiveStyles from "./styles.responsive.css?inline";
 import { codeyApiPath, invoke } from "./api";
 import { SETTINGS_OVERLAY_Z_INDEX_CSS } from "./overlay.constants";
-import { SETTINGS_OPENED_EVENT } from "./useRuntimeStatus";
+import { SETTINGS_OPENED_EVENT } from "./features/runtime-status";
 import { installOverlayTheme } from "./overlayTheme";
 import { installRequestLogTheme } from "./requestLogTheme";
 import {

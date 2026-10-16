@@ -9,7 +9,7 @@ const [urlValidation, formatters, appUtils, runtimeStatusSnapshot, tokenUnits] =
     loadTypeScriptModule(new URL("src/urlValidation.ts", root)),
     loadTypeScriptModule(new URL("src/formatters.ts", root)),
     loadTypeScriptModule(new URL("src/appUtils.ts", root)),
-    loadTypeScriptModule(new URL("src/runtimeStatusSnapshot.ts", root)),
+    loadTypeScriptModule(new URL("src/features/runtime-status/state.ts", root)),
     loadTypeScriptModule(new URL("src/tokenUnits.ts", root)),
   ]);
 

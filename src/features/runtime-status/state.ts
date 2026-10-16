@@ -1,4 +1,25 @@
-import type { RuntimeStatus } from "./App.types";
+import type { RuntimeStatus } from "../../App.types";
+import type { StatusPollTask } from "./types";
+
+export const SETTINGS_OPENED_EVENT = "codey-settings-opened";
+export const STATUS_POLL_MAX_DURATION_MS = 5 * 60 * 1_000;
+export const STATUS_POLL_MAX_CONSECUTIVE_ERRORS = 5;
+export const INJECTION_PROBE_DELAYS_MS = [500, 1_000, 2_000, 5_000] as const;
+export const INJECTION_PROBE_MAX_DURATION_MS = 60_000;
+
+export function hasPendingBuiltinInjection(status: RuntimeStatus): boolean {
+  return status.injectionScripts?.some(
+    (script) => script.source === "builtin" && script.status === "executed",
+  ) ?? false;
+}
+
+export function createStatusPollTask(
+  task: Omit<StatusPollTask, "deadline" | "delayIndex" | "errors" | "nextAt">,
+  duration: number,
+  now: number,
+): StatusPollTask {
+  return { ...task, deadline: now + duration, delayIndex: 0, errors: 0, nextAt: now + task.delays[0] };
+}
 
 function valuesEqual(left: unknown, right: unknown): boolean {
   if (Object.is(left, right)) return true;
