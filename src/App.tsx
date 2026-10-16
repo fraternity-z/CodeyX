@@ -11,7 +11,7 @@ import {
   IconSettings,
   IconX,
 } from "@tabler/icons-react";
-import { invoke } from "./api";
+import { useConfigurationController } from "./features/configuration";
 import { useRoutesController } from "./features/routes";
 import { useDraftConfig } from "./useDraftConfig";
 import { ModelPickerDialog } from "./AppDialogs";
@@ -27,7 +27,6 @@ import { DiagnosticCleanupToast, useRuntimeMaintenanceController } from "./featu
 import { useNotificationsController } from "./features/notifications";
 import { errorText } from "./appUtils";
 import type { DiagnosticStorageTarget } from "./diagnosticStorage";
-import { subagentUpdateNote } from "./modelSelectionNotice";
 import { PromptOptimizationCard } from "./features/prompt-optimization";
 import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
@@ -51,19 +50,12 @@ import type {
   ProviderStatus,
   Config,
   ConfigSaveResult,
-  FastContextToolsStatus,
-  ModelState,
   Profile,
 } from "./App.types";
 import { Badge, Button, Tooltip } from "./components/ui";
 
 const Check = IconCheck;
 const X = IconX;
-const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
-  userConfigured: false,
-  detectionFailed: true,
-};
-const CONFIG_LOAD_TIMEOUT_MS = 30_000;
 
 export function App({
   embedded = false,
@@ -95,10 +87,7 @@ export function App({
   const [providerStatus, setProviderStatus] = useState<ProviderStatus | null>(
     null,
   );
-  const [fastContextToolsStatus, setFastContextToolsStatus] =
-    useState<FastContextToolsStatus>(UNKNOWN_FAST_CONTEXT_TOOLS_STATUS);
   const [usageAnalysisOpen, setUsageAnalysisOpen] = useState(false);
-  const loadGenerationRef = useRef(0);
   const settingsScroll = useRef<HTMLDivElement>(null);
   const usageReturn = useRef<{ trigger: HTMLElement; scrollTop: number } | null>(null);
   const handleOpenUsageAnalysis = useCallback((trigger: HTMLElement) => {
@@ -116,7 +105,6 @@ export function App({
     return () => cancelAnimationFrame(frame);
   }, [usageAnalysisOpen]);
   const [busy, setBusy] = useState<string | null>(null);
-  const [loadFailed, setLoadFailed] = useState(false);
   const [systemSettingsOpen, setSystemSettingsOpen] = useState(false);
   const popupContainer = modalContainer ?? null;
   const noticeController = useAppNoticeController();
@@ -237,6 +225,22 @@ export function App({
     setStatus,
     setNotice,
   });
+  const configuration = useConfigurationController({
+    active: !embedded || modalVisible,
+    config, isBusy, persistedConfigRef, adoptRouteConfig, adoptSavedConfig, setDirty,
+    setBusy, setNotice, setProviderStatus, setModelState, setStatus,
+    refreshStatus, refreshStatusForLoad, refreshPluginMarketplaceStatus,
+  });
+  const { load, loadFailed, fastContextToolsStatus, saveCurrent } = configuration;
+
+  function persist(next: Config): Promise<ConfigSaveResult> {
+    return configuration.persist(next);
+  }
+
+  function applySavedConfig(result: ConfigSaveResult, submitted?: Config): boolean {
+    return configuration.applySavedConfig(result, submitted);
+  }
+
   const {
     saveRoute, setRouteEnabled, reorderRoute, reorderRouteModels, requestDeleteRoute,
     fetchRouteModels, saveOfficialRouteSettings, setRouteDefaultModel, handleOfficialAccountsChanged,
@@ -269,153 +273,6 @@ export function App({
       if (config && dirty) await persist(config);
     },
   });
-
-  useEffect(() => {
-    void load();
-    return () => {
-      loadGenerationRef.current += 1;
-    };
-  }, []);
-
-  async function load() {
-    const generation = ++loadGenerationRef.current;
-    const current = () => generation === loadGenerationRef.current;
-    setLoadFailed(false);
-    const timer = window.setTimeout(() => {
-      if (!current()) return;
-      setLoadFailed(true);
-      setNotice({ tone: "error", text: "加载配置超时，请重新检查" });
-    }, CONFIG_LOAD_TIMEOUT_MS);
-    try {
-      const result = await invoke<{
-        config: Config;
-        modelState?: ModelState;
-        startupError?: string;
-        configLoadError?: string;
-        officialAccountAvailable?: boolean;
-        providerStatus?: ProviderStatus;
-        fastContextToolsStatus?: FastContextToolsStatus;
-      }>("load_codey_config");
-      window.clearTimeout(timer);
-      if (!current()) return;
-      setLoadFailed(false);
-      setPersistedConfig(result.config);
-      setProviderStatus(result.providerStatus ?? null);
-      if (!result.providerStatus) throw new Error("未能读取当前服务配置，请重新检查");
-      if (typeof result.officialAccountAvailable === "boolean") {
-        setStatus((currentStatus) => ({
-          ...currentStatus,
-          officialAccountAvailable: result.officialAccountAvailable,
-        }));
-      }
-      setFastContextToolsStatus(
-        result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
-      );
-      if (result.modelState) setModelState(result.modelState);
-      const [next] = await Promise.all([
-        refreshStatusForLoad(),
-        refreshPluginMarketplaceStatus(current),
-      ]);
-      if (!current()) return;
-      const startupError = next?.startupError || result.startupError;
-      const loadErrors = [
-        startupError && `自动启动失败：${startupError}`,
-        result.configLoadError,
-      ].filter(Boolean);
-      if (loadErrors.length > 0) {
-        setNotice({ tone: "error", text: loadErrors.join("；") });
-      } else if (next?.restartRequired) {
-        setNotice({ tone: "info", text: "已保存的配置需重启 Codex 后生效" });
-      } else if (next && !next.running) {
-        setNotice({ tone: "info", text: "CodeyX 运行时已就绪" });
-      }
-    } catch (error) {
-      window.clearTimeout(timer);
-      if (!current()) return;
-      setLoadFailed(true);
-      setNotice({ tone: "error", text: errorText(error) });
-    }
-  }
-
-  async function persist(next: Config) {
-    const submitted = config ?? next;
-    const result = await invoke<ConfigSaveResult>("save_codey_config", { config: next });
-    applySavedConfig(result, submitted);
-    return result;
-  }
-
-  function applySavedConfig(result: ConfigSaveResult, submitted?: Config) {
-    const merged = submitted ? adoptSavedConfig(result.config, submitted) : adoptRouteConfig(result.config);
-    if (!merged) return false;
-    setDirty(merged.dirty);
-    setFastContextToolsStatus(
-      result.fastContextToolsStatus ?? UNKNOWN_FAST_CONTEXT_TOOLS_STATUS,
-    );
-    window.dispatchEvent(
-      new CustomEvent("codey:config-changed", {
-        detail: { config: result.config },
-      }),
-    );
-    if (result.providerStatus) setProviderStatus(result.providerStatus);
-    if (result.modelState) setModelState(result.modelState);
-    if (typeof result.restartRequired === "boolean") {
-      setStatus((current) => ({
-        ...current,
-        restartRequired: result.restartRequired,
-      }));
-    }
-    // 保存结果已包含配置、模型和重启状态；其余运行状态在后台补充。
-    void refreshStatus().catch(() => undefined);
-    return true;
-  }
-
-  async function saveCurrent() {
-    if (!config) return;
-    await runOperation("save", async () => {
-      const retryCountChanged =
-        persistedConfigRef.current?.streamMaxRetries !== config.streamMaxRetries;
-      const result = await persist(config);
-      const subagentHotReloaded = Boolean(result.subagentConfigHotReloaded);
-      const subagentHotReloadFailed = Boolean(result.subagentConfigHotReloadError);
-      const subagentNote = subagentUpdateNote(result);
-      const subagentConfigRepaired = Boolean(result.subagentConfigRepaired);
-      const requestLogHealth = result.routeRequestLogHealth;
-      const requestLogHotReloadFailed = requestLogHealth === "failed";
-      const requestLogSuperseded = requestLogHealth === "superseded";
-      const restartSuffix = result.restartRequired
-        ? "；其他启动参数将在重启 Codex 后生效"
-        : "";
-      let noticeTone: "success" | "info" | "error" =
-        result.restartRequired || subagentHotReloadFailed ? "info" : "success";
-      let noticeText = result.restartRequired && !subagentNote
-        ? "CodeyX 设置已保存，启动参数将在重启 Codex 后生效"
-        : "CodeyX 设置已保存";
-      if (subagentConfigRepaired) {
-        noticeText = "CodeyX 设置已保存；子代理配置已同步";
-      } else if (subagentHotReloaded) {
-        noticeText = "CodeyX 设置已保存；子代理配置已实时更新";
-      }
-      if (requestLogHotReloadFailed) {
-        noticeTone = "error";
-        noticeText = `CodeyX 设置已保存；${result.routeRequestLogHotReloadError || "请求日志记录未能实时更新"}`;
-      } else if (requestLogSuperseded) {
-        noticeTone = "info";
-        noticeText = `CodeyX 设置已保存；${result.routeRequestLogHotReloadError || "请求日志配置被更新的设置取代，请确认当前开关状态"}`;
-      } else if (requestLogHealth === "enabled") {
-        noticeText = `CodeyX 设置已保存；请求日志记录已实时开启，无需重启${restartSuffix}`;
-      } else if (requestLogHealth === "disabled") {
-        noticeText = `CodeyX 设置已保存；请求日志记录已实时关闭，无需重启${restartSuffix}`;
-      }
-      if (retryCountChanged && result.restartRequired) {
-        noticeText = "CodeyX 设置已保存；会话重试次数将在重启 Codex 后生效";
-      }
-      if (subagentNote) {
-        noticeText += `；${subagentNote}`;
-        if (noticeTone === "success") noticeTone = "info";
-      }
-      setNotice({ tone: noticeTone, text: noticeText });
-    });
-  }
 
   function closeSettings() {
     if (isBusy) return;
@@ -538,7 +395,7 @@ export function App({
                 {busy === "repair-codex-config" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
                 {busy === "repair-codex-config" ? "检查修复中…" : "修复 Codex 配置"}
               </Button>
-              <Button variant="secondary" size="sm" disabled={isBusy} onClick={() => void runOperation("reload-config", load)}>
+              <Button variant="secondary" size="sm" disabled={isBusy} onClick={() => void load()}>
                 重新检查
               </Button>
             </div>

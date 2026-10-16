@@ -3,9 +3,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-const legacyAppCommands = new Set([
-  "load_codey_config", "save_codey_config",
-]);
 const featureOf = (file) => /^src\/features\/([^/]+)\//.exec(file)?.[1];
 const layerOf = (file) => {
   const name = path.posix.basename(file);
@@ -40,6 +37,9 @@ export function checkArchitecture(sources) {
         && !/^src\/features\/[^/]+(?:\/index(?:\.ts)?)?$/.test(target)) {
         report(file, node, tree, "跨功能只能使用公开入口，不能导入内部文件");
       }
+      if (file === "src/App.tsx" && /^src\/api(?:\.ts)?$/.test(target)) {
+        report(file, node, tree, "App 不得直接依赖后端传输，请调用功能 controller");
+      }
       if (!governed) return;
       const requestDependency = /(?:^|\/)(?:api|requests|[^/]*Requests)(?:\.ts)?$/.test(target);
       if (layer === "view" && requestDependency) report(file, node, tree, "视图不能依赖请求层");
@@ -67,7 +67,7 @@ export function checkArchitecture(sources) {
         const callee = node.expression.getText(tree);
         if ((node.expression.kind === ts.SyntaxKind.ImportKeyword || callee === "require") && ts.isStringLiteral(node.arguments[0])) checkImport(node, node.arguments[0].text);
         if (governed && layer !== "requests" && /^(?:invoke|fetch|\w+\.(?:invoke|fetch))$/.test(callee)) report(file, node, tree, "后端与网络调用必须进入请求层");
-        if (file === "src/App.tsx" && callee === "invoke" && (!ts.isStringLiteral(node.arguments[0]) || !legacyAppCommands.has(node.arguments[0].text))) {
+        if (file === "src/App.tsx" && /^(?:invoke|fetch|\w+\.(?:invoke|fetch))$/.test(callee)) {
           report(file, node, tree, "App 不得新增业务命令，请放入功能请求层");
         }
       }

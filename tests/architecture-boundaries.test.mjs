@@ -30,10 +30,14 @@ test("新增功能自动纳入检查，别名导入和动态导入不能绕开�
 test("跨功能内部依赖、运行时环和 App 新业务命令会被阻止", () => {
   assert.match(checkArchitecture({ "src/App.tsx": 'import { foo } from "./features/demo/state"; invoke("delete_route");' }).join(), /公开入口/);
   assert.match(checkArchitecture({ "src/App.tsx": 'invoke("delete_route");' }).join(), /不得新增业务命令/);
-  for (const command of ["codex_extensions", "plugin_marketplace_status", "restart_codey", "repair_plugin_marketplace", "prepare_computer_use", "repair_main_process_injection", "repair_codex_config", "clear_diagnostic_storage"]) {
+  for (const command of ["load_codey_config", "save_codey_config", "codex_extensions", "plugin_marketplace_status", "restart_codey", "repair_plugin_marketplace", "prepare_computer_use", "repair_main_process_injection", "repair_codex_config", "clear_diagnostic_storage"]) {
     assert.match(checkArchitecture({ "src/App.tsx": `invoke("${command}");` }).join(), /不得新增业务命令/);
   }
-  assert.deepEqual(checkArchitecture({ "src/App.tsx": 'import { foo } from "./features/demo"; invoke("load_codey_config");' }), []);
+  assert.deepEqual(checkArchitecture({ "src/App.tsx": 'import { useConfigurationController } from "./features/configuration";' }), []);
+  for (const source of ['import { invoke as send } from "./api";', 'import("./api");', 'require("./api");', 'export { invoke } from "./api.ts";']) {
+    assert.match(checkArchitecture({ "src/App.tsx": source }).join(), /不得直接依赖后端传输/);
+  }
+  assert.match(checkArchitecture({ "src/App.tsx": 'fetch("/api/load_codey_config");' }).join(), /不得新增业务命令/);
   assert.match(checkArchitecture({
     "src/features/demo/a.ts": 'import { b } from "./b";',
     "src/features/demo/b.ts": 'import { a } from "./a";',

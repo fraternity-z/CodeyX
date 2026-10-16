@@ -160,11 +160,12 @@ test("request log detail labels request body shape and flags empty input arrays"
 });
 
 test("request log controls are scoped to built-in routing and preserve logger settings", async () => {
-  const [app, modelSection, types, preview] = await Promise.all([
+  const [app, modelSection, types, preview, configurationState] = await Promise.all([
     readSource("src/App.tsx"),
     readSource("src/ModelSection.tsx"),
     readSource("src/App.types.ts"),
     readSource("src/dev/mockApi.ts"),
+    readSource("src/features/configuration/state.ts"),
   ]);
 
   assert.match(types, /export type RouteRequestLogConfig/);
@@ -172,7 +173,7 @@ test("request log controls are scoped to built-in routing and preserve logger se
   assert.match(app, /routeRequestLog:\s*\{\s*\.\.\.config\.routeRequestLog/);
   assert.match(app, /enabled: checked/);
   assert.match(app, /checked \? \{ backend: "sqlite" as const \} : \{\}/);
-  assert.match(app, /请求日志记录已实时开启，无需重启/);
+  assert.match(configurationState, /请求日志记录已实时开启，无需重启/);
   assert.match(app, /保存后关闭日志记录，无需重启/);
   assert.match(modelSection, /\{config\.localRouterEnabled && \([\s\S]*(开启)?日志记录/);
   assert.match(modelSection, /aria-label="开启请求日志记录"/);

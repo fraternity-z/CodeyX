@@ -15,6 +15,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
     commandSource,
     runtimeCommandSource,
     runtimeStatusPresentation,
+    configurationSource,
   ] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
     readFile(new URL("src/App.types.ts", root), "utf8"),
@@ -24,6 +25,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
     readFile(new URL("backend/src/commands/runtime.rs", root), "utf8"),
     loadTypeScriptModule(new URL("src/runtimeStatusPresentation.ts", root)),
+    readFile(new URL("src/features/configuration/useConfigurationController.ts", root), "utf8"),
   ]);
   const uiSource = `${appSource}\n${sectionsSource}`;
 
@@ -33,7 +35,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
   assert.match(commandSource, /fastContextToolsStatus/);
   assert.match(commandSource, /embedded_fast_context_tools_enabled\([\s\S]*config_input\.fast_context_tools/);
   assert.doesNotMatch(commandSource, /current_fast_context_tools_status\(\)\?/);
-  assert.match(appSource, /setFastContextToolsStatus\([\s\S]*result\.fastContextToolsStatus/);
+  assert.match(configurationSource, /setFastContextToolsStatus\([\s\S]*result\.fastContextToolsStatus/);
   assert.match(appSource, /fastContextToolsStatus=\{fastContextToolsStatus\}/);
   assert.match(runtimeCommandSource, /"fastContextToolsActive": fast_context_tools_active/);
   const [fastctxFeature] = runtimeStatusPresentation.buildEnabledOptimizationFeatures(
