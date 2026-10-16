@@ -1,5 +1,4 @@
 use std::{
-    collections::HashMap,
     convert::Infallible,
     net::{IpAddr, SocketAddr},
     sync::{Arc, Mutex, RwLock, Weak},
@@ -36,6 +35,17 @@ type Reply = Response<Body>;
 const MAX_BODY: usize = 1024 * 1024;
 // Four MiB of images expanded as base64, plus escaped message text and metadata.
 const MAX_MESSAGE_BODY: usize = 7 * 1024 * 1024;
+const STATE_COALESCE_WINDOW: Duration = Duration::from_millis(100);
+
+fn schedule_state(pending: &mut Option<tokio::time::Instant>, urgent: bool) {
+    let deadline = tokio::time::Instant::now()
+        + if urgent {
+            Duration::ZERO
+        } else {
+            STATE_COALESCE_WINDOW
+        };
+    *pending = Some(pending.map_or(deadline, |previous| previous.min(deadline)));
+}
 const COOKIE: &str = "codey_remote";
 const HTML: &str = "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content\"><meta name=\"color-scheme\" content=\"light dark\"><title>Codex · CodeyX 远程控制</title><link rel=\"stylesheet\" href=\"/remote.css\"></head><body><div id=\"root\"></div><script src=\"/remote.js\" defer></script></body></html>";
 
@@ -44,7 +54,7 @@ pub(super) struct Core {
     pub state: Weak<AppState>,
     pub public_url: RwLock<Option<String>>,
     pub address: SocketAddr,
-    pub actions: AsyncMutex<HashMap<String, ([u8; 32], Value)>>,
+    pub actions: AsyncMutex<super::actions::Ledger>,
     pub shutdown: tokio::sync::watch::Sender<bool>,
     pub streams: Arc<Semaphore>,
 }
@@ -462,19 +472,20 @@ fn event_stream(
             let state = core.state.upgrade().ok_or("CodeyX 正在退出")?;
             super::create::open(&state, &thread).await?;
             let mut desktop = Desktop::follow(&thread).await?;
-            let mut changed = true;
+            let mut pending = Some(tokio::time::Instant::now());
             let mut heartbeat = tokio::time::interval(Duration::from_secs(1));
             let mut ticks = 0u8;
             loop {
                 if *shutdown.borrow() || !authorized(&core,&token) { return Err("设备授权已撤销".to_string()); }
-                if changed {
-                    let value = json!({"type":"state","state":super::protocol::view(&desktop.state)});
-                    tokio::time::timeout(Duration::from_secs(10),socket.send(Message::Text(value.to_string().into()))).await
+                if pending.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+                    let frame = desktop.state_frame();
+                    tokio::time::timeout(Duration::from_secs(10),socket.send(Message::Text(frame.into()))).await
                         .map_err(|_|"手机连接超时")?.map_err(|_|"手机连接已断开")?;
+                    pending = None;
                 }
-                changed = false;
                 tokio::select! {
                     _ = shutdown.changed() => return Ok::<_,String>(()),
+                    _ = tokio::time::sleep_until(pending.unwrap_or_else(tokio::time::Instant::now)), if pending.is_some() => {},
                     _ = heartbeat.tick() => {
                         ticks = (ticks + 1) % 15;
                         if ticks == 0 {
@@ -482,7 +493,7 @@ fn event_stream(
                                 .map_err(|_|"手机连接超时")?.map_err(|_|"手机连接已断开")?;
                         }
                     },
-                    result = desktop.update() => { changed = result?; },
+                    result = desktop.update() => { if result? { schedule_state(&mut pending, desktop.urgent); } },
                     message = socket.next() => match message {
                         Some(Ok(Message::Ping(bytes))) => { socket.send(Message::Pong(bytes)).await.map_err(|_|"手机连接已断开")?; },
                         Some(Ok(Message::Pong(_))) => {},
@@ -513,51 +524,61 @@ fn event_stream(
         .unwrap()
 }
 
-async fn action_once(core: &Core, token: &str, path: &str, args: &Value) -> Result<Value, String> {
+async fn action_once(
+    core: &Arc<Core>,
+    token: &str,
+    path: &str,
+    args: &Value,
+) -> Result<Value, String> {
     let id = args["requestId"].as_str().ok_or("操作缺少请求标识")?;
     super::desktop::validate_thread(id)?;
     let digest: [u8; 32] = Sha256::digest(format!("{path}\n{args}").as_bytes()).into();
-    let mut ledger = core.actions.lock().await;
-    if !authorized(core, token) {
-        return Err("设备授权已撤销".into());
-    }
-    if let Some((previous, result)) = ledger.get(id) {
-        if previous != &digest {
-            return Err("同一操作标识不能用于不同内容".into());
-        }
-        return Ok(result.clone());
-    }
-    if ledger.len() >= 4096 {
-        return Err("本次远程会话操作记录已满，请在电脑端重启远程服务".into());
-    }
-    ledger.insert(
-        id.to_string(),
-        (
-            digest,
-            json!({"status":"failed","message":super::desktop::UNCERTAIN}),
-        ),
-    );
-    let result = if path == "/remote/create" {
-        async {
+    authorize_action(core, token)?;
+    let thread = if path == "/remote/create" {
+        "/create"
+    } else {
+        args["threadId"].as_str().unwrap_or_default()
+    };
+    let operation = {
+        let core = Arc::clone(core);
+        let token = token.to_string();
+        let create = path == "/remote/create";
+        let args = args.clone();
+        async move {
+            // A queued action may outlive device authorization or service shutdown.
+            authorize_action(&core, &token)?;
+            if !create {
+                return perform_action(&core, &token, &args).await;
+            }
             let state = core.state.upgrade().ok_or("CodeyX 正在退出")?;
             if args.get("model").is_some() || args.get("effort").is_some() {
                 let catalog = state
                     .bridge_request("/codex-model-catalog".into(), json!({}))
                     .await;
-                validate_model_settings(&catalog, &json!({}), args)?;
+                validate_model_settings(&catalog, &json!({}), &args)?;
             }
-            super::create::create(&state, args).await
+            authorize_action(&core, &token)?;
+            super::create::create(&state, &args).await
         }
-        .await
-    } else {
-        perform_action(core, args).await
     };
-    let value = result.unwrap_or_else(|error| json!({"status":"failed","message":error}));
-    ledger.insert(id.to_string(), (digest, value.clone()));
+    let result = core
+        .actions
+        .lock()
+        .await
+        .start(id, digest, thread, operation)?;
+    let value = result.finish().await;
+    authorize_action(core, token)?;
     Ok(value)
 }
 
-async fn perform_action(core: &Core, args: &Value) -> Result<Value, String> {
+fn authorize_action(core: &Core, token: &str) -> Result<(), String> {
+    if *core.shutdown.borrow() || !authorized(core, token) {
+        return Err("设备授权已撤销".into());
+    }
+    Ok(())
+}
+
+async fn perform_action(core: &Core, token: &str, args: &Value) -> Result<Value, String> {
     let thread = args["threadId"].as_str().ok_or("缺少会话标识")?;
     super::desktop::validate_thread(thread)?;
     let action = args["action"].as_str().ok_or("缺少会话操作")?;
@@ -575,6 +596,7 @@ async fn perform_action(core: &Core, args: &Value) -> Result<Value, String> {
             .await;
         validate_model_settings(&catalog, &desktop.state, args)?;
     }
+    authorize_action(core, token)?;
     desktop.action(action, args).await
 }
 
@@ -693,7 +715,6 @@ fn panel_command(command: &str) -> bool {
             | "runtime_status"
             | "query_route_request_logs"
             | "query_route_request_log_stats"
-            | "query_route_request_log_quota_usage"
             | "query_route_request_log_models"
             | "query_official_account_usage"
             | "store_official_account_usage"
@@ -710,7 +731,6 @@ fn panel_command(command: &str) -> bool {
             | "clear_route_request_logs"
             | "restart_codey"
             | "clear_diagnostic_storage"
-            | "repair_codex_overlays"
             | "test_notification_channel"
             | "start_wechat_claw_login"
             | "poll_wechat_claw_login"

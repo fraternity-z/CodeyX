@@ -49,3 +49,14 @@ test("overlay resolves bridge paths through the checked helper", () => {
   assert.match(overlay, /__codexSessionDeleteBridge\(codeyApiPath\(command\), args\)/);
   assert.doesNotMatch(overlay, /__codexSessionDeleteBridge\(`\/api\/\$\{command\}`/);
 });
+
+test("remote panel permissions remain a strict subset of dispatched commands", () => {
+  const server = fs.readFileSync(new URL("../backend/src/remote_control/server.rs", import.meta.url), "utf8");
+  const whitelist = server.slice(server.indexOf("fn panel_command"), server.indexOf("#[cfg(test)]", server.indexOf("fn panel_command")));
+  const commands = [...whitelist.matchAll(/"([a-z][a-z0-9_]*)"/g)].map(match => match[1]);
+  assert.ok(commands.length > 0);
+  for (const command of commands) assert.ok(api.isCodeyApiCommand(command), `remote command is not dispatched: ${command}`);
+  for (const command of ["start_remote_control", "pair_remote_control", "revoke_remote_device", "query_route_request_log_quota_usage", "repair_codex_overlays"]) {
+    assert.ok(!commands.includes(command), `${command} must not be remotely permitted`);
+  }
+});

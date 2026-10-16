@@ -1,6 +1,23 @@
 use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+#[tokio::test(start_paused = true)]
+async fn state_updates_coalesce_without_delaying_terminal_or_approval_changes() {
+    let start = tokio::time::Instant::now();
+    let mut pending = None;
+    for _ in 0..10 {
+        schedule_state(&mut pending, false);
+        tokio::time::advance(Duration::from_millis(5)).await;
+    }
+    assert_eq!(pending, Some(start + STATE_COALESCE_WINDOW));
+    schedule_state(&mut pending, true);
+    assert_eq!(pending, Some(tokio::time::Instant::now()));
+    pending = None;
+    schedule_state(&mut pending, false);
+    tokio::time::advance(STATE_COALESCE_WINDOW).await;
+    assert!(pending.unwrap() <= tokio::time::Instant::now());
+}
+
 #[test]
 fn model_settings_follow_the_applied_catalog_and_declared_efforts() {
     let catalog = json!({"status":"ok","models":["route/model"],"model_metadata":[{"model":"route/model","supported_reasoning_efforts":["low","high"]}]});
@@ -37,7 +54,7 @@ async fn fixture() -> (Arc<Core>, String, tokio::task::JoinHandle<()>) {
         state: Weak::new(),
         public_url: RwLock::new(None),
         address,
-        actions: AsyncMutex::new(HashMap::new()),
+        actions: AsyncMutex::new(super::super::actions::Ledger::default()),
         shutdown: tokio::sync::watch::channel(false).0,
         streams: Arc::new(Semaphore::new(8)),
     });
@@ -181,6 +198,8 @@ async fn rejects_dns_rebinding_and_remote_pairing_management() {
         "pair_remote_control",
         "revoke_remote_device",
         "unknown",
+        "query_route_request_log_quota_usage",
+        "repair_codex_overlays",
     ] {
         let response = client
             .post(format!("{base}/api/{command}"))
@@ -270,6 +289,53 @@ async fn repeated_action_ids_never_replay_and_cannot_change_content() {
     );
     assert_eq!(core.actions.lock().await.len(), 1);
     task.abort();
+}
+
+#[tokio::test]
+async fn queued_actions_recheck_revocation_and_shutdown_before_dispatch() {
+    for shutdown in [false, true] {
+        let (core, base, task) = fixture().await;
+        let cookie = pair(&core, &base).await;
+        let token = cookie.split_once('=').unwrap().1.to_string();
+        let (release, wait) = tokio::sync::oneshot::channel();
+        let first = core
+            .actions
+            .lock()
+            .await
+            .start("blocking", [0; 32], "/create", async move {
+                wait.await.unwrap();
+                Ok(Value::Null)
+            })
+            .unwrap();
+        let request_core = core.clone();
+        let request = tokio::spawn(async move {
+            action_once(
+                &request_core,
+                &token,
+                "/remote/create",
+                &json!({"requestId":uuid::Uuid::new_v4().to_string()}),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while core.actions.lock().await.len() != 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        if shutdown {
+            core.shutdown.send_replace(true);
+        } else {
+            let mut auth = core.auth.lock().unwrap();
+            let id = auth.devices()[0]["id"].as_str().unwrap().to_string();
+            auth.revoke(&id);
+        }
+        release.send(()).unwrap();
+        first.finish().await;
+        assert!(request.await.unwrap().unwrap_err().contains("授权已撤销"));
+        task.abort();
+    }
 }
 
 #[tokio::test]

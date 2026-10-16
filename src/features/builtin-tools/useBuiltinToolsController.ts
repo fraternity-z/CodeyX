@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import type { Config, FastContextToolsStatus } from "../../App.types";
 import type { BuiltinToolsStatus } from "../../builtinTools";
 import { errorText } from "../../appUtils";
+import { useOperationScope } from "../../useOperationScope";
 import { builtinToolsRequests } from "./requests";
 
 type Options = {
@@ -19,25 +20,14 @@ export function useBuiltinToolsController({ active, config, fastContextToolsStat
   const [readError, setReadError] = useState("");
   const [notice, setNotice] = useState("");
   const [revision, setRevision] = useState(0);
-  const pending = useRef(false);
-  const mounted = useRef(false);
-  const session = useRef<object | null>(null);
-  const readGeneration = useRef(0);
-  useEffect(() => {
-    mounted.current = true;
-    return () => { mounted.current = false; };
-  }, []);
-  useEffect(() => {
-    session.current = active ? {} : null;
-    return () => { session.current = null; readGeneration.current++; };
-  }, [active]);
+  const scope = useOperationScope(active);
 
   useEffect(() => {
-    if (!active || pending.current) return;
+    if (!active || scope.pending) return;
     let cancelled = false;
     let timer: number | undefined;
-    const generation = readGeneration.current;
-    const current = () => !cancelled && generation === readGeneration.current && !pending.current;
+    const valid = scope.read();
+    const current = () => !cancelled && valid();
     async function poll() {
       if (!current()) return;
       try {
@@ -50,17 +40,16 @@ export function useBuiltinToolsController({ active, config, fastContextToolsStat
     }
     void poll();
     return () => { cancelled = true; window.clearTimeout(timer); };
-  }, [active, busy, revision]);
+  }, [active, busy, revision, scope]);
 
   const running = status?.job?.phase === "running";
   const blocked = busy || running || isBusy || !status;
   const userManaged = Boolean(status?.mcp.id && !status.mcp.managed);
   async function setEnabled(enabled: boolean) {
-    const scope = session.current;
-    if (!active || !scope || pending.current || blocked || userManaged) return;
-    pending.current = true;
-    readGeneration.current++;
-    const current = () => mounted.current && session.current === scope;
+    if (!active || blocked || userManaged) return;
+    const operationScope = scope.begin();
+    if (!operationScope) return;
+    const { current } = operationScope;
     setBusy(true);
     setError("");
     setReadError("");
@@ -70,13 +59,12 @@ export function useBuiltinToolsController({ active, config, fastContextToolsStat
       if (current()) { setStatus(next); setNotice(next.message ?? ""); }
     } catch (cause) { if (current()) setError(errorText(cause)); }
     finally {
-      pending.current = false;
-      if (mounted.current) { setBusy(false); setRevision(value => value + 1); }
+      if (operationScope.finish()) { setBusy(false); setRevision(value => value + 1); }
     }
   }
   function refresh() {
-    if (!active || pending.current || isBusy) return;
-    readGeneration.current++;
+    if (!active || scope.pending || isBusy) return;
+    scope.invalidateReads();
     setError("");
     setReadError("");
     setRevision(value => value + 1);

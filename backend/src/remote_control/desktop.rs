@@ -23,6 +23,8 @@ pub(super) struct Desktop {
     pub thread: String,
     pub state: Value,
     revision: Option<Value>,
+    projection: super::projection::Projection,
+    pub urgent: bool,
 }
 
 impl Desktop {
@@ -66,6 +68,8 @@ impl Desktop {
             thread: String::new(),
             state: Value::Null,
             revision: None,
+            projection: Default::default(),
+            urgent: true,
         };
         let result = desktop
             .request(
@@ -211,6 +215,10 @@ impl Desktop {
         self.apply_event(event)
     }
 
+    pub fn state_frame(&mut self) -> String {
+        self.projection.frame(&self.state)
+    }
+
     fn apply_event(&mut self, event: Value) -> Result<bool, String> {
         if event["type"] != "broadcast" {
             return Ok(false);
@@ -251,12 +259,17 @@ impl Desktop {
                     return Err("桌面快照会话不匹配".into());
                 }
                 self.state = change["conversationState"].clone();
+                self.projection.reset();
+                self.urgent = true;
                 self.owner = Some(source.to_string());
             }
             Some("patches") if self.owner.is_some() => {
                 if self.revision.as_ref() != change.get("baseRevision") || self.revision.is_none() {
                     return Err("会话增量已失步，请重新连接获取完整快照".into());
                 }
+                self.urgent = self
+                    .projection
+                    .invalidate(&self.state, &change["patches"])?;
                 protocol::apply_patches(&mut self.state, &change["patches"])?;
                 if self.state["id"] != self.thread {
                     return Err("桌面增量会话不匹配".into());
@@ -589,6 +602,8 @@ mod tests {
             thread: "t".into(),
             state: Value::Null,
             revision: None,
+            projection: Default::default(),
+            urgent: true,
         };
         server.write_all(&u32::MAX.to_le_bytes()).await.unwrap();
         assert!(desktop.next().await.unwrap_err().contains("帧长度"));

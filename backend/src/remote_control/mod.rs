@@ -1,7 +1,9 @@
+mod actions;
 mod auth;
 mod create;
 mod desktop;
 mod images;
+mod projection;
 mod protocol;
 mod server;
 mod store;
@@ -135,7 +137,7 @@ impl RemoteControl {
             state: Arc::downgrade(state),
             public_url: RwLock::new(public_url),
             address,
-            actions: AsyncMutex::new(Default::default()),
+            actions: AsyncMutex::new(actions::Ledger::default()),
             shutdown: tokio::sync::watch::channel(false).0,
             streams: Arc::new(tokio::sync::Semaphore::new(8)),
         });

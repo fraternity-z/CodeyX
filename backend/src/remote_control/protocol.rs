@@ -2,28 +2,32 @@
 //! See third_party/codex-mobile-bridge.LICENSE.
 use serde_json::{Value, json};
 
+pub(super) fn patch_path(patch: &Value) -> Result<Vec<String>, String> {
+    match &patch["path"] {
+        Value::String(path) if path.is_empty() || path.starts_with('/') => Ok(path
+            .split('/')
+            .skip(1)
+            .map(|s| s.replace("~1", "/").replace("~0", "~"))
+            .collect()),
+        Value::Array(path) => path
+            .iter()
+            .map(|part| match part {
+                Value::String(s) => Ok(s.clone()),
+                Value::Number(n) if n.is_u64() => Ok(n.to_string()),
+                _ => Err("桌面增量路径无效".to_string()),
+            })
+            .collect(),
+        _ => Err("桌面增量路径无效".into()),
+    }
+}
+
 pub(super) fn apply_patches(state: &mut Value, patches: &Value) -> Result<(), String> {
     let patches = patches.as_array().ok_or("桌面增量格式无效")?;
     if patches.len() > 10_000 {
         return Err("桌面增量过大".into());
     }
     for patch in patches {
-        let path: Vec<String> = match &patch["path"] {
-            Value::String(path) if path.is_empty() || path.starts_with('/') => path
-                .split('/')
-                .skip(1)
-                .map(|s| s.replace("~1", "/").replace("~0", "~"))
-                .collect(),
-            Value::Array(path) => path
-                .iter()
-                .map(|part| match part {
-                    Value::String(s) => Ok(s.clone()),
-                    Value::Number(n) if n.is_u64() => Ok(n.to_string()),
-                    _ => Err("桌面增量路径无效".to_string()),
-                })
-                .collect::<Result<_, _>>()?,
-            _ => return Err("桌面增量路径无效".into()),
-        };
+        let path = patch_path(patch)?;
         let op = patch["op"].as_str().ok_or("桌面增量操作无效")?;
         if !matches!(op, "add" | "replace" | "remove") {
             return Err("不支持的桌面增量操作".into());
@@ -254,15 +258,33 @@ pub(super) fn async_requests(state: &Value) -> Vec<Value> {
 }
 
 pub(super) fn view(state: &Value) -> Value {
-    let turns = turns(state).into_iter().map(|turn| {
-        let mut messages: Vec<Value> = ordered_items(&turn["items"]).into_iter().map(item_view).collect();
-        if !messages.iter().any(|item| item["role"] == "user") {
-            let opening = item_view(&json!({"type":"userMessage", "content":turn["params"]["input"]}));
-            if opening["text"].as_str().is_some_and(|text| !text.is_empty()) || opening["attachments"].as_array().is_some_and(|images| !images.is_empty()) { messages.insert(0, opening); }
+    let mut result = view_metadata(state);
+    result["turns"] = turns(state).into_iter().map(turn_view).collect();
+    result
+}
+
+pub(super) fn turn_view(turn: &Value) -> Value {
+    let mut messages: Vec<Value> = ordered_items(&turn["items"])
+        .into_iter()
+        .map(item_view)
+        .collect();
+    if !messages.iter().any(|item| item["role"] == "user") {
+        let opening = item_view(&json!({"type":"userMessage", "content":turn["params"]["input"]}));
+        if opening["text"]
+            .as_str()
+            .is_some_and(|text| !text.is_empty())
+            || opening["attachments"]
+                .as_array()
+                .is_some_and(|images| !images.is_empty())
+        {
+            messages.insert(0, opening);
         }
-        json!({"id":turn["turnId"], "status":turn["status"], "messages":messages, "error":turn["error"],
+    }
+    json!({"id":turn["turnId"], "status":turn["status"], "messages":messages, "error":turn["error"],
             "startedAt":turn["turnStartedAtMs"], "completedAt":turn["turnCompletedAtMs"]})
-    }).collect::<Vec<_>>();
+}
+
+pub(super) fn view_metadata(state: &Value) -> Value {
     let mut requests: Vec<Value> = state["requests"].as_array().into_iter().flatten().map(|request| {
         let supported = request_supported(request);
         json!({"id": request["id"], "method": request["method"], "supported":supported,
@@ -274,7 +296,7 @@ pub(super) fn view(state: &Value) -> Value {
         "effort":state["latestThreadSettings"]["effort"].as_str().or(state["latestReasoningEffort"].as_str()),
         "serviceTier":state["latestThreadSettings"]["serviceTier"],
         "permissionMode":permission_mode(&state["latestThreadSettings"]),
-        "status":state["threadRuntimeStatus"]["type"], "turns":turns, "requests":requests,
+        "status":state["threadRuntimeStatus"]["type"], "requests":requests,
         "historyComplete":state["turnHistory"]["history"]["isComplete"].as_bool().or(state["turnsPagination"]["hasLoadedOldest"].as_bool()).unwrap_or(true)})
 }
 

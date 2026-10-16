@@ -15,6 +15,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+mod rollout;
+
 // Rollout JSONL lives under date-sharded folders; archived threads move to the
 // sibling folder but keep the same rollout-<timestamp>-<thread-id>.jsonl name.
 const ROLLOUT_SEARCH_DIRS: [&str; 2] = ["sessions", "archived_sessions"];
@@ -591,10 +593,9 @@ fn resolve_persistent_message_ids(
         let rollout_path =
             find_rollout_path(home, session_id)?.context("找不到页面尾部轮次对应的会话记录")?;
         let canonical_rollout = canonical_rollout_path(home, &rollout_path)?;
-        let original = fs::read_to_string(&canonical_rollout)
-            .with_context(|| format!("读取会话记录失败：{}", canonical_rollout.display()))?;
-        let rollout_tail_ids = stable_rollout_tail_turn_ids(&original, tail_message_ids.len())
-            .context("所选页面尾部轮次尚未稳定写入完整会话记录")?;
+        let rollout_tail_ids =
+            stable_rollout_tail_turn_ids(&canonical_rollout, tail_message_ids.len())?
+                .context("所选页面尾部轮次尚未稳定写入完整会话记录")?;
         for (index, stable_turn_id) in stable_turn_ids.iter_mut().enumerate() {
             match stable_turn_id {
                 Some(existing) if existing != &rollout_tail_ids[index] => {
@@ -806,49 +807,46 @@ fn delete_turns_from_rollout(
     let canonical_rollout = canonical_rollout_path(home, rollout_path)?;
     recover_rollout_write(&canonical_rollout)?;
     let metadata = fs::metadata(&canonical_rollout)?;
-    let original = fs::read_to_string(&canonical_rollout)
-        .with_context(|| format!("读取会话记录失败：{}", canonical_rollout.display()))?;
-    let mut output = String::with_capacity(original.len());
     let mut removing_turn = false;
     let mut selected_turn_seen = false;
     let mut found = HashSet::new();
-    for line in original.split_inclusive('\n') {
-        let json_line = line.trim_end_matches(['\r', '\n']);
-        // 先做子串预筛：边界行必然携带 "turn_context"/"task_started" 字面量，
-        // 不满足的行绝不可能是边界，避免对每行做完整 serde_json::Value 解析。
-        if (json_line.contains("\"turn_context\"") || json_line.contains("\"task_started\""))
-            && let Some(turn_id) = turn_boundary_id(json_line)
-        {
-            removing_turn = selected.contains(&turn_id);
-            if removing_turn {
-                selected_turn_seen = true;
-                found.insert(turn_id);
+    let prepared = rollout::Prepared::new(&canonical_rollout, &metadata, |original, output| {
+        rollout::for_each_line(&canonical_rollout, |line| {
+            original.write_all(line.as_bytes())?;
+            let json_line = line.trim_end_matches(['\r', '\n']);
+            // 先做子串预筛：边界行必然携带 "turn_context"/"task_started" 字面量，
+            // 不满足的行绝不可能是边界，避免对每行做完整 serde_json::Value 解析。
+            if (json_line.contains("\"turn_context\"") || json_line.contains("\"task_started\""))
+                && let Some(turn_id) = turn_boundary_id(json_line)
+            {
+                removing_turn = selected.contains(&turn_id);
+                if removing_turn {
+                    selected_turn_seen = true;
+                    found.insert(turn_id);
+                }
             }
-        }
-        // A later compaction snapshot may contain the deleted turn inside its
-        // encrypted summary.  It cannot be edited safely, so discard the
-        // snapshot and let Codex rebuild history from the remaining rollout.
-        if selected_turn_seen
-            && json_line.contains("\"compacted\"")
-            && is_compacted_summary(json_line)
-        {
-            continue;
-        }
-        if !removing_turn {
-            output.push_str(line);
-        }
-    }
+            // A later compaction snapshot may contain the deleted turn inside its
+            // encrypted summary.  It cannot be edited safely, so discard the
+            // snapshot and let Codex rebuild history from the remaining rollout.
+            if selected_turn_seen
+                && json_line.contains("\"compacted\"")
+                && is_compacted_summary(json_line)
+            {
+                return Ok(());
+            }
+            if !removing_turn {
+                output.write_all(line.as_bytes())?;
+            }
+            Ok(())
+        })
+    })?;
     if found.is_empty() {
         return Ok(found);
     }
 
-    rewrite_if_unchanged(
-        &canonical_rollout,
-        &metadata,
-        original.as_bytes(),
-        output.as_bytes(),
-    )
-    .with_context(|| format!("写回会话记录失败：{}", canonical_rollout.display()))?;
+    prepared
+        .commit(&canonical_rollout, &metadata)
+        .with_context(|| format!("写回会话记录失败：{}", canonical_rollout.display()))?;
     Ok(found)
 }
 
@@ -865,31 +863,35 @@ fn canonical_rollout_path(home: &Path, rollout_path: &Path) -> Result<PathBuf> {
     Ok(canonical_rollout)
 }
 
-fn stable_rollout_tail_turn_ids(rollout: &str, count: usize) -> Option<Vec<String>> {
-    let mut turns = Vec::<(String, bool)>::new();
-    for line in rollout.lines() {
+fn stable_rollout_tail_turn_ids(path: &Path, count: usize) -> Result<Option<Vec<String>>> {
+    let mut turns = std::collections::VecDeque::<(String, bool)>::new();
+    rollout::for_each_line(path, |line| {
         if let Some(turn_id) = turn_boundary_id(line)
-            && turns.last().is_none_or(|(current, _)| current != &turn_id)
+            && turns.back().is_none_or(|(current, _)| current != &turn_id)
         {
-            turns.push((turn_id, false));
+            turns.push_back((turn_id, false));
+            if turns.len() > count {
+                turns.pop_front();
+            }
         }
         if let Some(turn_id) = terminal_turn_id(line)
-            && let Some((current, terminal)) = turns.last_mut()
+            && let Some((current, terminal)) = turns.back_mut()
             && current == &turn_id
         {
             *terminal = true;
         }
-    }
+        Ok(())
+    })?;
     if count > turns.len() {
-        return None;
+        return Ok(None);
     }
-    let tail = &turns[turns.len() - count..];
-    tail.iter().all(|(_, terminal)| *terminal).then(|| {
-        tail.iter()
+    Ok(turns.iter().all(|(_, terminal)| *terminal).then(|| {
+        turns
+            .iter()
             .rev()
             .map(|(turn_id, _)| turn_id.clone())
             .collect()
-    })
+    }))
 }
 
 fn terminal_turn_id(line: &str) -> Option<String> {
@@ -956,81 +958,19 @@ fn same_rollout_metadata(original: &fs::Metadata, current: &fs::Metadata) -> boo
         && original.created().ok() == current.created().ok()
 }
 
+#[cfg(test)]
 fn rewrite_if_unchanged(
     destination: &Path,
     metadata: &fs::Metadata,
     original: &[u8],
     contents: &[u8],
 ) -> Result<()> {
-    let temporary = crate::fs_util::unique_temp_path(destination);
-    let recovery_path = rollout_recovery_path(destination);
-    anyhow::ensure!(
-        !recovery_path.exists(),
-        "会话存在待恢复写入，请先恢复后再删除"
-    );
-    let result = (|| -> Result<()> {
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut output = options.open(&temporary)?;
-        serde_json::to_writer(
-            &mut output,
-            &RolloutRecovery {
-                version: 1,
-                restoring: false,
-                identity: rollout_identity(metadata),
-                original: std::str::from_utf8(original)?,
-                replacement: std::str::from_utf8(contents)?,
-            },
-        )?;
-        output.sync_all()?;
-        drop(output);
-        let mut current = fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(destination)?;
-        current.try_lock_exclusive()?;
-        let mut buffer = [0; 64 * 1024];
-        let mut offset = 0;
-        loop {
-            let count = current.read(&mut buffer)?;
-            if count == 0 {
-                break;
-            }
-            anyhow::ensure!(
-                original.get(offset..offset + count) == Some(&buffer[..count]),
-                "会话记录已变化，请重新加载后再删除"
-            );
-            offset += count;
-        }
-        anyhow::ensure!(
-            offset == original.len()
-                && same_rollout_metadata(metadata, &current.metadata()?)
-                && same_rollout_metadata(metadata, &fs::symlink_metadata(destination)?),
-            "会话记录已变化，请重新加载后再删除"
-        );
-        crate::fs_util::persist_temp_file(&temporary, &recovery_path)?;
-        if let Err(error) = overwrite_rollout(&mut current, contents) {
-            drop(current);
-            return match recover_rollout_write(destination) {
-                Ok(()) => Err(error.into()),
-                Err(recovery_error) => Err(anyhow::anyhow!(
-                    "会话写入失败：{error}；恢复失败：{recovery_error:#}；原始数据保存在 {}",
-                    recovery_path.display()
-                )),
-            };
-        }
-        fs::remove_file(&recovery_path)?;
+    rollout::Prepared::new(destination, metadata, |before, after| {
+        before.write_all(original)?;
+        after.write_all(contents)?;
         Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result
+    })?
+    .commit(destination, metadata)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -1072,13 +1012,28 @@ fn overwrite_rollout(file: &mut fs::File, contents: &[u8]) -> std::io::Result<()
 
 fn recover_rollout_write(destination: &Path) -> Result<()> {
     let recovery_path = rollout_recovery_path(destination);
-    let recovery = match fs::File::open(&recovery_path) {
+    let mut recovery = match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&recovery_path)
+    {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error.into()),
     };
-    let mut recovery: RolloutRecovery<String> =
-        serde_json::from_reader(std::io::BufReader::new(recovery))?;
+    if rollout::recover(destination, recovery.try_clone()?)? {
+        return Ok(());
+    }
+    recovery.seek(SeekFrom::Start(0))?;
+    // Legacy JSON records require decoded strings. Bound that compatibility
+    // path; new records always use the streaming v2 journal.
+    anyhow::ensure!(
+        recovery.metadata()?.len() <= MAX_SESSION_SCAN_BYTES as u64,
+        "旧版会话恢复记录超过 256 MiB 安全读取上限，已保留原文件及恢复记录"
+    );
+    let mut recovery: RolloutRecovery<String> = serde_json::from_reader(std::io::BufReader::new(
+        recovery.take(MAX_SESSION_SCAN_BYTES as u64 + 1),
+    ))?;
     anyhow::ensure!(recovery.version == 1, "会话恢复记录版本无效");
     let mut file = fs::OpenOptions::new()
         .read(true)
@@ -1089,31 +1044,48 @@ fn recover_rollout_write(destination: &Path) -> Result<()> {
         rollout_identity(&file.metadata()?) == recovery.identity,
         "会话文件身份已变化，保留恢复记录以供检查"
     );
-    let mut current = Vec::new();
-    (&mut file)
-        .take(recovery.original.len().max(recovery.replacement.len()) as u64 + 1)
-        .read_to_end(&mut current)?;
+    let length = file.metadata()?.len();
     if recovery.restoring {
-        if !current.starts_with(recovery.original.as_bytes()) {
-            anyhow::ensure!(
-                recovery.original.as_bytes().starts_with(&current),
-                "会话恢复期间内容已变化，保留恢复记录以供检查"
-            );
+        anyhow::ensure!(
+            rollout_matches_prefix(&mut file, recovery.original.as_bytes())?,
+            "会话恢复期间内容已变化，保留恢复记录以供检查"
+        );
+        if length < recovery.original.len() as u64 {
             overwrite_rollout(&mut file, recovery.original.as_bytes())?;
         }
-    } else if current != recovery.original.as_bytes()
-        && !current.starts_with(recovery.replacement.as_bytes())
+    } else if !(length == recovery.original.len() as u64
+        && rollout_matches_prefix(&mut file, recovery.original.as_bytes())?)
     {
         anyhow::ensure!(
-            recovery.replacement.as_bytes().starts_with(&current),
+            rollout_matches_prefix(&mut file, recovery.replacement.as_bytes())?,
             "会话内容已变化，保留恢复记录以供检查"
         );
-        recovery.restoring = true;
-        crate::fs_util::atomic_write_private(&recovery_path, &serde_json::to_vec(&recovery)?)?;
-        overwrite_rollout(&mut file, recovery.original.as_bytes())?;
+        if length < recovery.replacement.len() as u64 {
+            recovery.restoring = true;
+            let mut temporary = tempfile::NamedTempFile::new_in(
+                recovery_path.parent().context("恢复记录缺少目录")?,
+            )?;
+            serde_json::to_writer(&mut temporary, &recovery)?;
+            temporary.as_file().sync_all()?;
+            temporary.persist(&recovery_path).map_err(|e| e.error)?;
+            overwrite_rollout(&mut file, recovery.original.as_bytes())?;
+        }
     }
     fs::remove_file(recovery_path)?;
     Ok(())
+}
+
+fn rollout_matches_prefix(file: &mut fs::File, contents: &[u8]) -> Result<bool> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut buffer = [0; 64 * 1024];
+    let length = file.metadata()?.len().min(contents.len() as u64) as usize;
+    for chunk in contents[..length].chunks(buffer.len()) {
+        file.read_exact(&mut buffer[..chunk.len()])?;
+        if &buffer[..chunk.len()] != chunk {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn table_columns(path: &Path, table: &str) -> Result<std::collections::HashSet<String>> {
