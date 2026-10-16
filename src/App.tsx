@@ -35,7 +35,7 @@ import { SettingsLayout } from "./SettingsLayout";
 import { RemoteControlPanel } from "./features/remote-control";
 import { useModelSelection } from "./useModelSelection";
 import { useRuntimeStatus } from "./useRuntimeStatus";
-import { useAppUpdates } from "./useAppUpdates";
+import { useAppUpdatesController } from "./features/app-updates";
 import {
   NoticeLoadingText,
   NoticeToast,
@@ -253,9 +253,13 @@ export function App({
     updateCheck,
     downloadedUpdate,
     checkForUpdates,
-  } = useAppUpdates({
+    changeUpdatePolicy,
+  } = useAppUpdatesController({
+    active: !embedded || modalVisible,
     embedded,
     configLoaded,
+    config,
+    onConfigChange: editConfig,
     codeyUpdatePolicy: persistedConfigRef.current?.codeyUpdatePolicy ?? "stable",
     isBusy,
     setBusy,
@@ -331,24 +335,6 @@ export function App({
       setLoadFailed(true);
       setNotice({ tone: "error", text: errorText(error) });
     }
-  }
-
-  function changeUpdatePolicy(policy: Config["codeyUpdatePolicy"]) {
-    if (!config || isBusy) return;
-    if (policy !== "experimental" || config.codeyUpdatePolicy === "experimental") {
-      editConfig({ ...config, codeyUpdatePolicy: policy });
-      return;
-    }
-    setConfirmation({
-      action: "enable-experimental-updates",
-      title: "切换到实验版更新？",
-      description: "实验版尚未经过充分验证，可能出现功能异常、启动失败或数据兼容问题。请先备份重要数据，避免在关键工作环境使用。确认并保存设置后生效；取消会保留原设置。",
-      confirmLabel: "了解风险，使用实验版",
-      run: () => {
-        setConfig((current) => current ? { ...current, codeyUpdatePolicy: policy } : current);
-        setDirty(true);
-      },
-    });
   }
 
   async function persist(next: Config) {

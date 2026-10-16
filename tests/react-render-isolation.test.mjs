@@ -10,6 +10,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   const [
     app,
     appUpdates,
+    updateRequests,
     notice,
     confirmation,
     sections,
@@ -18,7 +19,8 @@ test("settings panels declare render-isolation hooks and stable handlers", async
     routes,
   ] = await Promise.all([
     readFile(new URL("src/App.tsx", root), "utf8"),
-    readFile(new URL("src/useAppUpdates.ts", root), "utf8"),
+    readFile(new URL("src/features/app-updates/useAppUpdatesController.ts", root), "utf8"),
+    readFile(new URL("src/features/app-updates/requests.ts", root), "utf8"),
     readFile(new URL("src/useAppNotice.tsx", root), "utf8"),
     readFile(new URL("src/useConfirmationDialog.tsx", root), "utf8"),
     Promise.all(
@@ -41,9 +43,9 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.match(confirmation, /export const ConfirmationDialogHost = memo\(/);
   assert.doesNotMatch(app, /async function checkForUpdates\(/);
   assert.match(appUpdates, /export function useAppUpdates/);
-  assert.match(appUpdates, /invoke<UpdateCheck>\("check_for_updates",\s*\{\s*forceRefresh/);
+  assert.match(updateRequests, /invoke<UpdateCheck>\("check_for_updates",\s*\{\s*forceRefresh/);
   assert.equal(
-    appUpdates.match(/invoke<UpdateCheck>\("check_for_updates",/g)?.length,
+    updateRequests.match(/invoke<UpdateCheck>\("check_for_updates",/g)?.length,
     1,
   );
   assert.match(
@@ -56,8 +58,9 @@ test("settings panels declare render-isolation hooks and stable handlers", async
     app,
     /const handleFooterUpdateClick = useStableEvent\(\(\) => void checkForUpdates\(\)\)/,
   );
-  assert.match(appUpdates, /invoke<UpdateDownload>\(\s*"download_update",/);
-  assert.match(appUpdates, /invoke\("install_downloaded_update"/);
+  assert.match(updateRequests, /invoke<UpdateDownload>\(\s*"download_update",/);
+  assert.match(updateRequests, /invoke<void>\("install_downloaded_update"/);
+  assert.doesNotMatch(appUpdates, /\binvoke\b/);
   assert.match(app, /onRepairPluginMarketplace=\{handleRepairPluginMarketplace\}/);
   assert.match(app, /onAnalyzeDiagnosticStorage=\{handleAnalyzeDiagnosticStorage\}/);
   assert.match(app, /onToggleDraftModel=\{toggleDraftModel\}/);

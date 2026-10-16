@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { readSource } from "./helpers/read-source.mjs";
+import { createControllerHarness, installControllerWindow } from "./helpers/controller-harness.mjs";
 import {
   autoStubModule,
   collectElements,
@@ -176,26 +177,31 @@ test("App 把系统设置对话框接到修复命令与自动更新保存入口"
   assert.match(appSource, /<SystemSettingsDialog[\s\S]*open=\{systemSettingsOpen\}/);
 });
 
-test("实验版必须先确认，取消不改设置，切回稳定版无需确认", async () => {
-  const { default: ts } = await import("typescript");
-  const handler = appSource.slice(appSource.indexOf("  function changeUpdatePolicy("), appSource.indexOf("  async function persist("));
-  let config = { codeyUpdatePolicy: "stable" };
+test("实验版必须先确认，取消不改设置，切回稳定版无需确认", async t => {
+  installControllerWindow(t);
   let confirmation = null;
-  const factory = new Function("config", "isBusy", "editConfig", "setConfirmation", "setConfig", "setDirty", ts.transpile(handler) + "\nreturn changeUpdatePolicy;");
-  const change = factory(config, false, value => { config = value; }, value => { confirmation = value; }, update => { config = update(config); }, () => {});
+  const options = { active: true, embedded: true, configLoaded: true, codeyUpdatePolicy: "stable", isBusy: false,
+    config: { codeyUpdatePolicy: "stable" }, onConfigChange: value => { options.config = value; },
+    setBusy() {}, setNotice() {}, setConfirmation: value => { confirmation = value; }, beforeInstall: async () => {} };
+  const h = createControllerHarness(new URL("../src/features/app-updates/useAppUpdatesController.ts", import.meta.url), "useAppUpdatesController", {
+    "../../api": { invoke: async () => null },
+  });
+  const change = h.render(options).changeUpdatePolicy;
   change("experimental");
-  assert.equal(config.codeyUpdatePolicy, "stable");
+  assert.equal(options.config.codeyUpdatePolicy, "stable");
   assert.match(confirmation.description, /尚未经过充分验证/);
   assert.match(confirmation.description, /备份/);
   confirmation = null;
-  assert.equal(config.codeyUpdatePolicy, "stable");
+  assert.equal(options.config.codeyUpdatePolicy, "stable");
   change("experimental");
   confirmation.run();
-  assert.equal(config.codeyUpdatePolicy, "experimental");
+  assert.equal(options.config.codeyUpdatePolicy, "experimental");
+  h.render(options);
   confirmation = null;
   change("stable");
-  assert.equal(config.codeyUpdatePolicy, "stable");
+  assert.equal(options.config.codeyUpdatePolicy, "stable");
   assert.equal(confirmation, null);
+  h.unmount();
 });
 
 test("styles define sidebar footer layout and responsive behavior", () => {

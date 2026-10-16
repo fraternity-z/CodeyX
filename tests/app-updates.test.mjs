@@ -3,7 +3,10 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import ts from "typescript";
 
-const source = await readFile(new URL("../src/useAppUpdates.ts", import.meta.url), "utf8");
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
+
+const source = await readFile(new URL("../src/features/app-updates/useAppUpdatesController.ts", import.meta.url), "utf8");
+const state = createModuleGraph(new URL("../src/features/app-updates/state.ts", import.meta.url)).exports;
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
 }).outputText;
@@ -46,21 +49,26 @@ function harness(enabled, installReport = null, initialOptions = {}) {
   const exports = {};
   new Function("require", "exports", "window", compiled)(name => {
     if (name === "react") return react;
-    if (name === "./api") {
-      return {
+    if (name === "./requests") {
+      return createModuleGraph(new URL("../src/features/app-updates/requests.ts", import.meta.url), { stubs: { "../../api": {
         invoke: (command, args) => command === "update_install_report"
           // 安装结果查询不占用更新检查的请求队列，测试里直接返回预置结果。
           ? Promise.resolve(installReport)
           : new Promise((resolve, reject) => requests.push({ command, args, resolve, reject })),
-      };
+      } } }).exports;
     }
-    if (name === "./appUtils") return { withTimeout: promise => promise, errorText: String };
-    if (name === "./formatters") return { formatBytes: String };
+    if (name === "./state") return state;
+    if (name === "../../useStableEvent") return { useStableEvent(callback) {
+      const ref = react.useRef(callback); ref.current = callback;
+      return react.useCallback((...args) => ref.current(...args));
+    } };
+    if (name === "../../appUtils") return { withTimeout: promise => promise, errorText: String };
+    if (name === "../../formatters") return { formatBytes: String };
     throw new Error(`Unexpected import ${name}`);
   }, exports, window);
   const render = () => {
     cursor = 0;
-    result = exports.useAppUpdates(options);
+    result = exports.useAppUpdatesController(options);
     effects.splice(0).forEach(effect => effect());
     return result;
   };

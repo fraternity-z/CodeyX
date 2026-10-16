@@ -7,7 +7,7 @@ const appSource = readFileSync(
   "utf8",
 );
 const updateSource = readFileSync(
-  new URL("../src/useAppUpdates.ts", import.meta.url),
+  new URL("../src/features/app-updates/useAppUpdatesController.ts", import.meta.url),
   "utf8",
 );
 const dialogSource = readFileSync(
@@ -24,5 +24,5 @@ test("notification dialog waits for the channel configuration to persist", () =>
 
 test("installing an update saves pending settings first", () => {
   assert.match(appSource, /beforeInstall: async \(\) => \{[\s\S]*?await persist\(config\)/);
-  assert.match(updateSource, /await beforeInstall\(\);[\s\S]*?install_downloaded_update/);
+  assert.match(updateSource, /await beforeInstall\(\);[\s\S]*?await appUpdateRequests\.install\(/);
 });

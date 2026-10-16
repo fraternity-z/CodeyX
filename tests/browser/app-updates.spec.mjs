@@ -1,0 +1,102 @@
+import { expect, test as base } from "@playwright/test";
+
+const test = base.extend({
+  page: async ({ page }, use) => {
+    const errors = [];
+    page.on("pageerror", error => errors.push(error.message));
+    await use(page);
+    expect(errors, "更新流程不应出现未捕获异常").toEqual([]);
+  },
+});
+
+async function openSettings(page) {
+  await page.goto("/codey/tests/ui-browser.html?platform=windows");
+  await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeVisible({ timeout: 60_000 });
+  await page.evaluate(() => {
+    const bridge = window.__codexSessionDeleteBridge;
+    const asset = { platform: "windows", arch: "x64", packageType: "exe", fileName: "setup.exe", size: 1024,
+      url: "https://example.test/setup.exe", sha256: "a".repeat(64) };
+    const update = { currentVersion: "1.0.0", latestVersion: "1.0.1", updateAvailable: true, releaseId: "42", selectedAsset: asset,
+      releaseNotes: "## 更新测试\n\n完整的发布公告。" };
+    const state = window.updateBehavior = { calls: [], update, deferDownload: false };
+    window.__codexSessionDeleteBridge = async (path, args) => {
+      const command = path.split("/").at(-1);
+      if (["check_for_updates", "download_update", "install_downloaded_update", "save_codey_config"].includes(command)) state.calls.push({ command, args });
+      if (command === "check_for_updates") return update;
+      if (command === "download_update") {
+        if (state.deferDownload) await new Promise(resolve => { state.finishDownload = resolve; });
+        return { latestVersion: update.latestVersion, releaseId: update.releaseId, asset, ...asset, filePath: "/updates/setup.exe" };
+      }
+      if (command === "install_downloaded_update") return {};
+      return bridge(path, args);
+    };
+  });
+}
+
+test("手动检查、下载与安装分别确认，下载锁定操作，安装前保存最新草稿", async ({ page }) => {
+  await openSettings(page);
+  await page.getByRole("button", { name: "检查 CodeyX 在线更新", exact: true }).click();
+  const download = page.getByRole("dialog", { name: "发现 CodeyX 新版本 v1.0.1", exact: true });
+  await expect(download).toBeVisible();
+  await expect(download.getByText("完整的发布公告。", { exact: true })).toBeVisible();
+  expect(await page.evaluate(() => window.updateBehavior.calls.map(call => call.command))).toEqual(["check_for_updates"]);
+  await page.evaluate(() => { window.updateBehavior.deferDownload = true; });
+  await download.getByRole("button", { name: "立即更新", exact: true }).click();
+  await expect(page.getByRole("button", { name: "关闭配置", exact: true })).toBeDisabled();
+  await expect.poll(() => page.evaluate(() => typeof window.updateBehavior.finishDownload)).toBe("function");
+  await page.evaluate(() => window.updateBehavior.finishDownload());
+  const install = page.getByRole("dialog", { name: "安装更新", exact: true });
+  await expect(install).toBeVisible();
+  await install.getByRole("button", { name: "稍后", exact: true }).click();
+
+  await page.getByRole("button", { name: "系统设置与偏好", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "系统设置与偏好", exact: true });
+  await settings.getByRole("tab", { name: "不检查", exact: true }).click();
+  await settings.press("Escape");
+  await expect(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
+  await page.getByRole("button", { name: "新版本 v1.0.1 已下载，点击检查更新并安装", exact: true }).click();
+  await expect(install).toBeVisible();
+  await install.getByRole("button", { name: "安装并重启", exact: true }).click();
+  await expect.poll(() => page.evaluate(() => window.updateBehavior.calls.map(call => call.command))).toEqual([
+    "check_for_updates", "download_update", "check_for_updates", "save_codey_config", "install_downloaded_update",
+  ]);
+  expect(await page.evaluate(() => window.updateBehavior.calls.find(call => call.command === "save_codey_config").args.config.codeyUpdatePolicy)).toBe("off");
+});
+
+test("隐藏配置时后台公告保持待处理，重新打开后只展示一次", async ({ page }) => {
+  await openSettings(page);
+  await page.getByRole("button", { name: "关闭配置", exact: true }).click();
+  await expect(page.getByRole("button", { name: "打开内嵌设置", exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    window.__codeyPendingUpdatePrompt = window.updateBehavior.update;
+    window.dispatchEvent(new Event("codey-update-prompt"));
+  });
+  const download = page.getByRole("dialog", { name: "发现 CodeyX 新版本 v1.0.1", exact: true });
+  await expect(download).not.toBeVisible();
+  expect(await page.evaluate(() => window.__codeyPendingUpdatePrompt.latestVersion)).toBe("1.0.1");
+  await page.getByRole("button", { name: "打开内嵌设置", exact: true }).click();
+  await expect(download).toBeVisible();
+  expect(await page.evaluate(() => window.__codeyPendingUpdatePrompt)).toBeNull();
+  await download.getByRole("button", { name: "稍后", exact: true }).click();
+  await page.getByRole("button", { name: "关闭配置", exact: true }).click();
+  await page.getByRole("button", { name: "打开内嵌设置", exact: true }).click();
+  await expect(download).not.toBeVisible();
+  expect(await page.evaluate(() => window.updateBehavior.calls)).toEqual([]);
+});
+
+test("实验版切换保留风险确认，取消不改草稿，确认后仍需保存", async ({ page }) => {
+  await openSettings(page);
+  await page.getByRole("button", { name: "系统设置与偏好", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "系统设置与偏好", exact: true });
+  await settings.getByRole("tab", { name: "实验版", exact: true }).click();
+  const confirmation = page.getByRole("dialog", { name: "切换到实验版更新？", exact: true });
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole("button", { name: "取消", exact: true }).click();
+  await expect(settings.getByRole("tab", { name: "稳定版", exact: true })).toHaveAttribute("aria-selected", "true");
+  await settings.getByRole("tab", { name: "实验版", exact: true }).click();
+  await confirmation.getByRole("button", { name: "了解风险，使用实验版", exact: true }).click();
+  await expect(settings.getByRole("tab", { name: "实验版", exact: true })).toHaveAttribute("aria-selected", "true");
+  await settings.press("Escape");
+  await expect(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
+  expect(await page.evaluate(() => window.updateBehavior.calls)).toEqual([]);
+});
