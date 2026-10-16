@@ -1,9 +1,6 @@
 #![cfg_attr(not(any(windows, target_os = "macos")), allow(dead_code))]
 
-use anyhow::Result;
-
-#[cfg(any(windows, target_os = "macos", test))]
-use anyhow::Context;
+use anyhow::{Context, Result};
 
 #[cfg(any(windows, target_os = "macos", test))]
 use std::ffi::{OsStr, OsString};
