@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
-const { createSkillCacheRequests, getSkillCacheRequests } = await loadTypeScriptModule(new URL("../src/features/codex-extensions/requests.ts", import.meta.url));
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
+const { createSkillCacheRequests, getSkillCacheRequests } = createModuleGraph(new URL("../src/features/codex-extensions/requests.ts", import.meta.url), {
+  stubs: { "../../api": { invoke: () => { throw new Error("测试不应调用实际后端"); } } },
+}).exports;
 const { createCodexExtensionsPreview } = await loadTypeScriptModule(new URL("../src/dev/codexExtensionsMock.ts", import.meta.url));
 const { selectResources, batchTargets } = await loadTypeScriptModule(new URL("../src/features/codex-extensions/state.ts", import.meta.url));
 

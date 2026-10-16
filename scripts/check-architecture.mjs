@@ -3,10 +3,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 
-// 既有扩展模块保留自己的分层测试；新功能目录自动纳入本检查。
-const legacyFeatures = new Set(["codex-extensions"]);
 const legacyAppCommands = new Set([
-  "codex_extensions", "load_codey_config", "save_codey_config",
+  "load_codey_config", "save_codey_config",
 ]);
 const featureOf = (file) => /^src\/features\/([^/]+)\//.exec(file)?.[1];
 const layerOf = (file) => {
@@ -27,7 +25,7 @@ export function checkArchitecture(sources) {
   };
   for (const [file, source] of Object.entries(sources)) {
     const feature = featureOf(file);
-    const governed = feature && !legacyFeatures.has(feature);
+    const governed = !!feature;
     const tree = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true);
     const layer = layerOf(file);
     const dependencies = [];
@@ -38,7 +36,7 @@ export function checkArchitecture(sources) {
       const resolved = [target, `${target}.ts`, `${target}.tsx`, `${target}/index.ts`].find((candidate) => candidate in sources);
       if (resolved) dependencies.push(resolved);
       const targetFeature = featureOf(`${target}/`);
-      if (targetFeature && targetFeature !== feature && !legacyFeatures.has(targetFeature)
+      if (targetFeature && targetFeature !== feature
         && !/^src\/features\/[^/]+(?:\/index(?:\.ts)?)?$/.test(target)) {
         report(file, node, tree, "跨功能只能使用公开入口，不能导入内部文件");
       }
@@ -79,12 +77,12 @@ export function checkArchitecture(sources) {
     };
     visit(tree);
   }
-  // 只对本次规范范围内的运行时依赖查环，历史模块不被迫一并迁移。
+  // 功能目录的运行时依赖统一查环；根目录历史模块按职责逐步迁移。
   const checked = new Set();
   const stack = new Set();
   const visitDependency = (file) => {
     if (stack.has(file)) { errors.push(`${file}: 运行时循环依赖`); return; }
-    if (checked.has(file) || !featureOf(file) || legacyFeatures.has(featureOf(file))) return;
+    if (checked.has(file) || !featureOf(file)) return;
     checked.add(file);
     stack.add(file);
     for (const next of edges.get(file) ?? []) visitDependency(next);

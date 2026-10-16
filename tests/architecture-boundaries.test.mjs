@@ -30,7 +30,7 @@ test("新增功能自动纳入检查，别名导入和动态导入不能绕开�
 test("跨功能内部依赖、运行时环和 App 新业务命令会被阻止", () => {
   assert.match(checkArchitecture({ "src/App.tsx": 'import { foo } from "./features/demo/state"; invoke("delete_route");' }).join(), /公开入口/);
   assert.match(checkArchitecture({ "src/App.tsx": 'invoke("delete_route");' }).join(), /不得新增业务命令/);
-  for (const command of ["plugin_marketplace_status", "restart_codey", "repair_plugin_marketplace", "prepare_computer_use", "repair_main_process_injection", "repair_codex_config", "clear_diagnostic_storage"]) {
+  for (const command of ["codex_extensions", "plugin_marketplace_status", "restart_codey", "repair_plugin_marketplace", "prepare_computer_use", "repair_main_process_injection", "repair_codex_config", "clear_diagnostic_storage"]) {
     assert.match(checkArchitecture({ "src/App.tsx": `invoke("${command}");` }).join(), /不得新增业务命令/);
   }
   assert.deepEqual(checkArchitecture({ "src/App.tsx": 'import { foo } from "./features/demo"; invoke("load_codey_config");' }), []);
@@ -38,4 +38,10 @@ test("跨功能内部依赖、运行时环和 App 新业务命令会被阻止", 
     "src/features/demo/a.ts": 'import { b } from "./b";',
     "src/features/demo/b.ts": 'import { a } from "./a";',
   }).join(), /循环依赖/);
+});
+
+test("扩展管理不再豁免视图请求、纯逻辑副作用和内部依赖检查", () => {
+  assert.match(checkArchitecture({ "src/features/codex-extensions/SkillCacheDialog.tsx": 'import { getSkillCacheRequests } from "./requests";' }).join(), /视图不能依赖请求层/);
+  assert.match(checkArchitecture({ "src/features/codex-extensions/state.ts": 'document.createElement("a");' }).join(), /副作用/);
+  assert.match(checkArchitecture({ "src/App.tsx": 'import { readInventory } from "./features/codex-extensions/requests";' }).join(), /公开入口/);
 });

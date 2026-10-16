@@ -68,8 +68,9 @@ function createHarness() {
       "./requests": {
         readInventory: (_request, scope, force) =>
           new Promise((resolve, reject) => reads.push({ force, reject, resolve, scope })),
-        invalidateInventory: () => {},
-        withTimeout: (promise) => promise,
+        executeExtensionAction: (request, scope, revision, action) => request({ scope, revision, ...action }),
+        isExtensionMutation: action => !["get_mcp", "read_skill", "export_skill", "pick_project", "pick_skill", "test_mcp", "validate_skill"].includes(action),
+        waitForExtensionMutation: () => undefined,
       },
       "./state": {
         causeText: (cause) =>
@@ -112,7 +113,7 @@ test("提交不会作废在飞的清单刷新，加载态由刷新生命周期�
   assert.match(settled.notice, /已保存/);
 });
 
-test("提交被抢占返回 superseded，并提示刷新确认", async () => {
+test("提交被抢占返回 superseded，不把旧操作提示写入新范围", async () => {
   const h = createHarness();
   let controller = h.render();
   h.reads[0].resolve({ revision: "r1" });
@@ -130,7 +131,7 @@ test("提交被抢占返回 superseded，并提示刷新确认", async () => {
   assert.equal(await saving, "superseded", "落库但被抢占必须与失败区分开");
   controller = h.render();
   assert.deepEqual(controller.inventory, { revision: "r2" });
-  assert.match(controller.notice, /操作已提交，请刷新确认/);
+  assert.equal(controller.notice, "");
 });
 
 test("提交失败返回 failed 并保留错误，单飞与不确定状态仍然拦截 mutation", async () => {
@@ -278,4 +279,39 @@ test("迟到的旧刷新不能解除写入不确定状态或覆盖最新清单",
   assert.equal(h.render().uncertain, false);
   assert.equal(h.render().error, "");
   assert.equal(h.writes.length, 1, "刷新只能读取，不得偷偷重试超时写入");
+});
+
+test("保存成功作废先前的列表读取，旧成功和错误均不能覆盖新清单", async () => {
+  for (const fail of [false, true]) {
+    const h = createHarness();
+    h.render();
+    h.reads[0].resolve({ revision: "r1" });
+    await settle();
+    const oldRefresh = h.render().refresh();
+    const saving = h.render().mutate({ action: "save_mcp" });
+    h.writes[0].resolve({ inventory: { revision: "r2" }, message: "已保存" });
+    assert.equal(await saving, "ok");
+    if (fail) h.reads[1].reject(new Error("旧错误"));
+    else h.reads[1].resolve({ revision: "old" });
+    assert.equal(await oldRefresh, null);
+    assert.equal(h.render().inventory.revision, "r2");
+    assert.equal(h.render().error, "");
+    assert.equal(h.render().loading, false);
+  }
+});
+
+test("写入前开始的刷新不能解除后续超时的不确定状态", async () => {
+  const h = createHarness();
+  h.render();
+  h.reads[0].resolve({ revision: "r1" });
+  await settle();
+  const oldRefresh = h.render().refresh();
+  const saving = h.render().mutate({ action: "save_mcp" });
+  h.writes[0].reject(new Error("操作结果尚不确定"));
+  await saving;
+  h.reads[1].resolve({ revision: "r1" });
+  assert.equal(await oldRefresh, null);
+  assert.equal(h.render().uncertain, true);
+  assert.equal(await h.render().mutate({ action: "save_mcp" }), "failed");
+  assert.equal(h.writes.length, 1);
 });

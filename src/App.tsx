@@ -22,7 +22,7 @@ import { UsageAnalysisPanel } from "./features/usage-analysis";
 import { OperationsPanel } from "./OperationsPanel";
 import { CodeyPluginsSection } from "./features/codey-plugins";
 import { BuiltinToolsPage } from "./features/builtin-tools";
-import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
+import { CodexExtensionsPage } from "./features/codex-extensions";
 import { DiagnosticCleanupToast, useRuntimeMaintenanceController } from "./features/runtime-maintenance";
 import {
   getNotificationChannelDefinition,
@@ -60,7 +60,6 @@ import type {
 import { Badge, Button, Tooltip } from "./components/ui";
 
 const Check = IconCheck;
-const extensionRequest: ExtensionTransport = request => invoke("codex_extensions", { request });
 const X = IconX;
 const UNKNOWN_FAST_CONTEXT_TOOLS_STATUS: FastContextToolsStatus = {
   userConfigured: false,
@@ -986,10 +985,10 @@ export function App({
           ),
           plugins: (active) => <CodeyPluginsSection active={active && (!embedded || modalVisible)} container={popupContainer} />,
           mcp: (active) => (
-            <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />
+            <CodexExtensionsPage kind="mcp" active={active && (!embedded || modalVisible)} container={popupContainer} />
           ),
           skills: (active) => (
-            <CodexExtensionsPage kind="skill" active={active} request={extensionRequest} container={popupContainer} />
+            <CodexExtensionsPage kind="skill" active={active && (!embedded || modalVisible)} container={popupContainer} />
           ),
         }}
       />

@@ -1,4 +1,44 @@
+import { invoke } from "../../api";
 import type { ExtensionTransport, Inventory, Scope, SkillCacheInventory } from "./types";
+
+export const extensionRequest: ExtensionTransport = request => invoke("codex_extensions", { request });
+const pendingMutations = new WeakMap<ExtensionTransport, Promise<unknown>>();
+
+export function waitForExtensionMutation(request: ExtensionTransport) {
+  const pending = pendingMutations.get(request);
+  return pending ? withTimeout(pending.catch(() => undefined)) : undefined;
+}
+
+export function isExtensionMutation(action: string) {
+  return !["get_mcp", "read_skill", "export_skill", "pick_project", "pick_skill", "test_mcp", "validate_skill"].includes(action);
+}
+
+export function executeExtensionAction<T>(
+  request: ExtensionTransport,
+  scope: Scope,
+  revision: string | undefined,
+  action: Record<string, unknown>,
+): Promise<T> {
+  const name = String(action.action);
+  const mutation = isExtensionMutation(name);
+  if (mutation && pendingMutations.has(request)) {
+    return Promise.reject(new Error("上次操作仍在执行，请刷新确认后再提交修改。"));
+  }
+  const timeout = name === "test_mcp" ? 35000
+    : ["save_mcp", "set_mcp_enabled", "set_mcps_enabled", "remove_mcp"].includes(name) ? 45000
+      : name.startsWith("pick_") ? 120000 : mutation ? 30000 : 15000;
+  const operation = request<T>({ scope, revision, ...action });
+  if (mutation) {
+    invalidateInventory(request);
+    pendingMutations.set(request, operation);
+    const release = () => {
+      if (pendingMutations.get(request) === operation) pendingMutations.delete(request);
+      invalidateInventory(request);
+    };
+    void operation.then(release, release);
+  }
+  return withTimeout(operation, mutation, timeout);
+}
 
 // 缓存删除独立于普通库存；关闭窗口也不能绕过未完成写入的检查。
 const skillCacheRequests = new WeakMap<ExtensionTransport, ReturnType<typeof createSkillCacheRequests>>();
@@ -16,6 +56,7 @@ export function createSkillCacheRequests(request: ExtensionTransport, timeout = 
   let generation = 0;
   return {
     get blocked() { return blocked; },
+    waitForPending: () => pending ? withTimeout(pending.catch(() => undefined), false, timeout) : undefined,
     async list() {
       const current = ++generation;
       blocked = true;
@@ -102,7 +143,12 @@ export function readInventory(
     pending?: Promise<Inventory>;
   } = { expires: 0 };
   record.pending = withTimeout(
-    request<Inventory>({ action: "list", scope }),
+    (async () => {
+      // 前端超时不会取消写入；刷新必须等待实际操作结束，才能确认当前版本。
+      const pending = pendingMutations.get(request);
+      if (pending) await pending.catch(() => undefined);
+      return request<Inventory>({ action: "list", scope });
+    })(),
   ).then(
     (value) => {
       if (cache.get(key) === record) {
