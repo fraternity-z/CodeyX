@@ -443,7 +443,7 @@ test("build chunks use one native source read and retain CommonJS loading semant
 });
 
 for (const provider of ["codey_router", "codey_router_remote"]) {
-test(`router mode degrades consistently before and after a verified wrapper spawn (${provider})`, async () => {
+test(`router mode verifies the primary relay before and after wrapper spawn (${provider})`, async () => {
   const configs = [`model_provider="${provider}"`];
   for (const waitBeforeSpawn of [true, false]) {
     const warnings = [];
@@ -461,17 +461,16 @@ test(`router mode degrades consistently before and after a verified wrapper spaw
       assert.deepEqual(Array.from(runtime.spawnCalls[0][1]), [
         "app-server", "-c", "analytics.enabled=false", "-c", configs[0],
       ]);
-      assert.equal(await (pending ?? wait()), "codey-app-server-runtime-overrides-degraded");
-      assert.equal(await wait(), "codey-app-server-runtime-overrides-degraded");
-      assert.equal(warnings.length, 1, "repeat validation should not duplicate warnings");
-      assert.match(warnings[0], /运行时配置已验证.*stdin relay/);
-      assert.doesNotMatch(warnings[0], /已停止启动|不兼容|缺失/);
+      assert.equal(await (pending ?? wait()), "codey-app-server-runtime-overrides-verified");
+      assert.equal(await wait(), "codey-app-server-runtime-overrides-verified");
+      assert.equal(runtime.context.__CODEY_CODEX_STARTUP_PATCH__.appServerRuntimeOverrides.transport, "stdin-relay");
+      assert.deepEqual(warnings, [], "the primary transport is not a degradation");
     } finally { runtime.restore(); }
   }
 });
 }
 
-test("router mode redirects native CLI launches through the prepared relay after transport drift", async () => {
+test("router mode redirects native CLI launches through the prepared relay", async () => {
   const configs = ['model_provider="codey_router"'];
   for (const command of [relayTarget, "codex", relaySource, relayWrapper]) {
     const runtime = await loadPatchInIsolatedContext(configs, relayContext(configs, {
@@ -486,7 +485,7 @@ test("router mode redirects native CLI launches through the prepared relay after
       assert.equal(status.command, relayWrapper);
       assert.equal(status.stdinRelayAvailable, true);
       assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
-        "codey-app-server-runtime-overrides-degraded");
+        "codey-app-server-runtime-overrides-verified");
     } finally { runtime.restore(); }
   }
 });
@@ -527,7 +526,7 @@ test("relay restores only its execution context into a filtered child environmen
     assert.equal(forwardedOptions.env.CODEX_APP_SERVER_FORCE_CLI, undefined);
     assert.deepEqual(runtime.context.process.env, parentBefore);
     assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
-      "codey-app-server-runtime-overrides-degraded");
+      "codey-app-server-runtime-overrides-verified");
   } finally { runtime.restore(); }
 });
 
@@ -576,7 +575,7 @@ test("relay requires every effective native override in the parent configuration
       if (parentConfigs.at(-1) === configs[2]) {
         process.getBuiltinModule("child_process").spawn(relayTarget, ["app-server"], { env: {} });
         assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
-          "codey-app-server-runtime-overrides-degraded");
+          "codey-app-server-runtime-overrides-verified");
       } else {
         assert.throws(() => process.getBuiltinModule("child_process").spawn(relayTarget, ["app-server"]), /未确认使用 Codey/);
         assert.equal(runtime.spawnCalls.length, 0);
@@ -595,7 +594,7 @@ test("relay refuses a target pointing at the Codey executable behind the macOS w
   } finally { runtime.restore(); }
 });
 
-test("relay fallback preserves successful source patches and unrelated spawns", async () => {
+test("relay takes priority over source patches and preserves unrelated spawns", async () => {
   const configs = ['model_provider="codey_router"'];
   for (const patched of [false, true]) {
     const runtime = await loadPatchInIsolatedContext(configs, relayContext(configs), patched);
@@ -604,15 +603,78 @@ test("relay fallback preserves successful source patches and unrelated spawns", 
       const options = { env: { CHILD_ONLY: "keep" } };
       process.getBuiltinModule("child_process").spawn(customCli, args, options);
       assert.deepEqual(runtime.spawnCalls[0], [customCli, args, options]);
-      if (patched) {
-        process.getBuiltinModule("child_process").spawn(relayTarget, ["app-server"], options);
-        assert.equal(runtime.spawnCalls[1][0], relayTarget);
-        assert.equal(runtime.spawnCalls[1][2].env.CODEY_CODEX_CLI_WRAPPER_TARGET, undefined);
+      process.getBuiltinModule("child_process").spawn(relayTarget, ["app-server"], options);
+      assert.equal(runtime.spawnCalls[1][0], relayWrapper);
+      assert.equal(runtime.spawnCalls[1][2].env.CODEY_CODEX_CLI_WRAPPER_TARGET, relayTarget);
+      assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
+        "codey-app-server-runtime-overrides-verified");
+    } finally { runtime.restore(); }
+  }
+});
+
+test("primary relay requires stdin transport and never silently accepts a WebSocket listener", async () => {
+  const configs = ['model_provider="codey_router"'];
+  for (const listen of [[], ["--listen", "stdio://"], ["--listen=stdio://"], ["--listen", "ws://127.0.0.1:9"], ["--listen=ws://127.0.0.1:9"], ["--listen"]]) {
+    const runtime = await loadPatchInIsolatedContext(configs, relayContext(configs), false);
+    try {
+      const spawn = () => process.getBuiltinModule("child_process").spawn(relayTarget, ["app-server", ...listen]);
+      if (!listen.length || listen.includes("stdio://") || listen.includes("--listen=stdio://")) {
+        spawn();
+        assert.equal(runtime.spawnCalls[0][0], relayWrapper);
         assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
           "codey-app-server-runtime-overrides-verified");
+      } else {
+        assert.throws(spawn, /未确认使用 Codey 标准输入转发入口/);
+        assert.equal(runtime.spawnCalls.length, 0);
       }
     } finally { runtime.restore(); }
   }
+});
+
+test("primary relay skips both matching and drifted Desktop message source patches", async () => {
+  const configs = ['model_provider="codey_router"'];
+  const build = join(relayDirectory, ".vite", "build");
+  await mkdir(build, { recursive: true });
+  for (const source of [appServerTransportFixture, appServerTransportFixture.replace(
+    "this.options.transformOutgoingMessage(e)", "this.options.transformOutgoingMessage.call(null,e)",
+  )]) {
+    const filename = join(build, "src-relay-transport.js");
+    await writeFile(filename, source);
+    const warnings = [];
+    const runtime = await loadPatchInIsolatedContext(configs, {
+      ...relayContext(configs),
+      console: { ...console, warn: (...args) => warnings.push(args.join(" ")) },
+    }, false);
+    try {
+      let compiled;
+      process.getBuiltinModule("module")._extensions[".js"]({
+        _compile(output) { compiled = output; new vm.Script(output); },
+      }, filename);
+      assert.equal(compiled, source);
+      assert.equal(runtime.context.__CODEY_CODEX_STARTUP_PATCH__.localRouterMessageSourcePatched, false);
+      process.getBuiltinModule("child_process").spawn(relayTarget, ["app-server"]);
+      assert.equal(runtime.spawnCalls[0][0], relayWrapper);
+      assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
+        "codey-app-server-runtime-overrides-verified");
+      assert.deepEqual(warnings, []);
+    } finally { runtime.restore(); }
+  }
+});
+
+test("a relay discovered after bootstrap still reports the explicit fallback", async () => {
+  const configs = ['model_provider="codey_router"'];
+  const warnings = [];
+  const runtime = await loadPatchInIsolatedContext(configs, {
+    console: { ...console, warn: (...args) => warnings.push(args.join(" ")) },
+  }, false);
+  try {
+    Object.assign(runtime.context.process.env, relayContext(configs).process.env);
+    process.getBuiltinModule("child_process").spawn(relayTarget, ["app-server"]);
+    const wait = runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__;
+    assert.equal(await wait(), "codey-app-server-runtime-overrides-degraded");
+    assert.equal(await wait(), "codey-app-server-runtime-overrides-degraded");
+    assert.equal(warnings.length, 1);
+  } finally { runtime.restore(); }
 });
 
 test("relay fallback cannot mark a synchronous wrapper spawn failure complete", async () => {
@@ -991,7 +1053,7 @@ test("remote app-server commands neither receive local overrides nor confirm loc
       assert.ok(runtime.spawnCalls.at(-1)[1].includes(configs[0]));
       assert.equal(runtime.spawnCalls.at(-1)[2].env.CODEY_SUBAGENT_GATE_ACTIVE, "1");
       assert.equal(await runtime.context.__CODEY_AWAIT_CODEX_APP_SERVER_RUNTIME_OVERRIDES__(),
-        installMessagePatch ? "codey-app-server-runtime-overrides-verified" : "codey-app-server-runtime-overrides-degraded");
+        "codey-app-server-runtime-overrides-verified");
     } finally { runtime.restore(); }
   }
 });

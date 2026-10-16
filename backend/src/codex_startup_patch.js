@@ -1346,6 +1346,7 @@
     requiredRuntimeConfigs: [...appServerRuntimeConfigs],
     messageSourcePatched: false,
     stdinRelayAvailable: false,
+    transport: "",
     failure: "",
   };
   let resolveAppServerRuntimeOverrideValidation = null;
@@ -1410,6 +1411,8 @@
       requiredRuntimeConfigs: [...status.requiredRuntimeConfigs],
       messageSourcePatched: localRouterMessageSourcePatched,
       stdinRelayAvailable: status.stdinRelayAvailable === true,
+      transport: status.stdinRelayAvailable === true ? "stdin-relay"
+        : localRouterMessageSourcePatched ? "source-patch" : "",
       failure: status.failure || "",
     };
     finishAppServerRuntimeOverrideValidation(normalized);
@@ -1466,7 +1469,8 @@
       if (!status.complete) {
         throw new Error(formatAppServerRuntimeOverrideError(status));
       }
-      if (!localRouterRuntimeEnabled || status.messageSourcePatched) {
+      if (!localRouterRuntimeEnabled || status.messageSourcePatched ||
+          (preferCodeyStdinRelay && status.stdinRelayAvailable)) {
         return appServerRuntimeOverrideVerifiedResult;
       }
       if (!status.stdinRelayAvailable) {
@@ -1569,7 +1573,7 @@
   });
 
   let appServerAnalyticsPatchCount = 0;
-  // 启动器提供本次包装器路径，核对实际命令及子进程环境后才允许降级。
+  // 启动器提供本次包装器路径，核对实际命令及子进程环境后才允许接管。
   const hasCodeyStdinRelay = (command, options) => {
     const environment = options?.env ?? process.env;
     const wrapper = process.env.CODEY_CODEX_CLI_STDIN_RELAY;
@@ -1648,7 +1652,20 @@
     }
     return { command: wrapper, rest: [{ ...options, env }, ...rest.slice(1)] };
   };
+  const usesAppServerStdin = (args) => {
+    for (let index = args.indexOf("app-server") + 1; index < args.length; index += 1) {
+      const argument = args[index];
+      if (argument === "--listen" && args[++index] !== "stdio://") return false;
+      if (typeof argument === "string" && argument.startsWith("--listen=") &&
+          argument !== "--listen=stdio://") return false;
+    }
+    return true;
+  };
   const childProcess = process.getBuiltinModule("child_process");
+  // Provider 改写优先放在 Rust 协议层，不再依赖 Desktop 压缩后的消息源码。
+  // 这里只决定是否跳过源码补丁；每次 spawn 仍重新核对命令与实际环境。
+  const preferCodeyStdinRelay = localRouterRuntimeEnabled &&
+    prepareCodeyStdinRelay(process.env.CODEX_CLI_PATH, []) != null;
   const NativeSpawn = childProcess.spawn;
   if (!NativeSpawn.__codeyAppServerAnalyticsDisabled) {
     const isManagedCodexAppServerSpawn = (command, args) =>
@@ -1694,8 +1711,8 @@
             argumentCount: rewritten.length,
           }));
         }
-        if (localRouterRuntimeEnabled && !localRouterMessageSourcePatched) {
-          const relay = prepareCodeyStdinRelay(command, rewrittenRest);
+        if (localRouterRuntimeEnabled && (preferCodeyStdinRelay || !localRouterMessageSourcePatched)) {
+          const relay = usesAppServerStdin(rewritten) ? prepareCodeyStdinRelay(command, rewrittenRest) : null;
           if (relay) {
             command = relay.command;
             rewrittenRest = relay.rest;
@@ -1703,7 +1720,7 @@
           }
           runtimeOverrideStatus.stdinRelayAvailable = relay != null;
         } else {
-          runtimeOverrideStatus.stdinRelayAvailable = hasCodeyStdinRelay(command, rewrittenRest[0]);
+          runtimeOverrideStatus.stdinRelayAvailable = usesAppServerStdin(rewritten) && hasCodeyStdinRelay(command, rewrittenRest[0]);
         }
         if (localRouterRuntimeEnabled && !localRouterMessageSourcePatched &&
             !runtimeOverrideStatus.stdinRelayAvailable) {
@@ -2699,7 +2716,7 @@
   // The app-server transport can live in a shared Vite chunk, outside main.
   {
     const patchCodexBuildScript = (source, filename) => {
-      const hasAppServerMessages = localRouterRuntimeEnabled &&
+      const hasAppServerMessages = localRouterRuntimeEnabled && !preferCodeyStdinRelay &&
         source.includes("this.options.transformOutgoingMessage");
       if (hasAppServerMessages) {
         try {

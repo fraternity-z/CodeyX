@@ -6,17 +6,20 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::Context;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
 use tokio::sync::Notify;
-use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
+use crate::devtools::{
+    self, COMMAND_TIMEOUT as CDP_COMMAND_TIMEOUT, ConnectedSocket as ConnectedCdpSocket,
+    FailureKind, ProtocolFailure, command_result, connect_websocket as connect_cdp_websocket,
+    ensure_evaluate_succeeded as ensure_runtime_evaluate_succeeded,
+};
+
 pub const BRIDGE_BINDING_NAME: &str = "codexSessionDeleteV2";
-const CDP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const CDP_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 const BRIDGE_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
 const BRIDGE_MAX_CONCURRENT_READ_HANDLERS: usize = 8;
 const BRIDGE_MAX_PENDING_CALLS: usize = 256;
@@ -251,9 +254,18 @@ pub async fn install_bridge(
         .with_binding_session(session_token.clone());
 
     session.send_command(1, "Runtime.enable", json!({})).await?;
-    session
+    let removed = session
         .send_command(2, "Runtime.removeBinding", json!({ "name": binding_name }))
-        .await?;
+        .await;
+    // Older targets can add a session binding without supporting removal.
+    // Only a definite unsupported-method response permits this fallback.
+    if let Err(error) = removed
+        && !error
+            .downcast_ref::<ProtocolFailure>()
+            .is_some_and(|failure| failure.kind == FailureKind::UnsupportedMethod)
+    {
+        return Err(error);
+    }
     session
         .send_command(3, "Runtime.addBinding", json!({ "name": binding_name }))
         .await?;
@@ -362,92 +374,6 @@ pub fn reject_bridge_expression(request_id: &str, message: &str) -> anyhow::Resu
     ))
 }
 
-type ConnectedCdpSocket =
-    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-
-async fn connect_cdp_websocket(websocket_url: &str) -> anyhow::Result<ConnectedCdpSocket> {
-    let candidates = cdp_websocket_connect_candidates(websocket_url);
-    // 候选共享原来的连接总预算，避免回退把单轮代价翻倍后吃掉启动注入窗口。
-    let attempt_timeout = cdp_connect_attempt_timeout(candidates.len());
-    let mut last_error = None;
-    for candidate in &candidates {
-        // The TLS-capable handshake future is large even for loopback ws://.
-        // Keep it out of every enclosing startup future: their nested poll
-        // frames can otherwise exhaust the Windows main thread's 1 MiB stack.
-        let connect = Box::pin(connect_async(candidate.as_str()));
-        match tokio::time::timeout(attempt_timeout, connect).await {
-            Ok(Ok((socket, _))) => return Ok(socket),
-            Ok(Err(error)) => {
-                last_error =
-                    Some(anyhow::Error::new(error).context("failed to connect CDP websocket"));
-            }
-            Err(_) => {
-                last_error = Some(anyhow::anyhow!(
-                    "timed out connecting CDP websocket after {}s",
-                    CDP_CONNECT_TIMEOUT.as_secs()
-                ));
-            }
-        }
-    }
-
-    Err(last_error.unwrap_or_else(|| anyhow::anyhow!("CDP websocket address is empty")))
-}
-
-fn cdp_connect_attempt_timeout(candidate_count: usize) -> Duration {
-    CDP_CONNECT_TIMEOUT / candidate_count.max(1) as u32
-}
-
-/// Chromium 的 `/json` 会把请求用的 Host 原样写进 `webSocketDebuggerUrl`，而
-/// Codey 枚举 CDP 时优先使用 `localhost`（Chromium 150+ 拒绝 IP 字面量 Host），
-/// 于是拿到的地址通常是 `ws://localhost:<port>/devtools/page/<id>`。
-/// `connect_async` 对一个主机名只按解析顺序逐个尝试、每个地址没有独立超时：若
-/// 排在前面的是被安全软件静默丢弃的回环 IPv6，它会一直挂到预算耗尽而轮不到
-/// `127.0.0.1`，表现就是 HTTP 列表可达但 WebSocket 连不上（HTTP 侧已显式枚举
-/// 三个回环地址，因此不受影响）。这里把回环别名展开成显式候选，先用回环 IPv4
-/// 直连，再退回原始主机名。
-fn cdp_websocket_connect_candidates(websocket_url: &str) -> Vec<String> {
-    let trimmed = websocket_url.trim();
-    let Some((scheme, rest)) = trimmed.split_once("://") else {
-        return vec![trimmed.to_string()];
-    };
-    let (authority, path) = match rest.find(['/', '?', '#']) {
-        Some(index) => (&rest[..index], &rest[index..]),
-        None => (rest, ""),
-    };
-    let authority = authority
-        .rsplit_once('@')
-        .map_or(authority, |(_, host)| host);
-    let (host, port) = split_authority_host_port(authority);
-    let mut candidates = Vec::with_capacity(2);
-    if is_loopback_alias(host) {
-        let port = port.map_or(String::new(), |port| format!(":{port}"));
-        candidates.push(format!("{scheme}://127.0.0.1{port}{path}"));
-    }
-    candidates.push(trimmed.to_string());
-    candidates.dedup();
-    candidates
-}
-
-fn is_loopback_alias(host: &str) -> bool {
-    host.eq_ignore_ascii_case("localhost") || host == "[::1]" || host == "::1"
-}
-
-fn split_authority_host_port(authority: &str) -> (&str, Option<&str>) {
-    if let Some(rest) = authority.strip_prefix('[') {
-        return match rest.split_once(']') {
-            Some((host, tail)) => (
-                &authority[..host.len() + 2],
-                tail.strip_prefix(':').filter(|port| !port.is_empty()),
-            ),
-            None => (authority, None),
-        };
-    }
-    match authority.rsplit_once(':') {
-        Some((host, port)) if !host.is_empty() && !port.is_empty() => (host, Some(port)),
-        _ => (authority, None),
-    }
-}
-
 struct BridgeCall {
     request_id: String,
     path: String,
@@ -476,6 +402,7 @@ async fn run_bridge_pump(
         mut binding_calls,
         handler,
         binding_session,
+        unsafe_eval_supported,
         ..
     } = session;
     let Some(handler) = handler else {
@@ -522,7 +449,7 @@ async fn run_bridge_pump(
         }
 
         if let Some(completion) = ready.pop_front() {
-            send_bridge_completion(&mut writer, completion).await?;
+            send_bridge_completion(&mut writer, completion, unsafe_eval_supported).await?;
             continue;
         }
         if closing.load(Ordering::Acquire) {
@@ -695,6 +622,7 @@ fn execute_bridge_call(handler: BridgeHandler, call: BridgeCall) -> BridgeCallFu
 async fn send_bridge_completion<S>(
     writer: &mut S,
     completion: BridgeCompletion,
+    unsafe_eval_supported: bool,
 ) -> anyhow::Result<()>
 where
     S: Sink<Message> + Unpin,
@@ -714,17 +642,14 @@ where
         }
     };
     let message_id = next_message_id();
-    let sent = writer
-        .send(Message::Text(
-            json!({
-                "id": message_id,
-                "method": "Runtime.evaluate",
-                "params": runtime_evaluate_params(&expression),
-            })
-            .to_string()
-            .into(),
-        ))
-        .await;
+    let mut params = runtime_evaluate_params(&expression);
+    if !unsafe_eval_supported {
+        params
+            .as_object_mut()
+            .unwrap()
+            .remove("allowUnsafeEvalBlockedByCSP");
+    }
+    let sent = devtools::send_command(writer, message_id, "Runtime.evaluate", params).await;
     if let Err(error) = &sent {
         let _ = crate::diagnostic_log::append_diagnostic_log(
             failure_event,
@@ -744,6 +669,7 @@ struct CdpSession<S> {
     binding_calls: VecDeque<Value>,
     handler: Option<BridgeHandler>,
     binding_session: Option<String>,
+    unsafe_eval_supported: bool,
 }
 
 impl<S> CdpSession<S>
@@ -761,6 +687,7 @@ where
             binding_calls: VecDeque::new(),
             handler: None,
             binding_session: None,
+            unsafe_eval_supported: true,
         }
     }
 
@@ -788,30 +715,46 @@ where
         &mut self,
         message_id: u64,
         method: &str,
-        params: Value,
+        mut params: Value,
         timeout: Duration,
     ) -> anyhow::Result<Value> {
-        self.socket
-            .send(Message::Text(
-                json!({
-                    "id": message_id,
-                    "method": method,
-                    "params": params,
-                })
-                .to_string()
-                .into(),
-            ))
-            .await
-            .with_context(|| format!("failed to send CDP command {method} id {message_id}"))?;
-
-        tokio::time::timeout(timeout, self.wait_for_id(message_id, method.to_string()))
-            .await
-            .with_context(|| {
-                format!(
-                    "timed out waiting for CDP command {method} id {message_id} response after {}s",
-                    timeout.as_secs()
-                )
-            })?
+        if method == "Runtime.evaluate" && !self.unsafe_eval_supported {
+            params
+                .as_object_mut()
+                .unwrap()
+                .remove("allowUnsafeEvalBlockedByCSP");
+        }
+        tokio::time::timeout(timeout, async {
+            devtools::send_command(&mut self.socket, message_id, method, params.clone()).await?;
+            let result = self.wait_for_id(message_id, method.to_string()).await;
+            // Invalid parameters means the expression was rejected before execution.
+            // Never retry on a timeout, exception, disconnect or ambiguous rejection.
+            if method == "Runtime.evaluate"
+                && params.get("allowUnsafeEvalBlockedByCSP").is_some()
+                && result
+                    .as_ref()
+                    .err()
+                    .and_then(|e| e.downcast_ref::<ProtocolFailure>())
+                    .is_some_and(|failure| failure.kind == FailureKind::InvalidParameters)
+            {
+                self.unsafe_eval_supported = false;
+                params
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("allowUnsafeEvalBlockedByCSP");
+                let fallback_id = next_message_id();
+                devtools::send_command(&mut self.socket, fallback_id, method, params).await?;
+                return self.wait_for_id(fallback_id, method.to_string()).await;
+            }
+            result
+        })
+        .await
+        .context(ProtocolFailure::new(
+            "command",
+            FailureKind::Timeout,
+            Some(method),
+            Some(message_id),
+        ))?
     }
 
     async fn wait_for_id(&mut self, message_id: u64, method: String) -> anyhow::Result<Value> {
@@ -821,7 +764,13 @@ where
             }
 
             let Some(message) = self.next_message().await? else {
-                bail!("CDP websocket closed before response for {method} id {message_id}");
+                return Err(ProtocolFailure::new(
+                    "command",
+                    FailureKind::Closed,
+                    Some(&method),
+                    Some(message_id),
+                )
+                .into());
             };
 
             if let Some(response_id) = message.get("id").and_then(Value::as_u64) {
@@ -834,14 +783,9 @@ where
     }
 
     async fn next_message(&mut self) -> anyhow::Result<Option<Value>> {
-        let Some(message) = self.socket.next().await else {
+        let Some(value) = devtools::read_message(&mut self.socket).await? else {
             return Ok(None);
         };
-        let message = message.context("failed to read CDP websocket message")?;
-        let Message::Text(text) = message else {
-            return Ok(Some(json!({})));
-        };
-        let value: Value = serde_json::from_str(&text).context("failed to parse CDP message")?;
 
         if value.get("method").and_then(Value::as_str) == Some("Runtime.bindingCalled") {
             self.binding_calls.push_back(value);
@@ -850,23 +794,6 @@ where
 
         Ok(Some(value))
     }
-}
-
-fn command_result(response: Value, method: &str, message_id: u64) -> anyhow::Result<Value> {
-    if let Some(error) = response.get("error") {
-        bail!("CDP command {method} id {message_id} failed: {error}");
-    }
-    Ok(response)
-}
-
-fn ensure_runtime_evaluate_succeeded(response: Value) -> anyhow::Result<Value> {
-    if let Some(exception) = response
-        .get("result")
-        .and_then(|result| result.get("exceptionDetails"))
-    {
-        bail!("Runtime.evaluate raised an exception: {exception}");
-    }
-    Ok(response)
 }
 
 fn extract_string_field(input: &str, field: &str) -> Option<String> {
@@ -914,60 +841,6 @@ fn next_message_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn cdp_connect_future_keeps_handshake_off_the_startup_stack() {
-        // Construct, but do not poll: this must not open a socket or need a runtime.
-        let connect = connect_cdp_websocket("ws://127.0.0.1:9229/devtools/page/test");
-        let bytes = std::mem::size_of_val(&connect);
-        assert!(
-            bytes <= 1024,
-            "CDP connect future embeds handshake state: {bytes} bytes"
-        );
-    }
-
-    #[test]
-    fn loopback_websocket_aliases_expand_to_ipv4_first() {
-        assert_eq!(
-            cdp_websocket_connect_candidates("ws://localhost:9229/devtools/page/ABC"),
-            [
-                "ws://127.0.0.1:9229/devtools/page/ABC",
-                "ws://localhost:9229/devtools/page/ABC",
-            ]
-        );
-        assert_eq!(
-            cdp_websocket_connect_candidates("ws://[::1]:9229/devtools/page/ABC"),
-            [
-                "ws://127.0.0.1:9229/devtools/page/ABC",
-                "ws://[::1]:9229/devtools/page/ABC",
-            ]
-        );
-        assert_eq!(
-            cdp_websocket_connect_candidates("ws://localhost/devtools/page/ABC"),
-            [
-                "ws://127.0.0.1/devtools/page/ABC",
-                "ws://localhost/devtools/page/ABC",
-            ]
-        );
-    }
-
-    #[test]
-    fn explicit_websocket_hosts_stay_single_candidate() {
-        for url in [
-            "ws://127.0.0.1:9229/devtools/page/ABC",
-            "wss://codex.example/devtools/page/ABC",
-        ] {
-            let candidates = cdp_websocket_connect_candidates(url);
-            assert_eq!(candidates, [url], "{url} must be tried as written");
-        }
-    }
-
-    #[test]
-    fn websocket_connect_candidates_share_one_connect_budget() {
-        assert_eq!(cdp_connect_attempt_timeout(0), CDP_CONNECT_TIMEOUT);
-        assert_eq!(cdp_connect_attempt_timeout(1), CDP_CONNECT_TIMEOUT);
-        assert_eq!(cdp_connect_attempt_timeout(2), CDP_CONNECT_TIMEOUT / 2);
-    }
 
     fn bridge_call(request_id: &str, path: &str) -> ParsedBridgeDispatch {
         ParsedBridgeDispatch::Call(BridgeCall {

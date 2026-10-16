@@ -59,7 +59,7 @@ impl ErrorVersions {
     }
 }
 
-fn cached_codex_app_version() -> Option<String> {
+pub(crate) fn cached_codex_app_version() -> Option<String> {
     CODEX_APP_VERSION
         .get_or_init(|| RwLock::new(None))
         .read()

@@ -5,6 +5,7 @@ pub(crate) mod codex_home;
 pub use codex_home::default_codex_home_dir;
 pub mod codex_sqlite;
 pub mod config_manager;
+pub mod devtools;
 pub mod diagnostic_log;
 pub mod launcher;
 pub mod model_suffix;

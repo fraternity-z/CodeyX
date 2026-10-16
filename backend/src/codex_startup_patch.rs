@@ -1271,17 +1271,29 @@ pub(crate) fn startup_debug_session_timeout() -> anyhow::Error {
 pub(crate) fn app_server_runtime_override_confirmation_error(
     exception: &serde_json::Value,
 ) -> anyhow::Error {
+    use codey_runtime_core::devtools::{FailureKind, ProtocolFailure};
     if exception
         .to_string()
         .contains(APP_SERVER_RUNTIME_OVERRIDE_TIMEOUT_MARKER)
     {
-        return std::io::Error::new(
+        return anyhow::Error::new(std::io::Error::new(
             std::io::ErrorKind::TimedOut,
-            format!("Codex app-server 运行时覆盖确认超时：{exception}"),
-        )
-        .into();
+            "Codex app-server 运行时覆盖确认超时",
+        ))
+        .context(ProtocolFailure::new(
+            "evaluate",
+            FailureKind::Timeout,
+            Some("Runtime.evaluate"),
+            Some(6),
+        ));
     }
-    anyhow::anyhow!("Codex app-server 运行时覆盖校验失败：{exception}")
+    anyhow::Error::new(ProtocolFailure::new(
+        "evaluate",
+        FailureKind::ScriptException,
+        Some("Runtime.evaluate"),
+        Some(6),
+    ))
+    .context("Codex app-server 运行时覆盖校验失败")
 }
 
 /// 从 reqwest 错误链里找出底层 socket 错误类型，用于区分「被拒绝」与「被拖住」。
@@ -1450,10 +1462,37 @@ async fn install_over_websocket(
     expression: &str,
     require_app_server_runtime_overrides: bool,
 ) -> Result<()> {
-    use futures_util::StreamExt;
-    use tokio_tungstenite::tungstenite::Message;
+    let result = install_inspector_session(
+        websocket_url,
+        expression,
+        require_app_server_runtime_overrides,
+    )
+    .await;
+    if let Err(error) = &result
+        && let Some(failure) = error.downcast_ref::<codey_runtime_core::devtools::ProtocolFailure>()
+    {
+        crate::error_log::record_failure_with_metadata(
+            "debug_protocol_failed",
+            "install_startup_patch",
+            failure.to_string(),
+            crate::error_log::FailureMetadata {
+                stage: Some("startup.inspector".into()),
+                recoverable: Some(failure.retryable_setup()),
+            },
+            serde_json::json!({"protocolFailure": failure}),
+        );
+    }
+    result
+}
 
-    let (mut socket, _) = tokio_tungstenite::connect_async(websocket_url).await?;
+async fn install_inspector_session(
+    websocket_url: &str,
+    expression: &str,
+    require_app_server_runtime_overrides: bool,
+) -> Result<()> {
+    use codey_runtime_core::devtools::{self, FailureKind, ProtocolFailure, send_command};
+
+    let mut socket = devtools::connect_websocket(websocket_url).await?;
     send_command(&mut socket, 1, "Runtime.enable", serde_json::json!({})).await?;
     send_command(&mut socket, 2, "Debugger.enable", serde_json::json!({})).await?;
 
@@ -1461,22 +1500,34 @@ async fn install_over_websocket(
     let mut debugger_enabled = false;
     let mut continued = false;
     let mut evaluation_sent = false;
+    let mut waiting_for = ("Runtime.enable", 1);
+    let mut deadline = tokio::time::Instant::now() + devtools::COMMAND_TIMEOUT;
 
-    while let Some(message) = socket.next().await {
-        let message = message?;
-        let text = match message {
-            Message::Text(text) => text,
-            Message::Binary(_) | Message::Ping(_) | Message::Pong(_) | Message::Frame(_) => {
-                continue;
-            }
-            Message::Close(_) => anyhow::bail!("Codex 启动补丁调试连接提前关闭"),
-        };
-        let payload: serde_json::Value = serde_json::from_str(text.as_ref())?;
+    loop {
+        let payload = tokio::time::timeout_at(deadline, devtools::read_message(&mut socket))
+            .await
+            .context(ProtocolFailure::new(
+                "command",
+                FailureKind::Timeout,
+                Some(waiting_for.0),
+                Some(waiting_for.1),
+            ))??
+            .ok_or_else(|| {
+                ProtocolFailure::new(
+                    "command",
+                    FailureKind::Closed,
+                    Some(waiting_for.0),
+                    Some(waiting_for.1),
+                )
+            })?;
 
         match payload.get("id").and_then(serde_json::Value::as_u64) {
             Some(1) => {
                 ensure_protocol_success(&payload, "Runtime.enable")?;
                 runtime_enabled = true;
+                if !continued {
+                    waiting_for = ("Debugger.enable", 2);
+                }
             }
             Some(2) => {
                 ensure_protocol_success(&payload, "Debugger.enable")?;
@@ -1487,11 +1538,18 @@ async fn install_over_websocket(
             }
             Some(4) => {
                 ensure_protocol_success(&payload, "Debugger.evaluateOnCallFrame")?;
-                if let Some(exception) = payload
+                if payload
                     .get("result")
                     .and_then(|result| result.get("exceptionDetails"))
+                    .is_some_and(|exception| !exception.is_null())
                 {
-                    anyhow::bail!("Codex 启动补丁执行异常：{exception}");
+                    return Err(anyhow::Error::new(ProtocolFailure::new(
+                        "evaluate",
+                        FailureKind::ScriptException,
+                        Some("Debugger.evaluateOnCallFrame"),
+                        Some(4),
+                    ))
+                    .context("Codex 启动补丁执行异常"));
                 }
                 let value = payload
                     .pointer("/result/result/value")
@@ -1500,6 +1558,8 @@ async fn install_over_websocket(
                     anyhow::bail!("Codex 启动补丁未返回预期状态");
                 }
                 send_command(&mut socket, 5, "Debugger.resume", serde_json::json!({})).await?;
+                waiting_for = ("Debugger.resume", 5);
+                deadline = tokio::time::Instant::now() + devtools::COMMAND_TIMEOUT;
             }
             Some(5) => {
                 ensure_protocol_success(&payload, "Debugger.resume")?;
@@ -1516,6 +1576,9 @@ async fn install_over_websocket(
                         }),
                     )
                     .await?;
+                    waiting_for = ("Runtime.evaluate", 6);
+                    deadline = tokio::time::Instant::now()
+                        + STARTUP_PATCH_RUNTIME_OVERRIDE_INSTALL_TIMEOUT;
                     continue;
                 }
                 let _ = socket.close(None).await;
@@ -1526,6 +1589,7 @@ async fn install_over_websocket(
                 if let Some(exception) = payload
                     .get("result")
                     .and_then(|result| result.get("exceptionDetails"))
+                    .filter(|exception| !exception.is_null())
                 {
                     return Err(app_server_runtime_override_confirmation_error(exception));
                 }
@@ -1563,6 +1627,8 @@ async fn install_over_websocket(
                 serde_json::json!({}),
             )
             .await?;
+            waiting_for = ("Runtime.runIfWaitingForDebugger", 3);
+            deadline = tokio::time::Instant::now() + devtools::COMMAND_TIMEOUT;
         }
 
         if payload.get("method").and_then(serde_json::Value::as_str) == Some("Debugger.paused")
@@ -1585,39 +1651,21 @@ async fn install_over_websocket(
                 }),
             )
             .await?;
+            waiting_for = ("Debugger.evaluateOnCallFrame", 4);
+            deadline = tokio::time::Instant::now() + STARTUP_PATCH_INSTALL_TIMEOUT;
         }
     }
-
-    anyhow::bail!("Codex 启动补丁调试连接未返回执行结果")
-}
-
-async fn send_command<S>(
-    socket: &mut tokio_tungstenite::WebSocketStream<S>,
-    id: u64,
-    method: &str,
-    params: serde_json::Value,
-) -> Result<()>
-where
-    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
-{
-    use futures_util::SinkExt;
-    use tokio_tungstenite::tungstenite::Message;
-
-    let message = serde_json::json!({
-        "id": id,
-        "method": method,
-        "params": params,
-    });
-    socket
-        .send(Message::Text(message.to_string().into()))
-        .await?;
-    Ok(())
 }
 
 fn ensure_protocol_success(payload: &serde_json::Value, method: &str) -> Result<()> {
-    if let Some(error) = payload.get("error") {
-        anyhow::bail!("{method} 失败：{error}");
-    }
+    codey_runtime_core::devtools::command_result(
+        payload.clone(),
+        method,
+        payload
+            .get("id")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+    )?;
     Ok(())
 }
 
@@ -2088,6 +2136,14 @@ mod tests {
         }));
         assert!(incompatible.downcast_ref::<std::io::Error>().is_none());
         assert!(incompatible.to_string().contains("运行时覆盖校验失败"));
+        assert!(!format!("{incompatible:#}").contains("model_provider"));
+        assert_eq!(
+            incompatible
+                .downcast_ref::<codey_runtime_core::devtools::ProtocolFailure>()
+                .unwrap()
+                .kind,
+            codey_runtime_core::devtools::FailureKind::ScriptException,
+        );
     }
 
     /// 状态字是 Rust 与 JS 两侧各自硬编码的跨语言契约：改了一边而忘了另一边，
@@ -2577,7 +2633,87 @@ mod tests {
             message.contains("Runtime.runIfWaitingForDebugger"),
             "{message}"
         );
-        assert!(message.contains("not waiting"), "{message}");
+        assert_eq!(
+            error
+                .downcast_ref::<codey_runtime_core::devtools::ProtocolFailure>()
+                .unwrap()
+                .code,
+            Some(-32000)
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn inspector_protocol_preserves_events_between_out_of_order_handshake_replies() {
+        use codey_runtime_core::devtools;
+        use futures_util::SinkExt;
+        use serde_json::json;
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for id in [1, 2] {
+                assert_eq!(
+                    devtools::read_message(&mut socket).await.unwrap().unwrap()["id"],
+                    id
+                );
+            }
+            for payload in [
+                json!({"id":2,"result":{}}),
+                json!({"method":"Runtime.executionContextCreated","params":{}}),
+                json!({"id":1,"result":{}}),
+            ] {
+                socket
+                    .send(Message::Text(payload.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                devtools::read_message(&mut socket).await.unwrap().unwrap()["method"],
+                "Runtime.runIfWaitingForDebugger"
+            );
+            // The pause can precede the acknowledgement of the continue command.
+            for payload in [
+                json!({"method":"Debugger.paused","params":{"callFrames":[{"callFrameId":"frame"}]}}),
+                json!({"id":3,"result":{}}),
+            ] {
+                socket
+                    .send(Message::Text(payload.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            let evaluate = devtools::read_message(&mut socket).await.unwrap().unwrap();
+            assert_eq!(evaluate["method"], "Debugger.evaluateOnCallFrame");
+            assert_eq!(evaluate["params"]["callFrameId"], "frame");
+            socket
+                .send(Message::Text(
+                    json!({"id":4,"result":{"result":{"value":PATCH_RESULT}}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(
+                devtools::read_message(&mut socket).await.unwrap().unwrap()["method"],
+                "Debugger.resume"
+            );
+            socket
+                .send(Message::Text(
+                    json!({"id":5,"result":{}}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+        });
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            install_over_websocket(&format!("ws://{address}"), "setup()", false),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         server.await.unwrap();
     }
 

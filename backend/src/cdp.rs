@@ -9,6 +9,7 @@ use codey_runtime_core::bridge::{
     BridgeHandler, BridgePumpHandle, bridge_health_check_script, install_bridge,
 };
 use codey_runtime_core::cdp::{CdpTarget, list_targets, pick_injectable_codex_page_target};
+use codey_runtime_core::devtools::{FailureKind, ProtocolFailure};
 use serde::{Deserialize, Serialize};
 
 use crate::error_log;
@@ -189,6 +190,12 @@ pub struct InjectionRetryFailure {
 }
 
 impl InjectionRetryFailure {
+    pub fn retryable(&self) -> bool {
+        self.error
+            .downcast_ref::<ProtocolFailure>()
+            .is_none_or(ProtocolFailure::retryable_setup)
+    }
+
     pub fn into_error(self) -> anyhow::Error {
         self.error
     }
@@ -467,12 +474,12 @@ fn append_guarded_script(
     let id = serde_json::to_string(&descriptor.id).expect("script id should serialize");
     let name = serde_json::to_string(&descriptor.name).expect("script name should serialize");
     let source = serde_json::to_string(descriptor.source).expect("script source should serialize");
-    // Built-ins repair their own state on reconnect; user scripts may install
-    // listeners or timers and should run only once per document after success.
+    // A failed user script may already have performed side effects. Reconnect
+    // must not replay it; a new document gets a fresh registry.
     if descriptor.source == "user" {
-        bundle.push_str("\nif (window.__codeyInjectionStatus?.[");
+        bundle.push_str("\nif (!window.__codeyInjectionStatus?.[");
         bundle.push_str(&id);
-        bundle.push_str("]?.status !== \"executed\") {\n");
+        bundle.push_str("]) {\n");
     }
     bundle.push_str("\n(window.__codeyInjectionStatus ||= Object.create(null))[");
     bundle.push_str(&id);
@@ -560,7 +567,25 @@ pub async fn retry_inject_with_scripts(
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));
                 let failure_cost = attempt_started.elapsed();
                 stats.record_failure(current_phase, failure_cost);
+                stats.last_protocol_failure = error.downcast_ref::<ProtocolFailure>().cloned();
                 previous_detail = Some(injection_failure_detail(&error));
+                if stats
+                    .last_protocol_failure
+                    .as_ref()
+                    .is_some_and(|failure| !failure.retryable_setup())
+                {
+                    stats.report(
+                        source,
+                        "incompatible",
+                        started.elapsed(),
+                        previous_detail.as_deref(),
+                    );
+                    let summary = safe_injection_error_summary(&error);
+                    break error.context(format!(
+                        "Codex CDP bridge 注入失败（阶段：{}；{summary}）",
+                        current_phase.label()
+                    ));
+                }
                 if tokio::time::Instant::now() + delay > deadline {
                     stats.report(
                         source,
@@ -631,6 +656,7 @@ struct InjectionRetryStats {
     phase_failures: [u32; INJECTION_PHASE_COUNT],
     failure_expense_ms: u64,
     last_failure_phase: Option<InjectionPhase>,
+    last_protocol_failure: Option<ProtocolFailure>,
 }
 
 impl InjectionRetryStats {
@@ -680,6 +706,8 @@ impl InjectionRetryStats {
             "failureExpenseMs": self.failure_expense_ms,
             "lastFailurePhase": self.last_failure_phase.map(InjectionPhase::key),
             "totalMs": elapsed.as_millis() as u64,
+            "codexAppVersion": error_log::cached_codex_app_version(),
+            "protocolFailure": self.last_protocol_failure,
         });
         // 汇总文案只保留归类结果，完整错误链随最后一次尝试一起进诊断记录。
         if let Some(last_error) = last_error {
@@ -738,6 +766,26 @@ fn safe_target_url_shape(url: &str) -> String {
 }
 
 fn safe_injection_error_summary(error: &anyhow::Error) -> String {
+    if let Some(failure) = error.downcast_ref::<ProtocolFailure>() {
+        let reason = match failure.kind {
+            FailureKind::UnsupportedMethod => "不支持此方法",
+            FailureKind::InvalidParameters => "不支持此参数",
+            FailureKind::ContextLost => "页面上下文已重建",
+            FailureKind::Connection | FailureKind::Closed => "调试连接中断",
+            FailureKind::Timeout => "命令响应超时",
+            FailureKind::ScriptException => "页面脚本执行异常",
+            FailureKind::InvalidMessage => "调试协议响应无效",
+            FailureKind::Rejected => "调试命令被拒绝",
+        };
+        return format!(
+            "{}：{reason}{}",
+            failure.method.as_deref().unwrap_or("CDP"),
+            failure
+                .code
+                .map(|code| format!("（{code}）"))
+                .unwrap_or_default()
+        );
+    }
     let message = format!("{error:#}");
     if let Some((_, targets)) = message.split_once("CDP targets=") {
         let targets = targets
@@ -808,6 +856,9 @@ fn safe_injection_error_summary(error: &anyhow::Error) -> String {
 
 /// 完整错误链（含 anyhow 上下文）只进诊断与错误日志，不进用户可见文案。
 fn injection_failure_detail(error: &anyhow::Error) -> String {
+    if let Some(failure) = error.downcast_ref::<ProtocolFailure>() {
+        return serde_json::to_string(failure).expect("protocol metadata should serialize");
+    }
     truncate_chars(&format!("{error:#}"), MAX_INJECTION_DETAIL_CHARS)
 }
 
@@ -1847,8 +1898,11 @@ pub fn target_health_error_requires_rediscovery(error: &anyhow::Error) -> bool {
     // (including HTTP upgrade failures from a replaced CDP target), so the
     // watchdog must rediscover `/json` instead of retrying the stale URL.
     error
-        .downcast_ref::<tokio_tungstenite::tungstenite::Error>()
-        .is_some()
+        .downcast_ref::<ProtocolFailure>()
+        .is_some_and(ProtocolFailure::requires_reconnect)
+        || error
+            .downcast_ref::<tokio_tungstenite::tungstenite::Error>()
+            .is_some()
 }
 
 pub fn bridge_handler<F, Fut>(handler: F) -> BridgeHandler
@@ -1865,6 +1919,111 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn protocol_failures_select_recovery_without_exposing_remote_data() {
+        for (kind, retryable, reconnect) in [
+            (FailureKind::UnsupportedMethod, false, false),
+            (FailureKind::InvalidParameters, false, false),
+            (FailureKind::ScriptException, false, false),
+            (FailureKind::InvalidMessage, false, false),
+            (FailureKind::Rejected, false, false),
+            (FailureKind::Connection, true, true),
+            (FailureKind::Closed, true, true),
+            (FailureKind::ContextLost, true, true),
+            (FailureKind::Timeout, true, false),
+        ] {
+            let error = anyhow::Error::new(ProtocolFailure::new(
+                "command",
+                kind,
+                Some("Runtime.evaluate"),
+                Some(4),
+            ))
+            .context("outer context contains private data");
+            assert!(safe_injection_error_summary(&error).contains("Runtime.evaluate"));
+            assert!(!injection_failure_detail(&error).contains("private data"));
+            assert_eq!(target_health_error_requires_rediscovery(&error), reconnect);
+            assert_eq!(
+                InjectionRetryFailure {
+                    error,
+                    detail: None
+                }
+                .retryable(),
+                retryable
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_bridge_protocol_stops_after_one_install_attempt() {
+        use futures_util::{SinkExt, StreamExt};
+        use serde_json::json;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio_tungstenite::tungstenite::Message;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0; 4096];
+            assert_ne!(stream.read(&mut request).await.unwrap(), 0);
+            let body = json!([{"id":"main", "type":"page", "title":"Codex", "url":"app://-/index.html", "webSocketDebuggerUrl":format!("ws://{address}")}]).to_string();
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+            drop(stream);
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let message = socket.next().await.unwrap().unwrap();
+            let command: serde_json::Value =
+                serde_json::from_str(message.to_text().unwrap()).unwrap();
+            assert_eq!(command["method"], "Runtime.enable");
+            socket
+                .send(Message::Text(
+                    json!({"id":command["id"],"error":{"code":-32601,"message":"private token"}})
+                        .to_string()
+                        .into(),
+                ))
+                .await
+                .unwrap();
+            assert!(matches!(
+                socket.next().await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(200), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let prepared = prepare_injection_scripts(false, false, false, &[]);
+        let result = tokio::time::timeout(
+            Duration::from_secs(2),
+            retry_inject_with_scripts(
+                address.port(),
+                bridge_handler(|_, _| async { json!({}) }),
+                &prepared,
+                InjectionRetrySource::Startup,
+            ),
+        )
+        .await
+        .unwrap();
+        let error = match result {
+            Err(error) => error,
+            Ok(_) => panic!("unsupported protocol must fail"),
+        };
+        assert!(!error.retryable());
+        assert!(!error.to_string().contains("private token"));
+        assert!(error.detail().unwrap().contains("-32601"));
+        server.await.unwrap();
+    }
 
     #[tokio::test]
     async fn remote_control_loads_the_adapter_before_submitting_once() {
@@ -2102,7 +2261,7 @@ mod tests {
     }
 
     #[test]
-    fn user_scripts_run_once_per_document_and_retry_after_failure() {
+    fn user_scripts_are_attempted_once_per_document_even_after_failure() {
         let scripts = prepare_injection_scripts(
             false,
             false,
@@ -2121,8 +2280,8 @@ assert.equal(page.window.__codeyInjectionStatus['user-script-1'].status, 'failed
 page.window.fail = false;
 vm.runInContext(script, page);
 vm.runInContext(script, page);
-assert.equal(page.window.attempts, 2);
-assert.equal(page.window.__codeyInjectionStatus['user-script-1'].status, 'executed');
+assert.equal(page.window.attempts, 1);
+assert.equal(page.window.__codeyInjectionStatus['user-script-1'].status, 'failed');
 const nextPage = context();
 vm.runInContext(script, nextPage);
 vm.runInContext(script, nextPage);

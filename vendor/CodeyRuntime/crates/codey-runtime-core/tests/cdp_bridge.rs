@@ -3,6 +3,7 @@ use codey_runtime_core::cdp::{
     CdpTarget, is_avatar_overlay_page_target, is_primary_codex_page_target, list_targets,
     pick_injectable_codex_page_target,
 };
+use codey_runtime_core::devtools::{FailureKind, ProtocolFailure};
 
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
@@ -662,7 +663,14 @@ async fn install_bridge_rejects_javascript_exceptions_and_closes_failed_sessions
         )
         .await
         .expect_err("JavaScript exception must fail bridge installation");
-        assert!(error.to_string().contains("injection failed"), "{error:#}");
+        assert_eq!(
+            error.downcast_ref::<ProtocolFailure>().unwrap().kind,
+            FailureKind::ScriptException
+        );
+        assert!(
+            !error.to_string().contains("injection failed"),
+            "remote exceptions must not leak"
+        );
         tokio::time::timeout(Duration::from_secs(1), request_rx)
             .await
             .expect("failed installation must release the socket")
@@ -881,7 +889,170 @@ async fn install_bridge_command_error_mentions_method_and_id() {
         .expect("server task should finish without panicking");
     assert!(message.contains("Runtime.enable"), "{message}");
     assert!(message.contains("id 1"), "{message}");
-    assert!(message.contains("Runtime disabled"), "{message}");
+    assert_eq!(
+        error.downcast_ref::<ProtocolFailure>().unwrap().code,
+        Some(-32000)
+    );
+}
+
+#[tokio::test]
+async fn evaluate_retries_only_a_definite_parameter_rejection() {
+    for (reply, expected_kind, fallback) in [
+        (
+            json!({"error":{"code":-32602,"message":"unsupported flag"}}),
+            None,
+            true,
+        ),
+        (
+            json!({"error":{"code":-32601,"message":"missing"}}),
+            Some(FailureKind::UnsupportedMethod),
+            false,
+        ),
+        (
+            json!({"error":{"code":-32000,"message":"Cannot find context with specified id"}}),
+            Some(FailureKind::ContextLost),
+            false,
+        ),
+        (
+            json!({"result":{"exceptionDetails":{"text":"private token"}}}),
+            Some(FailureKind::ScriptException),
+            false,
+        ),
+    ] {
+        let (url, done) = spawn_cdp_server(move |mut socket| async move {
+            let command = recv_json(&mut socket).await;
+            assert_eq!(command["method"], "Runtime.evaluate");
+            let mut reply = reply;
+            reply["id"] = command["id"].clone();
+            send_json(&mut socket, reply).await;
+            if fallback {
+                let retry = recv_json(&mut socket).await;
+                assert_ne!(retry["id"], command["id"]);
+                assert!(retry["params"].get("allowUnsafeEvalBlockedByCSP").is_none());
+                assert_eq!(
+                    retry["params"]["expression"],
+                    command["params"]["expression"]
+                );
+                send_json(
+                    &mut socket,
+                    json!({"id":retry["id"],"result":{"result":{"value":true}}}),
+                )
+                .await;
+            }
+            assert!(matches!(
+                socket.next().await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+        })
+        .await;
+        let result = bridge::evaluate_script(&url, "businessOperation()").await;
+        match expected_kind {
+            Some(kind) => assert_eq!(
+                result
+                    .unwrap_err()
+                    .downcast_ref::<ProtocolFailure>()
+                    .unwrap()
+                    .kind,
+                kind
+            ),
+            None => assert_eq!(result.unwrap()["result"]["result"]["value"], true),
+        }
+        tokio::time::timeout(Duration::from_secs(2), done)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn evaluate_timeout_and_disconnect_never_replay_the_operation() {
+    for disconnect in [false, true] {
+        let (url, done) = spawn_cdp_server(move |mut socket| async move {
+            let command = recv_json(&mut socket).await;
+            assert_eq!(command["method"], "Runtime.evaluate");
+            if disconnect {
+                socket.close(None).await.unwrap();
+            }
+            assert!(matches!(
+                socket.next().await,
+                None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+            ));
+        })
+        .await;
+        let error = bridge::evaluate_script_with_await_promise_timeout(
+            &url,
+            "businessOperation()",
+            true,
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ProtocolFailure>().unwrap().kind,
+            if disconnect {
+                FailureKind::Closed
+            } else {
+                FailureKind::Timeout
+            }
+        );
+        tokio::time::timeout(Duration::from_secs(2), done)
+            .await
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn bridge_negotiates_optional_capabilities_once_per_session() {
+    let (url, done) = spawn_cdp_server(|mut socket| async move {
+        let mut rejected_flag = false;
+        let mut evaluations = 0;
+        loop {
+            let command = recv_json(&mut socket).await;
+            let id = command["id"].clone();
+            let response = if command["method"] == "Runtime.removeBinding" {
+                json!({"id":id,"error":{"code":-32601,"message":"not supported"}})
+            } else if command["method"] == "Runtime.evaluate" {
+                evaluations += 1;
+                if !rejected_flag {
+                    assert_eq!(command["params"]["allowUnsafeEvalBlockedByCSP"], true);
+                    rejected_flag = true;
+                    json!({"id":id,"error":{"code":-32602,"message":"not supported"}})
+                } else {
+                    assert!(
+                        command["params"]
+                            .get("allowUnsafeEvalBlockedByCSP")
+                            .is_none()
+                    );
+                    json!({"id":id,"result":{}})
+                }
+            } else {
+                json!({"id":id,"result":{}})
+            };
+            send_json(&mut socket, response).await;
+            if evaluations == 3 {
+                break;
+            }
+        }
+        assert!(matches!(
+            socket.next().await,
+            None | Some(Err(_)) | Some(Ok(Message::Close(_)))
+        ));
+    })
+    .await;
+    let pump = bridge::install_bridge(
+        &url,
+        BRIDGE_BINDING_NAME,
+        noop_handler(),
+        &["window.initialized = true".into()],
+    )
+    .await
+    .unwrap();
+    pump.close().await;
+    tokio::time::timeout(Duration::from_secs(2), done)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]

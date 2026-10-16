@@ -1437,7 +1437,7 @@ fn spawn_injection_watchdog(
                         error_message.clone(),
                         error_log::FailureMetadata {
                             stage: Some("runtime.renderer_reinjection".to_string()),
-                            recoverable: Some(true),
+                            recoverable: Some(error.retryable()),
                         },
                         serde_json::json!({
                             "debugPort": debug_port,
@@ -1448,6 +1448,9 @@ fn spawn_injection_watchdog(
                     *watchdog_statuses.write().await = watchdog_scripts
                         .statuses_with_error(format!("脚本重新注入失败：{error_message}"));
                     eprintln!("Codey CDP bridge 恢复失败：{error_message}");
+                    if !error.retryable() {
+                        break 'watchdog;
+                    }
                     failure_counters = InjectionFailureCounters::after_failed_reinjection();
                 }
             }
