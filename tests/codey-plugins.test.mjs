@@ -58,13 +58,14 @@ test("deep configuration validation avoids recursive traversal", () => {
 
 test("plugin package import uses a preview confirmation dialog", async () => {
   const { readFile } = await import("node:fs/promises");
-  const [section, dialog] = await Promise.all([
-    readFile(new URL("../src/CodeyPluginsSection.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../src/PluginImportDialog.tsx", import.meta.url), "utf8"),
+  const [section, dialog, requests] = await Promise.all([
+    readFile(new URL("../src/features/codey-plugins/CodeyPluginsSection.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/features/codey-plugins/PluginImportDialog.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/features/codey-plugins/requests.ts", import.meta.url), "utf8"),
   ]);
   assert.match(section, /PluginImportDialog/);
-  assert.match(section, /select_codey_plugin_package/);
-  assert.match(section, /install_codey_plugin/);
+  assert.match(requests, /select_codey_plugin_package/);
+  assert.match(requests, /install_codey_plugin/);
   assert.doesNotMatch(section, /本地路径导入/);
   assert.doesNotMatch(section, /收起路径导入/);
   assert.doesNotMatch(section, /填写本地路径导入/);
@@ -77,15 +78,16 @@ test("plugin package import uses a preview confirmation dialog", async () => {
 
 test("plugin cards can open the plugin directory in a file manager", async () => {
   const { readFile } = await import("node:fs/promises");
-  const [section, api] = await Promise.all([
-    readFile(new URL("../src/CodeyPluginsSection.tsx", import.meta.url), "utf8"),
+  const [section, api, requests] = await Promise.all([
+    readFile(new URL("../src/features/codey-plugins/CodeyPluginsSection.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/api.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/features/codey-plugins/requests.ts", import.meta.url), "utf8"),
   ]);
   assert.match(section, /IconFolderOpen/);
-  assert.match(section, /open_codey_plugin_directory/);
+  assert.match(section, /openDirectory\(plugin\)/);
   assert.match(section, /在文件管理器中打开插件目录/);
-  assert.match(section, /pluginId: plugin\.id/);
-  assert.doesNotMatch(section, /open_codey_plugin_directory[\s\S]{0,200}pluginDir/);
+  assert.match(requests, /"open_codey_plugin_directory", \{ pluginId \}/);
+  assert.doesNotMatch(requests, /open_codey_plugin_directory[\s\S]{0,200}pluginDir/);
   assert.match(api, /"open_codey_plugin_directory"/);
 });
 

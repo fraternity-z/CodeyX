@@ -1,19 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
-import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
-const pluginHelpers = await loadTypeScriptModule(new URL("../src/codeyPlugins.ts", import.meta.url));
-const documentHelpers = {};
-const documentSource = await readFile(new URL("../src/pluginConfigDocument.ts", import.meta.url), "utf8");
-new Function("require", "exports", ts.transpileModule(documentSource, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
-}).outputText)(name => { assert.equal(name, "./codeyPlugins"); return pluginHelpers; }, documentHelpers);
-
-const source = await readFile(new URL("../src/PluginConfigDialog.tsx", import.meta.url), "utf8");
-const compiled = ts.transpileModule(source, {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText;
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 const plugin = () => ({
   id: "demo", name: "Demo", version: "1", enabled: true, status: "running",
   capabilities: [],
@@ -38,6 +25,13 @@ function dialogHarness(initial) {
       const index = cursor++;
       return current.hooks[index] ??= { current: value };
     },
+    useMemo(factory, deps) {
+      const index = cursor++, previous = current.hooks[index];
+      if (!previous || !deps.every((value, i) => Object.is(value, previous.deps[i]))) current.hooks[index] = { deps, value: factory() };
+      return current.hooks[index].value;
+    },
+    useCallback(callback, deps) { return react.useMemo(() => callback, deps); },
+    useLayoutEffect(effect, deps) { react.useEffect(effect, deps); },
     useEffect(effect, deps) {
       const fiber = current, index = cursor++, previous = fiber.hooks[index];
       if (previous && deps.every((value, i) => Object.is(value, previous.deps[i]))) return;
@@ -50,24 +44,18 @@ function dialogHarness(initial) {
   const jsx = (type, props, key) => ({ type, props, key });
   const modules = {
     react,
-    "./codeyPlugins": pluginHelpers,
-    "./pluginConfigDocument": documentHelpers,
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "fragment" },
-    "./api": { invoke(command, args) {
+    "../../api": { invoke(command, args) {
       return new Promise((resolve, reject) => calls.push({ command, args, resolve, reject }));
     } },
-    "./appUtils": { errorText: error => error.message },
+    "../../appUtils": { errorText: error => error.message },
     "@tabler/icons-react": new Proxy({}, { get: () => () => null }),
-    "./components/ui": Object.fromEntries([
+    "../../components/ui": Object.fromEntries([
       "Badge", "Button", "Dialog", "DialogContent", "DialogDescription", "DialogHeader", "DialogTitle",
       "Drawer", "DrawerBody", "DrawerContent", "DrawerDescription", "DrawerFooter", "DrawerHeader", "DrawerTitle",
     ].map(name => [name, name])),
   };
-  const exports = {};
-  new Function("require", "exports", compiled)(name => {
-    assert.ok(name in modules, `unexpected import: ${name}`);
-    return modules[name];
-  }, exports);
+  const { exports } = createModuleGraph(new URL("../src/features/codey-plugins/PluginConfigDialog.tsx", import.meta.url), { stubs: modules });
   const cleanup = fiber => {
     fiber.mounted = false;
     fiber.hooks.forEach(hook => hook?.cleanup?.());

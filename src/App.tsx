@@ -20,7 +20,7 @@ import { FeaturePolicyCard, SubagentPolicyCard } from "./FeaturePolicyCard";
 import { ModelSection } from "./ModelSection";
 import { UsageAnalysisPanel } from "./features/usage-analysis";
 import { OperationsPanel } from "./OperationsPanel";
-import { CodeyPluginsSection } from "./CodeyPluginsSection";
+import { CodeyPluginsSection } from "./features/codey-plugins";
 import { BuiltinToolsPage } from "./features/builtin-tools";
 import { CodexExtensionsPage, type ExtensionTransport } from "./features/codex-extensions";
 import { DiagnosticCleanupToast, useRuntimeMaintenanceController } from "./features/runtime-maintenance";
@@ -984,7 +984,7 @@ export function App({
             <BuiltinToolsPage active={active} config={config} fastContextToolsStatus={fastContextToolsStatus}
               isBusy={isBusy} onConfigChange={handleConfigChange} />
           ),
-          plugins: <CodeyPluginsSection container={popupContainer} />,
+          plugins: (active) => <CodeyPluginsSection active={active && (!embedded || modalVisible)} container={popupContainer} />,
           mcp: (active) => (
             <CodexExtensionsPage kind="mcp" active={active} request={extensionRequest} container={popupContainer} />
           ),

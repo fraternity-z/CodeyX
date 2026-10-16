@@ -1,15 +1,7 @@
 import assert from "node:assert/strict";
 import { File } from "node:buffer";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
-import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
-
-const pluginHelpers = await loadTypeScriptModule(new URL("../src/codeyPlugins.ts", import.meta.url));
-const importHelpers = await loadTypeScriptModule(new URL("../src/pluginPackageImport.ts", import.meta.url));
-const sources = await Promise.all(["CodeyPluginsSection", "PluginImportDialog"].map(async name => [name, ts.transpileModule(await readFile(new URL(`../src/${name}.tsx`, import.meta.url), "utf8"), {
-  compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
-}).outputText]));
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 const flush = () => new Promise(resolve => setImmediate(resolve));
 const hash = "a".repeat(64);
 const preview = (version = "1.0.0") => ({ uploadId: "upload-demo", path: "staged.codey-plugin", sha256: hash, manifest: { id: "demo", name: "Demo", version, capabilities: [] } });
@@ -47,6 +39,7 @@ function flowHarness(context) {
       return current.hooks[index].value;
     },
     useCallback(callback, deps) { return react.useMemo(() => callback, deps); },
+    useLayoutEffect(effect, deps) { react.useEffect(effect, deps); },
     useEffect(effect, deps) {
       const fiber = current, index = cursor++, previous = fiber.hooks[index];
       if (previous && same(previous.deps, deps)) return;
@@ -62,26 +55,17 @@ function flowHarness(context) {
     "react/jsx-runtime": { jsx, jsxs: jsx, Fragment: "fragment" },
     "@tabler/icons-react": new Proxy({}, { get: (_, name) => String(name) }),
     "@heroui/react": { cn: (...values) => values.filter(Boolean).join(" "), toast: { success: message => notices.push(message), warning: message => notices.push(message) } },
-    "./api": { invoke(command, args = {}) {
+    "../../api": { invoke(command, args = {}) {
       if (args.discardUpload) { calls.push({ command, args }); return Promise.resolve({ status: "ok" }); }
       return new Promise((resolve, reject) => calls.push({ command, args, resolve, reject }));
     } },
-    "./appUtils": { errorText: cause => cause.message },
-    "./components/ui": ui,
-    "./codeyPlugins": pluginHelpers,
-    "./pluginPackageImport": importHelpers,
+    "../../appUtils": { errorText: cause => cause.message },
+    "../../components/ui": ui,
     "./PluginConfigDialog": { PluginConfigDialog: "PluginConfigDialog" },
-    "./SettingsPageHeader": { SettingsPageHeader: props => jsx("header", { children: props.actions }) },
-    "./formatters": { formatBytes: value => String(value) },
+    "../../SettingsPageHeader": { SettingsPageHeader: props => jsx("header", { children: props.actions }) },
+    "../../formatters": { formatBytes: value => String(value) },
   };
-  for (const [name, source] of [...sources].reverse()) {
-    const exports = {};
-    new Function("require", "exports", source)(specifier => {
-      assert.ok(specifier in modules, `unexpected import: ${specifier}`);
-      return modules[specifier];
-    }, exports);
-    modules[`./${name}`] = exports;
-  }
+  const { exports } = createModuleGraph(new URL("../src/features/codey-plugins/CodeyPluginsSection.tsx", import.meta.url), { stubs: modules });
   const cleanup = fiber => { fiber.hooks.forEach(hook => hook?.cleanup?.()); fiber.mounted = false; };
   function render() {
     const visited = new Set();
@@ -98,7 +82,7 @@ function flowHarness(context) {
       }
       return { ...node, props: { ...node.props, children: visit(node.props?.children, `${address}.children`) } };
     }
-    tree = visit(jsx(modules["./CodeyPluginsSection"].CodeyPluginsSection, {}), "root");
+    tree = visit(jsx(exports.CodeyPluginsSection, {}), "root");
     for (const [address, fiber] of fibers) if (!visited.has(address)) { cleanup(fiber); fibers.delete(address); }
     for (const fiber of fibers.values()) for (const effect of fiber.effects.splice(0)) effect();
     return tree;
