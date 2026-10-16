@@ -126,6 +126,7 @@ function loadInjection({
   codexSignalDispatcher = null,
   discoveredAppServerManager = null,
   localAppServerManager = null,
+  nativeAppServerScope = null,
   selectedTurnIds = [],
   hiddenTurnIds = [],
   sessionElements = {},
@@ -185,6 +186,12 @@ function loadInjection({
         getForHostId(hostId) { return this.scope.get("manager", hostId); }
       };
     }
+  }
+  if (nativeAppServerScope) {
+    documentBody.__reactFiber$native = {
+      memoizedState: { scope: nativeAppServerScope },
+      return: null,
+    };
   }
   const document = {
     documentElement,
@@ -467,6 +474,92 @@ test("native model routing discovers the local request client without sending a 
   const manager = { requestClient: client, sendRequest() { throw Error("must not send"); } };
   const runtime = loadInjection({ localAppServerManager: manager, initialSessionId: "" });
   assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), client);
+  assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
+});
+
+function cachedManagerScope(managers) {
+  const values = new Map(managers.map((manager) => [
+    { kind: "signal-family" },
+    new Map([["local", manager]]),
+  ]));
+  const reads = [];
+  return {
+    node: { familyBindings: values },
+    chain: new Map(),
+    query: null,
+    reads,
+    get(family, hostId) {
+      reads.push(hostId);
+      assert.ok(values.get(family)?.has(hostId), "discovery must not instantiate a signal");
+      return values.get(family).get(hostId);
+    },
+    set() { assert.fail("discovery must not write native state"); },
+    watch() { assert.fail("discovery must not subscribe"); },
+    when() { assert.fail("discovery must not wait on native state"); },
+  };
+}
+
+function nativeRoutingManager(hostId = "local") {
+  return {
+    requestClient: {
+      hostId,
+      enqueueRequest() { assert.fail("discovery must not send a request"); },
+      createRequest() { assert.fail("discovery must not create a request"); },
+      onResult() {},
+    },
+    getHostId() { return hostId; },
+    sendRequest() { assert.fail("discovery must not send a request"); },
+  };
+}
+
+test("native model routing finds cached local state when the registry class is no longer exported", async () => {
+  const manager = nativeRoutingManager();
+  const scope = cachedManagerScope([manager, manager]);
+  const parent = scope.node;
+  scope.chain.set("parent", parent);
+  scope.chain.set("same-parent", parent);
+  scope.node = { familyBindings: new Map() };
+  parent.familyBindings.set({ kind: "signal-family" }, new Map([["remote", nativeRoutingManager("remote")]]));
+  parent.familyBindings.set({ kind: "signal-family" }, new Map());
+  parent.familyBindings.set({ kind: "query-family" }, new Map([["local", manager]]));
+  const runtime = loadInjection({ nativeAppServerScope: scope, initialSessionId: "" });
+  runtime.window.__codeyImportCodexAsset = () => assert.fail("cached native state needs no module import");
+
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), manager.requestClient);
+  assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
+  assert.deepEqual(scope.reads, ["local", "local"]);
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), manager.requestClient);
+  assert.equal(scope.reads.length, 2, "the verified manager is reused");
+});
+
+for (const incompatible of ["remote", "incomplete", "ambiguous", "rpc"]) {
+  test(`cached native state rejects ${incompatible} request clients`, async () => {
+    const manager = nativeRoutingManager(incompatible === "remote" ? "remote" : "local");
+    let rpcReads = 0;
+    if (incompatible === "incomplete") delete manager.requestClient.onResult;
+    if (incompatible === "rpc") {
+      manager.requestClient = new Proxy({}, {
+        get() { rpcReads += 1; return () => {}; },
+      });
+    }
+    const scope = cachedManagerScope(incompatible === "ambiguous"
+      ? [manager, nativeRoutingManager()] : [manager]);
+    const runtime = loadInjection({ nativeAppServerScope: scope, initialSessionId: "" });
+
+    await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+    assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "unavailable");
+    assert.equal(rpcReads, 0, "discovery must not invoke an RPC proxy");
+  });
+}
+
+test("native model routing retries when the local manager is cached after the first probe", async () => {
+  const scope = cachedManagerScope([]);
+  const runtime = loadInjection({ nativeAppServerScope: scope, initialSessionId: "" });
+  await assert.rejects(runtime.window.__codeyLoadCodexRequestClient(), /模型请求校验/);
+
+  const manager = nativeRoutingManager();
+  scope.node.familyBindings.set({ kind: "signal-family" }, new Map([["local", manager]]));
+  assert.equal(await runtime.window.__codeyLoadCodexRequestClient(), manager.requestClient);
   assert.equal(runtime.window.__codeyPageCapabilities.modelRouting.status, "available");
 });
 

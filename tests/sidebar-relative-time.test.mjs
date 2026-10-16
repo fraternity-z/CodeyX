@@ -1273,6 +1273,11 @@ test("accepts only a unique semantic AppServerManager resolver", () => {
     if (rpc == null) throw new Error("AppServerManager RPC is not connected");
     return rpc.forHost(hostId);
   };
+  const current = function appServerManagerForHost(scope, hostId) {
+    const rpc = scope.get(AppServerManagerRpc);
+    if (rpc == null) throw new Error(`AppServerManager RPC is unavailable for hostId: ${hostId}`);
+    return rpc.forHost(hostId);
+  };
 
   assert.equal(
     window.__codeyAppServerManagerResolverFromModule({ arbitrary: direct }),
@@ -1280,6 +1285,14 @@ test("accepts only a unique semantic AppServerManager resolver", () => {
   );
   assert.equal(
     window.__codeyAppServerManagerResolverFromModule({ direct, second }),
+    null,
+  );
+  assert.equal(
+    window.__codeyAppServerManagerResolverFromModule({ arbitrary: current }),
+    current,
+  );
+  assert.equal(
+    window.__codeyAppServerManagerResolverFromModule({ direct, current }),
     null,
   );
 });

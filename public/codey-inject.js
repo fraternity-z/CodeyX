@@ -1981,7 +1981,7 @@
       return (
         candidate.length >= 2
         && candidate.length <= 3
-        && /AppServerManager RPC is not connected/.test(source)
+        && /AppServerManager RPC is (?:not connected|unavailable for hostId:)/.test(source)
         && /\.get\(/.test(source)
         && /\.forHost\(/.test(source)
       );
@@ -2120,6 +2120,34 @@
   };
   window.__codeyAppServerManagerRegistryResolverFromModule = appServerManagerRegistryResolverFromModule;
 
+  const nativeAppServerManagerFromScope = (scope, hostId) => {
+    if (hostId !== "local" || typeof scope?.get !== "function") return null;
+    // Newer Codex no longer exports the registry class. Its local manager is
+    // still held in a signal family; read only cached members, without mounting
+    // unrelated state or treating an RPC proxy as a concrete request client.
+    const nodes = new Set([scope.node, ...scope.chain?.values?.() || []]);
+    const matches = new Set();
+    for (const node of nodes) {
+      for (const [family, bindings] of node?.familyBindings?.entries?.() || []) {
+        if (family?.kind !== "signal-family" || !bindings?.has?.(hostId)) continue;
+        try {
+          const manager = scope.get(family, hostId);
+          const client = Object.getOwnPropertyDescriptor(manager ?? {}, "requestClient")?.value;
+          const getHostId = declaredMethod(manager, "getHostId");
+          if (
+            Object.getOwnPropertyDescriptor(client ?? {}, "hostId")?.value === hostId
+            && ["enqueueRequest", "createRequest", "onResult"].every((name) => declaredMethod(client, name))
+            && declaredMethod(manager, "sendRequest")
+            && getHostId?.call(manager) === hostId
+          ) matches.add(manager);
+        } catch {
+          continue;
+        }
+      }
+    }
+    return matches.size === 1 ? [...matches][0] : null;
+  };
+
   const messageDeletionMethods = {
     async prepare(conversationId) {
       const conversation = this.getConversation(conversationId);
@@ -2249,6 +2277,15 @@
     if (sessionControllerLooksUsable(window.__codeyCodexSessionController, feature)) {
       return window.__codeyCodexSessionController;
     }
+    const requiresNativeManager = feature === "deleteMessages" || feature === "modelRouting";
+    if (requiresNativeManager) {
+      const manager = appServerManagerFromReact(nativeAppServerManagerFromScope);
+      const controller = manager ? managerSessionController(manager) : null;
+      if (sessionControllerLooksUsable(controller, feature)) {
+        window.__codeyCodexSessionController = controller;
+        return controller;
+      }
+    }
     let fallbackDispatcher = typeof window.__codeyCodexSignalDispatcher === "function"
       ? window.__codeyCodexSignalDispatcher
       : null;
@@ -2273,7 +2310,7 @@
         // 旧安装的迟到探测不能替换新安装已确认的接口。
         if (disposed) throw unavailableCapability(feature);
         const resolvers = [
-          feature === "deleteMessages" || feature === "modelRouting" ? appServerManagerRegistryResolverFromModule(module) : null,
+          requiresNativeManager ? appServerManagerRegistryResolverFromModule(module) : null,
           appServerManagerResolverFromModule(module),
         ].filter(Boolean);
         for (const resolver of resolvers) {
