@@ -1,0 +1,23 @@
+{
+  "source": "tests/codex-client-smoke.playwright.js",
+  "versionSource": "runtime_status.codexAppVersion",
+  "sampleKind": "observed-response-keys",
+  "report": {
+    "codexAppVersion": "26.1013.31256",
+    "platform": "windows",
+    "adapterVersion": 1,
+    "requestGate": true,
+    "modelListKeys": ["data", "nextCursor"],
+    "rateLimitsKeys": [
+      "accountId",
+      "ordinaryUsageAllowed",
+      "rateLimitResetCredits",
+      "rateLimitUpsell",
+      "rateLimits",
+      "rateLimitsByLimitId"
+    ],
+    "remoteDefaultsKeys": ["effort", "model", "serviceTier"],
+    "localClient": true,
+    "presentation": "not-reported"
+  }
+}

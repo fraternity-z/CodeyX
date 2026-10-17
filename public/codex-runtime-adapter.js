@@ -1,7 +1,7 @@
 // Codex's private desktop interfaces live behind this adapter. Installing it
 // does not mount controls, observe the DOM, or start background polling.
 (() => {
-  const version = 1;
+  const version = 2;
   const previous = window.__codeyNativeRuntime;
   if (previous?.version === version && previous.isActive?.()) return;
   previous?.dispose?.();
@@ -402,8 +402,8 @@
       message: available ? "" : capabilityMessage(feature),
     };
   };
-  const unavailableCapability = (feature) => {
-    publishCapability(feature, false);
+  const unavailableCapability = (feature, publish = true) => {
+    if (publish) publishCapability(feature, false);
     const error = new Error(capabilityMessage(feature));
     error.code = "codey_capability_unavailable";
     return error;
@@ -414,8 +414,8 @@
     && typeof controller.reconcileCompletedConversation === "function"
   );
 
-  const discoverCodexSessionController = async (feature) => {
-    if (disposed) throw unavailableCapability(feature);
+  const discoverCodexSessionController = async (feature, assertCurrent) => {
+    assertCurrent();
     const requireCompletionReconcile = feature === "reconcile";
     // Rebuild wrappers so methods added by a late renderer patch become usable.
     if (window.__codeyCodexSessionController?.manager) {
@@ -447,7 +447,7 @@
     );
     const urls = (await discoverCodexAppAssetUrls())
       .sort((left, right) => managerAssetPriority(right) - managerAssetPriority(left));
-    if (disposed) throw unavailableCapability(feature);
+    assertCurrent();
     for (const url of urls) {
       const namedSignalAsset = url.includes("app-server-manager-signals-");
       try {
@@ -455,7 +455,7 @@
           ? await window.__codeyImportCodexAsset(url)
           : await import(url);
         // 旧安装的迟到探测不能替换新安装已确认的接口。
-        if (disposed) throw unavailableCapability(feature);
+        assertCurrent();
         const resolvers = [
           requiresNativeManager ? appServerManagerRegistryResolverFromModule(module) : null,
           appServerManagerResolverFromModule(module),
@@ -471,8 +471,8 @@
           window.__codeyCodexSessionController ||= controller;
         }
         fallbackDispatcher ||= signalDispatcherFromModule(module, namedSignalAsset);
-      } catch (error) {
-        if (disposed) throw error;
+      } catch {
+        assertCurrent();
         continue;
       }
     }
@@ -501,18 +501,26 @@
     // modelRouting 的调用方只有请求入口校验，重试节奏由宿主注入流程控制；
     // 这里套用指数退避会让一次早期探测失败冻结后续所有注入尝试。
     if (feature !== "modelRouting" && Date.now() < state.retryAt) throw unavailableCapability(feature);
-    const discover = () => discoverCodexSessionController(feature);
+    let active = true;
+    const isCurrent = () => active && !disposed && capabilityProbes.get(feature) === state;
+    const assertCurrent = () => {
+      if (!isCurrent()) throw unavailableCapability(feature, false);
+    };
+    const discover = () => discoverCodexSessionController(feature, assertCurrent);
     // MCP 刷新由宿主 CDP 预算约束；5 秒发现上限会让慢机或尚未 hydrate 的
     // 页面在导入/启停后误报失败，只能重启 Codex。
     state.pending = (feature === "mcpReload"
       ? Promise.resolve().then(discover)
       : waitForNativeSessionOperation(discover)).then((controller) => {
-      if (disposed) throw unavailableCapability(feature);
+      assertCurrent();
       state.failures = 0;
       state.retryAt = 0;
       publishCapability(feature, true);
       return controller;
     }, (error) => {
+      const current = isCurrent();
+      active = false;
+      if (!current) throw unavailableCapability(feature, false);
       state.failures += 1;
       state.retryAt = Date.now() + Math.min(30_000, 1_000 * 2 ** Math.min(state.failures - 1, 5));
       const capabilityError = unavailableCapability(feature);
@@ -523,7 +531,7 @@
         capabilityError.message = `${capabilityError.message}（${reason}）`;
       }
       throw capabilityError;
-    }).finally(() => { state.pending = null; });
+    }).finally(() => { active = false; state.pending = null; });
     return state.pending;
   };
   const loadRequestClient = async () => {
@@ -561,10 +569,7 @@
     const clients = window.__codeyAppServerRequestClients;
     if (!clients || typeof clients.get !== "function") return null;
     const local = clients.get("local");
-    if (local && typeof local.sendRequest === "function") return local;
-    if (typeof clients.values !== "function") return null;
-    const all = [...clients.values()].filter((client) => typeof client?.sendRequest === "function");
-    return all.length === 1 ? all[0] : null;
+    return local && typeof local.sendRequest === "function" ? local : null;
   };
 
   const reloadMcpServers = async () => {
@@ -577,13 +582,9 @@
       return { ok: true };
     };
     const client = appServerRequestClient();
-    if (client) {
-      try {
-        return await sendReload(client);
-      } catch (error) {
-        if (/unknown method/i.test(String(error?.message || error))) throw error;
-      }
-    }
+    // The desktop owns this connection. Once submitted, a lost acknowledgement
+    // must not trigger another submission through a different manager/window.
+    if (client) return sendReload(client);
     const controller = await loadCodexSessionController({ feature: "mcpReload" });
     if (disposed) throw unavailableCapability("mcpReload");
     try {

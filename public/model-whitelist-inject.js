@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current CodeyX channel.
 (() => {
-  const patchVersion = "67";
+  const patchVersion = "68";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -86,6 +86,16 @@
   let catalogLoadRequest = null;
   let catalogRevision = 0;
   let disposed = false;
+  let presentationFailed = false;
+  const withModelPresentation = (operation) => {
+    if (disposed || presentationFailed) return;
+    try { return operation(); }
+    catch {
+      presentationFailed = true;
+      disposeModelPresentation();
+      console.warn("[CodeyX] model picker enhancements unavailable");
+    }
+  };
   const fullReactDiscoveryIntervalMs = 10_000;
   const maxTrackedModelListRequests = 256;
   const maxKnownModelQueryClients = 8;
@@ -1358,10 +1368,10 @@
 
   const scheduleGroupedModelMenuEnhancement = () => {
     if (nativeSelectionOnly) return;
-    if (disposed || groupedMenuTimer || !catalog.loaded) return;
+    if (disposed || presentationFailed || groupedMenuTimer || !catalog.loaded) return;
     groupedMenuTimer = window.setTimeout(() => {
       groupedMenuTimer = 0;
-      enhanceGroupedModelMenus();
+      withModelPresentation(enhanceGroupedModelMenus);
     }, 0);
   };
 
@@ -1424,7 +1434,7 @@
     if (!subagentModelLabels.has(element)) {
       const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
       const observer = typeof MutationObserver === "function"
-        ? new MutationObserver(() => updateSubagentModelLabel(element))
+        ? new MutationObserver(() => withModelPresentation(() => updateSubagentModelLabel(element)))
         : null;
       subagentModelLabels.set(element, { observer });
       // CharacterData stays confined to the title, never conversation text.
@@ -1535,7 +1545,7 @@
       if (!isPicker && !pickerTextNodes(element).some((node) => pickerModelText(node.nodeValue || ""))) return;
       const MutationObserver = window.MutationObserver || globalThis.MutationObserver;
       const observer = typeof MutationObserver === "function"
-        ? new MutationObserver(() => updateModelPickerTrigger(element))
+        ? new MutationObserver(() => withModelPresentation(() => updateModelPickerTrigger(element)))
         : null;
       modelPickerTriggers.set(element, { observer, nodes: new Map() });
       observer?.observe(element, { childList: true, characterData: true, subtree: true });
@@ -1632,7 +1642,7 @@
     }
   };
   const handleGroupedMenuMutations = (mutations) =>
-    codeyTimed("model-whitelist.groupedMenuMutations", mutations?.length ?? 0, () => handleGroupedMenuMutationsImpl(mutations));
+    withModelPresentation(() => codeyTimed("model-whitelist.groupedMenuMutations", mutations?.length ?? 0, () => handleGroupedMenuMutationsImpl(mutations)));
   const handleGroupedMenuMutationsImpl = (mutations) => {
     if (disposed) return;
     const discoveredMenus = [];
@@ -2012,9 +2022,11 @@
       statsigClients: statsigClients().length,
       notifiedClients,
     }, revision);
-    scheduleGroupedModelMenuEnhancement();
-    refreshSubagentModelLabels();
-    refreshModelPickerTriggers();
+    withModelPresentation(() => {
+      scheduleGroupedModelMenuEnhancement();
+      refreshSubagentModelLabels();
+      refreshModelPickerTriggers();
+    });
     return true;
   };
 
@@ -3051,7 +3063,7 @@
   // and focusin is far more often than that safety net needs.
   let lastInteractionApply = 0;
   const interactionApplyIntervalMs = 2_000;
-  const handleInteraction = (event) => {
+  const handleInteraction = (event) => withModelPresentation(() => {
     const pickerInteraction = Boolean(
       event?.target?.closest?.(`${groupedMenuSelector}, [aria-haspopup]`),
     );
@@ -3078,14 +3090,31 @@
       discoverQueryClients: true,
       invalidate: false,
     });
-  };
+  });
   const handleFocus = () => {
     void loadModelCatalog();
   };
-  interactionEvents.forEach((eventName) => {
-    document.addEventListener(eventName, handleInteraction, true);
-  });
-  installGroupedModelMenuObserver();
+  const disposeModelPresentation = () => {
+    const cleanups = [
+      restoreNativeFastPermissions,
+      () => window.clearTimeout(groupedMenuTimer),
+      () => window.clearTimeout(providerMismatchNoticeTimer),
+      () => document.getElementById?.("codey-provider-mismatch-notice")?.remove?.(),
+      () => groupedMenuObserver?.disconnect?.(),
+      ...[...groupedMenuTextObservers.values()].map(observer => () => observer.disconnect?.()),
+      ...[...subagentModelLabels.keys()].map(element => () => stopSubagentModelLabel(element)),
+      ...[...modelPickerTriggers.keys()].map(element => () => stopModelPickerTrigger(element)),
+      ...interactionEvents.map(name => () => document.removeEventListener(name, handleInteraction, true)),
+    ];
+    // A changed DOM or one broken observer must not prevent other cleanup.
+    for (const cleanup of cleanups) { try { cleanup(); } catch {} }
+    groupedMenuTimer = 0;
+    providerMismatchNoticeTimer = 0;
+    groupedMenuObserver = null;
+    groupedMenuTextObservers.clear();
+    subagentModelLabels.clear();
+    modelPickerTriggers.clear();
+  };
   restoreThreadRoutes();
   if (!nativeSelectionOnly) restoreThreadRoutes(threadRequestedRoutes, persistedRequestedRoutesKey);
   restoreDefaultModelHistory();
@@ -3097,73 +3126,25 @@
     deliveryState.responsePatchInstalled = true;
   }
 
-  let requestGatePending = null;
-  const requestGateRestorers = [];
-  const installRequestClientGate = (client) => {
-    if (disposed) throw new Error("模型请求校验已重新加载");
-    if (!client || client.hostId !== "local") throw new Error("未找到本机模型请求入口");
-    const prototype = Object.getPrototypeOf(client);
-    const methods = ["enqueueRequest", "createRequest", "onResult"];
-    const descriptors = methods.map((name) => Object.getOwnPropertyDescriptor(prototype, name));
-    if (descriptors.some((descriptor) => !descriptor?.writable || typeof descriptor.value !== "function")) {
-      throw new Error("当前客户端的模型请求入口不可校验");
-    }
-    const [enqueue, create, result] = descriptors.map((descriptor) => descriptor.value);
-    // Electron may already have the synchronous source gate. Its identity and
-    // response events remain authoritative; avoid wrapping it a second time.
-    if (Function.prototype.toString.call(enqueue).includes("__codeyModelWhitelistPatch")) return true;
-    const replacements = [
-      function (method, params, ...args) {
-        if (this.hostId !== "local" || disposed) return enqueue.call(this, method, params, ...args);
-        (window.__codeyAppServerRequestClients ||= new Map()).set(this.hostId, this);
-        const routed = rewrittenOutgoingMessage({ type: "mcp-request", request: { method, params } });
-        if (blockedProviderRequest(routed)) {
-          showBlockedProviderNotice(routed);
-          return Promise.reject(new Error("CodeyX blocked provider migration"));
-        }
-        return enqueue.call(this, routed.request.method, routed.request.params, ...args);
-      },
-      function (...args) {
-        const created = create.apply(this, args);
-        if (this.hostId === "local" && !disposed && created?.request) {
-          rememberOutgoingThreadRequest({ type: "mcp-request", request: created.request });
-          rememberOutgoingModelListRequest({ type: "mcp-request", request: created.request });
-        }
-        return created;
-      },
-      function (id, value, ...args) {
-        if (this.hostId === "local" && !disposed) {
-          const method = this.requestPromises?.get(id)?.method;
-          rememberThreadProvidersFromResponse(null, { id, result: value });
-          if (method === "model/list") value = patchedModelPayload(value).value;
-        }
-        return result.call(this, id, value, ...args);
-      },
-    ];
-    methods.forEach((name, index) => {
-      Object.defineProperty(prototype, name, { ...descriptors[index], value: replacements[index] });
-      requestGateRestorers.push(() => {
-        if (prototype[name] === replacements[index]) Object.defineProperty(prototype, name, descriptors[index]);
-      });
-    });
-    (window.__codeyAppServerRequestClients ||= new Map()).set(client.hostId, client);
-    return true;
-  };
-  const ensureRequestGate = () => {
-    if (disposed) return Promise.reject(new Error("模型请求校验已重新加载"));
-    if (nativeSelectionOnly || window.__codeyModelRequestSourceGateInstalled === true) return Promise.resolve(true);
-    if (requestGateRestorers.length) return Promise.resolve(true);
-    if (requestGatePending) return requestGatePending;
-    requestGatePending = Promise.resolve().then(async () => {
-      const knownClient = window.__codeyAppServerRequestClients?.get?.("local");
-      if (knownClient) return installRequestClientGate(knownClient);
-      if (typeof window.__codeyLoadCodexRequestClient !== "function") throw new Error("模型请求校验尚未就绪");
-      const client = await window.__codeyLoadCodexRequestClient();
-      if (disposed) throw new Error("模型请求校验已重新加载");
-      return installRequestClientGate(client);
-    }).finally(() => { requestGatePending = null; });
-    return requestGatePending;
-  };
+  const requestGate = window.__codeyCreateModelRequestGate({
+    nativeSelectionOnly,
+    rewriteRequest(method, params) {
+      const routed = rewrittenOutgoingMessage({ type: "mcp-request", request: { method, params } });
+      if (blockedProviderRequest(routed)) {
+        withModelPresentation(() => showBlockedProviderNotice(routed));
+        throw new Error("CodeyX blocked provider migration");
+      }
+      return routed.request;
+    },
+    trackRequest(request) {
+      rememberOutgoingThreadRequest({ type: "mcp-request", request });
+      rememberOutgoingModelListRequest({ type: "mcp-request", request });
+    },
+    rewriteResult(id, method, value) {
+      rememberThreadProvidersFromResponse(null, { id, result: value });
+      return method === "model/list" ? patchedModelPayload(value).value : value;
+    },
+  });
 
   const api = {
     version: patchVersion,
@@ -3171,7 +3152,7 @@
     apply: applyModelWhitelist,
     refresh: loadModelCatalog,
     setCatalog: setModelCatalog,
-    ensureRequestGate,
+    ensureRequestGate: requestGate.ensure,
     // The Codex renderer calls electronBridge before emitting its diagnostic
     // CustomEvent. The startup source gate invokes this synchronous hook at the
     // real transport boundary so thread/start receives modelProvider in time.
@@ -3189,8 +3170,9 @@
       return detail;
     },
     isBlockedOutgoingMessage: (detail) => Boolean(blockedProviderRequest(detail)),
-    notifyBlockedOutgoingMessage: showBlockedProviderNotice,
-    enhanceModelMenus: enhanceGroupedModelMenus,
+    notifyBlockedOutgoingMessage: detail => withModelPresentation(() => showBlockedProviderNotice(detail)),
+    enhanceModelMenus: () => withModelPresentation(enhanceGroupedModelMenus),
+    presentation: () => ({ status: presentationFailed ? "unavailable" : "available" }),
     presentModel: (modelName, current) => modelPresentation(modelName, current),
     delivery: () => ({ ...deliveryState }),
     snapshot: () => ({
@@ -3200,31 +3182,10 @@
     }),
     dispose() {
       disposed = true;
-      requestGateRestorers.reverse().forEach((restore) => restore());
-      requestGateRestorers.length = 0;
-      restoreNativeFastPermissions();
+      requestGate.dispose();
+      disposeModelPresentation();
       window.clearTimeout(refreshTimer);
       refreshTimer = 0;
-      window.clearTimeout(groupedMenuTimer);
-      groupedMenuTimer = 0;
-      window.clearTimeout(providerMismatchNoticeTimer);
-      providerMismatchNoticeTimer = 0;
-      document.getElementById?.("codey-provider-mismatch-notice")?.remove?.();
-      groupedMenuObserver?.disconnect?.();
-      groupedMenuObserver = null;
-      for (const observer of groupedMenuTextObservers.values()) {
-        observer.disconnect?.();
-      }
-      groupedMenuTextObservers.clear();
-      for (const element of subagentModelLabels.keys()) {
-        stopSubagentModelLabel(element);
-      }
-      for (const element of modelPickerTriggers.keys()) {
-        stopModelPickerTrigger(element);
-      }
-      interactionEvents.forEach((eventName) => {
-        document.removeEventListener(eventName, handleInteraction, true);
-      });
       window.removeEventListener?.("focus", handleFocus);
       window.removeEventListener?.(modelRequestEvent, handleModelRequest, true);
       window.removeEventListener?.(modelResponseEvent, handleModelResponse, true);
@@ -3245,5 +3206,9 @@
     },
   };
   window.__codeyModelWhitelistPatch = api;
+  withModelPresentation(() => {
+    interactionEvents.forEach(name => document.addEventListener(name, handleInteraction, true));
+    installGroupedModelMenuObserver();
+  });
   void loadModelCatalog();
 })();

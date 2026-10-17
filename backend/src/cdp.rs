@@ -34,8 +34,11 @@ const MCP_RELOAD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(20);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
 const CODEX_RUNTIME_ADAPTER_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/codex-runtime-adapter.js");
-const MODEL_WHITELIST_INJECT_SCRIPT: &str =
-    include_str!("../../dist-overlay/inject/model-whitelist-inject.js");
+const MODEL_WHITELIST_INJECT_SCRIPT: &str = concat!(
+    include_str!("../../dist-overlay/inject/model-request-gate.js"),
+    "\n",
+    include_str!("../../dist-overlay/inject/model-whitelist-inject.js"),
+);
 const RENDERER_INJECT_SCRIPT: &str = include_str!("../../dist-overlay/inject/renderer-inject.js");
 const CODEY_SESSION_TOOLS_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-inject.js");
 const PET_CONTROL_SHIELD_SCRIPT: &str =
@@ -1227,32 +1230,16 @@ pub async fn reload_mcp_servers(websocket_url: &str) -> Result<()> {
     let response = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
         websocket_url,
         r#"(async () => {
-  const pickClient = () => {
-    const clients = window.__codeyAppServerRequestClients;
-    if (!clients || typeof clients.get !== "function") return null;
-    const local = clients.get("local");
-    if (local && typeof local.sendRequest === "function") return local;
-    if (typeof clients.values !== "function") return null;
-    const all = [...clients.values()].filter((client) => typeof client?.sendRequest === "function");
-    return all.length === 1 ? all[0] : null;
-  };
   for (const delay of [0, 200, 500, 1000, 2000]) {
     if (delay > 0) {
       await new Promise((resolve) => window.setTimeout(resolve, delay));
     }
+    if (typeof window.__codeyReloadMcpServers !== "function") continue;
     try {
-      const client = pickClient();
-      if (client) {
-        await client.sendRequest("config/mcpServer/reload", {});
-        return true;
-      }
-      if (typeof window.__codeyReloadMcpServers === "function") {
-        const result = await window.__codeyReloadMcpServers();
-        if (result?.ok === true) return true;
-      }
-    } catch (error) {
-      const message = String(error?.message || error);
-      if (/unknown method/i.test(message)) return false;
+      return (await window.__codeyReloadMcpServers())?.ok === true;
+    } catch {
+      // Retry readiness only; an attempted operation may already have applied.
+      return false;
     }
   }
   return false;
@@ -1272,8 +1259,7 @@ pub async fn reload_mcp_servers(websocket_url: &str) -> Result<()> {
 async fn mcp_reload_function_available(websocket_url: &str) -> bool {
     codey_runtime_core::bridge::evaluate_script(
         websocket_url,
-        r#"typeof window.__codeyReloadMcpServers === "function"
-          || typeof window.__codeyAppServerRequestClients?.get?.("local")?.sendRequest === "function""#,
+        r#"typeof window.__codeyReloadMcpServers === "function""#,
     )
     .await
     .ok()
@@ -2264,8 +2250,8 @@ mod tests {
                             if await_promise {
                                 assert!(expression.contains("__codeyReloadMcpServers"));
                                 assert!(
-                                    expression.contains("__codeyAppServerRequestClients"),
-                                    "MCP reload must use the patched AppServerRequestClient before fiber discovery"
+                                    !expression.contains("__codeyAppServerRequestClients"),
+                                    "MCP client selection belongs to the native adapter"
                                 );
                                 assert!(
                                     !expression.contains("__codeyLoadSessionTools"),

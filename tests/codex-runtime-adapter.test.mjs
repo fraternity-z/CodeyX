@@ -6,7 +6,7 @@ import vm from "node:vm";
 const source = readFileSync(new URL("../public/codex-runtime-adapter.js", import.meta.url), "utf8");
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 
-function fixture() {
+function fixture(globals = {}) {
   const timers = new Map();
   let sequence = 0;
   const window = {
@@ -15,9 +15,76 @@ function fixture() {
   };
   // Installation and cached operations must work even when the host UI is absent.
   const document = new Proxy({}, { get() { throw new Error("unexpected DOM access"); } });
-  const context = vm.createContext({ window, document });
+  const context = vm.createContext({ window, document, ...globals });
   return { window, timers, load: () => vm.runInContext(source, context) };
 }
+
+function discoveryFixture() {
+  class Element {}
+  const root = new Element();
+  const manager = { async sendRequest() {} };
+  const scope = { get: () => ({ forHost: () => manager }), set() {}, watch() {}, when() {}, query: {} };
+  root.__reactFiber$fixture = { memoizedProps: { scope } };
+  const runtime = fixture({
+    HTMLElement: Element,
+    document: {
+      scripts: [{ src: "app://-/assets/app-initial-fixture.js" }],
+      querySelectorAll: () => [],
+      querySelector: (selector) => selector === "#root" ? root : null,
+    },
+  });
+  function resolve(scope, hostId) {
+    const registry = scope.get("registry");
+    if (!registry) throw new Error("AppServerManager RPC is not connected");
+    return registry.forHost(hostId);
+  }
+  return { ...runtime, module: { resolve }, manager };
+}
+
+test("a timed-out capability probe cannot replace a newer cached manager", async () => {
+  const runtime = discoveryFixture();
+  let finish;
+  runtime.window.__codeyImportCodexAsset = () => new Promise(resolve => { finish = resolve; });
+  runtime.load();
+  const pending = runtime.window.__codeyLoadCodexSessionController({ feature: "usage" });
+  const rejected = assert.rejects(pending, { code: "codey_capability_unavailable" });
+  await settle();
+  assert.equal(typeof finish, "function");
+  for (const callback of runtime.timers.values()) callback();
+  await rejected;
+  const replacement = { async sendRequest() {} };
+  runtime.window.__codeyCodexSessionController = { manager: replacement };
+  await runtime.window.__codeyLoadCodexSessionController({ feature: "usage" });
+  finish(runtime.module);
+  await settle();
+  assert.equal(runtime.window.__codeyCodexSessionController.manager, replacement);
+  assert.equal(runtime.window.__codeyPageCapabilities.usage.status, "available");
+});
+
+test("MCP reload never chooses a remote client when the local client is absent", async () => {
+  const runtime = fixture();
+  const calls = [];
+  runtime.window.__codeyAppServerRequestClients = new Map([
+    ["ssh-host", { sendRequest() { calls.push("remote"); } }],
+  ]);
+  runtime.window.__codeyCodexSessionController = { manager: {
+    async sendRequest() { calls.push("local"); },
+  } };
+  runtime.load();
+  assert.equal((await runtime.window.__codeyReloadMcpServers()).ok, true);
+  assert.deepEqual(calls, ["local"]);
+});
+
+test("an unconfirmed MCP reload is not submitted again through the manager", async () => {
+  const runtime = fixture();
+  let calls = 0;
+  const client = { async sendRequest() { calls += 1; throw new Error("connection closed"); } };
+  runtime.window.__codeyAppServerRequestClients = new Map([["local", client]]);
+  runtime.window.__codeyCodexSessionController = { manager: client };
+  runtime.load();
+  await assert.rejects(runtime.window.__codeyReloadMcpServers(), /connection closed/);
+  assert.equal(calls, 1);
+});
 
 test("installation only registers the native adapter and is idempotent", () => {
   const runtime = fixture();

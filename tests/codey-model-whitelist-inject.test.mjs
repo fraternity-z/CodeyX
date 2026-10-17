@@ -115,6 +115,25 @@ test("native request gate fails when the client cannot be verified", async () =>
   runtime.patch.dispose();
 });
 
+test("optional model presentation failure preserves catalog delivery and mandatory routing", async () => {
+  class Client {
+    hostId = "local";
+    enqueueRequest(method, params) { return { method, params }; }
+    createRequest() {}
+    onResult() {}
+  }
+  const client = new Client();
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()], {
+    requestClient: client, failPresentation: true,
+  });
+  assert.equal(runtime.patch.presentation().status, "unavailable");
+  assert.equal(runtime.patch.snapshot().loaded, true);
+  assert.equal(await runtime.patch.ensureRequestGate(), true);
+  assert.equal(client.enqueueRequest("thread/start", { model: "remote/shared" }).params.modelProvider, "codey_router");
+  assert.equal(await runtime.patch.setCatalog(mixedCompactionCatalog), true);
+  runtime.patch.dispose();
+});
+
 test("missing native adapter fails the request gate without loading session UI", async () => {
   // The bridge fixture rejects every route except the model catalog. An
   // accidental dependency on session-tools/load would change this failure.
@@ -296,12 +315,14 @@ test(`Fast stays available across routes and models (native selection: ${nativeS
 async function loadPatch(
   catalogResponse,
   clients,
-  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null } = {},
+  { bridgeReady = true, queryClient = null, reactModelState = null, documentBody = null, storage = null, nativeSelectionOnly = false, requestClient = null, cachedRequestClient = null, failPresentation = false } = {},
 ) {
-  const [bridgeSource, source] = await Promise.all([
+  const [bridgeSource, gateSource, modelSource] = await Promise.all([
     readFile(new URL("../public/codey-bridge.js", import.meta.url), "utf8"),
+    readFile(new URL("../public/model-request-gate.js", import.meta.url), "utf8"),
     readFile(new URL("../public/model-whitelist-inject.js", import.meta.url), "utf8"),
   ]);
+  const source = `${gateSource}\n${modelSource}`;
   let nextTimer = 0;
   const timers = new Map();
   const windowListeners = new Map();
@@ -338,6 +359,7 @@ async function loadPatch(
       return documentBody ? body.querySelectorAll(selector) : [];
     },
     addEventListener(name, listener) {
+      if (failPresentation && name === "click") throw new Error("picker unavailable");
       const listeners = documentListeners.get(name) || new Set();
       listeners.add(listener);
       documentListeners.set(name, listeners);
@@ -901,7 +923,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "67");
+  assert.equal(patch.version, "68");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],
