@@ -252,7 +252,7 @@ function FeaturePolicyCardComponent({
               <div className="feature-card-body">
                 <small>
                   {config.slimCodexPet
-                    ? "已收起宠物并取消隐藏窗口预热；语音功能仍按需启用"
+                    ? "隐藏宠物入口并抑制自动预热；语音功能仍按需启用"
                     : "保留 Codex 宠物的完整功能"}
                 </small>
               </div>
@@ -292,7 +292,7 @@ function FeaturePolicyCardComponent({
               </div>
             </div>
 
-            {isMacClient && (
+            {(isMacClient || isWindowsClient) && (
               <div
                 className={`feature-card ${config.protectCrashpadPending ? "active" : ""}`}
               >

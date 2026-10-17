@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current CodeyX channel.
 (() => {
-  const patchVersion = "68";
+  const patchVersion = "69";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -1715,8 +1715,10 @@
     window.__codeySharedRuntime.reactInternalKeys(element, { includeContainer: true });
 
   const restoreNativeFastPermissions = () => {
-    for (const [permission, allowed] of nativeFastPermissions) {
-      try { permission.isServiceTierAllowed = allowed; } catch {}
+    for (const [permission, { key, original, patched }] of nativeFastPermissions) {
+      try {
+        if (permission[key] === patched) permission[key] = original;
+      } catch {}
     }
     nativeFastPermissions.clear();
   };
@@ -1740,8 +1742,14 @@
         for (const cells of node?.updateQueue?.memoCache?.data || []) {
           if (!Array.isArray(cells)) continue;
           for (const value of cells) {
-            if (value && typeof value.isServiceTierAllowed === "boolean"
-              && typeof value.isLoading === "boolean") permissions.add(value);
+            if (value && typeof value.isLoading === "boolean"
+              && (typeof value.isServiceTierAllowed === "boolean"
+                || (Object.hasOwn(value, "serviceTierAccess")
+                  && (value.serviceTierAccess == null
+                    || (typeof value.serviceTierAccess?.fast === "boolean"
+                      && typeof value.serviceTierAccess?.ultrafast === "boolean"))))) {
+              permissions.add(value);
+            }
           }
         }
       }
@@ -1751,13 +1759,22 @@
     // Windows builds can disable the main-process Inspector. Repair only the
     // native picker's cached permission results, before its own opening/selection
     // event renders again. Both the UI and its serviceTierForRequest resolver then
-    // consume the same permission for every route and model. Keep loading state.
+    // consume the same permission for every route and model. Newer clients return
+    // separate Fast/Ultra access instead of a boolean. Keep loading state and the
+    // compiler's account-derived dependency keys unchanged in both versions.
     restoreNativeFastPermissions();
     for (const permission of permissions) {
-      if (permission.isServiceTierAllowed || nativeFastPermissions.size >= 64) continue;
+      if (nativeFastPermissions.size >= 64) break;
+      const key = Object.hasOwn(permission, "serviceTierAccess")
+        ? "serviceTierAccess" : "isServiceTierAllowed";
+      const original = permission[key];
+      if (key === "isServiceTierAllowed" ? original === true
+        : original?.fast === true && original?.ultrafast === true) continue;
+      const patched = key === "isServiceTierAllowed" ? true
+        : { ...original, fast: true, ultrafast: true };
       try {
-        permission.isServiceTierAllowed = true;
-        if (permission.isServiceTierAllowed) nativeFastPermissions.set(permission, false);
+        permission[key] = patched;
+        if (permission[key] === patched) nativeFastPermissions.set(permission, { key, original, patched });
       } catch {
         // An incompatible immutable renderer result must not break the menu.
       }

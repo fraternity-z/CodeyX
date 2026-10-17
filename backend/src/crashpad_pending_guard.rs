@@ -8,6 +8,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde::{Serialize, Serializer};
 use uuid::Uuid;
 
+mod windows;
+
 pub const PENDING_HARD_LIMIT_BYTES: u64 = 512 * 1024 * 1024;
 pub const PENDING_TARGET_BYTES: u64 = 384 * 1024 * 1024;
 pub const GUARD_INTERVAL: Duration = Duration::from_secs(5 * 60);
@@ -181,6 +183,21 @@ struct FileIdentity {
     inode: u64,
 }
 
+impl FileIdentity {
+    fn from_metadata(metadata: &fs::Metadata) -> Self {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt;
+        Self {
+            length: metadata.len(),
+            modified: metadata.modified().ok(),
+            #[cfg(unix)]
+            device: metadata.dev(),
+            #[cfg(unix)]
+            inode: metadata.ino(),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 struct PendingFile {
     path: PathBuf,
@@ -204,6 +221,7 @@ struct ReportGroup {
     files: Vec<PendingFile>,
     complete: bool,
     modified: Option<SystemTime>,
+    windows_record: Option<windows::PendingRecord>,
 }
 
 #[derive(Default)]
@@ -234,6 +252,7 @@ impl ReportGroupBuilder {
             files,
             complete,
             modified,
+            windows_record: None,
         }
     }
 }
@@ -392,6 +411,13 @@ fn cleanup(
 }
 
 fn delete_group(group: &ReportGroup) -> Result<(usize, u64), String> {
+    // Windows stores pending/uploading/completed reports together. Recheck the
+    // pending record under Crashpad's own metadata lock before touching a dump.
+    let _metadata_lock = group
+        .windows_record
+        .as_ref()
+        .map(windows::lock_pending_record)
+        .transpose()?;
     if group.files.iter().any(|file| !identity_matches(file)) {
         return Err("Crashpad 待处理报告在清理前发生变化，已跳过".to_string());
     }
@@ -442,7 +468,11 @@ fn identity_matches(file: &PendingFile) -> bool {
 fn inventory(pending_directories: &[PathBuf]) -> PendingInventory {
     let mut inventory = PendingInventory::default();
     for directory in pending_directories {
-        collect_pending_directory(directory, &mut inventory);
+        if directory.file_name() == Some(OsStr::new("reports")) {
+            windows::collect_reports(directory, &mut inventory);
+        } else {
+            collect_pending_directory(directory, &mut inventory);
+        }
     }
     inventory
 }
@@ -514,20 +544,11 @@ fn collect_pending_directory(directory: &Path, inventory: &mut PendingInventory)
         };
         inventory.managed_files += 1;
         inventory.managed_bytes = inventory.managed_bytes.saturating_add(length);
-        #[cfg(unix)]
-        use std::os::unix::fs::MetadataExt;
         let file = PendingFile {
             path: entry.path(),
             name: entry.file_name().to_string_lossy().to_string(),
             kind,
-            identity: FileIdentity {
-                length,
-                modified,
-                #[cfg(unix)]
-                device: metadata.dev(),
-                #[cfg(unix)]
-                inode: metadata.ino(),
-            },
+            identity: FileIdentity::from_metadata(&metadata),
         };
         groups.entry(report_id).or_default().insert(file);
     }
@@ -589,7 +610,13 @@ fn system_pending_directories() -> Vec<PathBuf> {
             application_support.join("com.openai.codex/web/Crashpad/pending"),
         ]
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(windows)]
+    {
+        directories::BaseDirs::new()
+            .map(|base| windows::report_directories(base.data_dir()))
+            .unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         Vec::new()
     }

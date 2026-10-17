@@ -261,6 +261,88 @@ test("API and ChatGPT auth share model-aware native service-tier controls", asyn
       true,
     );
 
+    // 26.1013 shares this access object between composer visibility, option
+    // filtering, setters and the independently resolved request service tier.
+    const accessUiSource = [
+      "function access(account,requirements,pending){",
+      "let a=account?.authMethod===`chatgpt`||account?.authMethod===`personalAccessToken`,",
+      "loading=!!account?.isLoading||a&&pending,result,memo;",
+      "result=a&&!loading&&requirements!=null?fromRequirements(requirements):null,memo=result;",
+      "return {authMethod:account?.authMethod,serviceTierAccess:memo,isLoading:loading}}",
+    ].join("");
+    const accessLoadingSource = [
+      "function optionsLoading(modelState,catalogLoading,configState,defaults,conversation,pending){",
+      "let loading=modelState.isLoading||catalogLoading||configState.isLoading||",
+      "defaults?.isLoading===!0||conversation==null&&pending,set=async()=>true;",
+      "return {isLoading:loading,selectedServiceTierForModel:normalize,",
+      "serviceTierForRequest:null,set}}",
+    ].join("");
+    const accessRequestSource = [
+      "async function requestAccess(e,t){let n=await readAuth(e,t);",
+      "if(n!==`chatgpt`&&n!==`personalAccessToken`)return null;",
+      "let r=await readRequirements(e,t,{priority:`critical`});",
+      "return e.query.setData(queryKey,{authMethod:n,hostId:t},r),fromRequirements(r)}",
+      "async function requestTier(e,t,model,tier){try{return resolve(model,tier,",
+      "await requestAccess(e,t))}catch{return `Failed to read service tier for request`}}",
+    ].join("");
+    const accessHelpers = [
+      "function fromRequirements(e){let t=e.requirements?.featureRequirements;",
+      "return {fast:t?.fast_mode!==false,ultrafast:t?.ultrafast_mode!==false}}",
+      "function allowed(tier,access){if(tier==null||tier===`default`)return true;",
+      "if(access==null)return false;return access[tier===`ultrafast`?`ultrafast`:`fast`]}",
+      "function normalize(model,tier){return model?.serviceTiers?.find(e=>e.id===tier)?.id??null}",
+      "function resolve(model,tier,access={fast:true,ultrafast:true}){",
+      "let selected=tier??normalize(model,model?.defaultServiceTier??null);",
+      "return selected===`default`||!allowed(selected,access)?null:selected}",
+      "function options(model,access){return [null,...(model?.serviceTiers??[]).map(e=>e.id)]",
+      ".filter(tier=>allowed(tier,access))}",
+      "function readAuth(){throw new Error(`account lookup must not gate speed`)}",
+      "function readRequirements(){throw new Error(`requirements unavailable`)}",
+    ].join("");
+    const accessSource = accessUiSource + accessLoadingSource + accessRequestSource;
+    const patchedAccess = await patchAsset(accessSource);
+    const accessRuntime = Function(
+      accessHelpers + patchedAccess +
+      ";return {access,options,optionsLoading,requestTier};",
+    )();
+    const modernModel = {
+      serviceTiers: [{ id: "fast" }, { id: "ultrafast" }],
+      defaultServiceTier: "fast",
+    };
+    for (const authMethod of [null, undefined, "apikey", "chatgpt", "personalAccessToken"]) {
+      for (const requirements of [undefined, { requirements: { featureRequirements: {
+        fast_mode: false, ultrafast_mode: false,
+      } } }]) {
+        const account = authMethod == null ? null : { authMethod };
+        const { serviceTierAccess } = accessRuntime.access(account, requirements, true);
+        assert.deepEqual(serviceTierAccess, { fast: true, ultrafast: true });
+        assert.deepEqual(accessRuntime.options(modernModel, serviceTierAccess),
+          [null, "fast", "ultrafast"]);
+        assert.deepEqual(accessRuntime.options({ serviceTiers: [] }, serviceTierAccess), [null]);
+      }
+    }
+    for (const tier of ["priority", "fast", "ultrafast"]) {
+      assert.equal(await accessRuntime.requestTier({}, "local", modernModel, tier), tier);
+    }
+    assert.equal(await accessRuntime.requestTier({}, "local", modernModel, null), "fast");
+    assert.equal(await accessRuntime.requestTier({}, "local", {}, null), null);
+    assert.equal(await accessRuntime.requestTier({}, "local", modernModel, "default"), null);
+    assert.equal(accessRuntime.optionsLoading({}, false, {}, null, null, true).isLoading, false);
+    assert.equal(accessRuntime.optionsLoading({ isLoading: true }, false, {}, null, null, true).isLoading, true);
+    assert.equal(accessRuntime.optionsLoading({}, true, {}, null, null, true).isLoading, true);
+    assert.equal(accessRuntime.optionsLoading({}, false, { isLoading: true }, null, null, true).isLoading, true);
+    assert.equal(accessRuntime.optionsLoading({}, false, {}, { isLoading: true }, null, true).isLoading, true);
+
+    const duplicateAccess = await patchAsset(accessUiSource.repeat(2) + accessRequestSource);
+    assert.equal(duplicateAccess.startsWith(accessUiSource.repeat(2)), true,
+      "ambiguous access providers must remain unchanged");
+    assert.match(duplicateAccess, /async function requestAccess\(e,t\)\{return\{fast:!0,ultrafast:!0\}\}/,
+      "an incompatible UI must not discard the independent request fix");
+    const driftedAccessUi = accessUiSource.replace("requirements!=null?", "requirements!==void 0?");
+    const driftedPatched = await patchAsset(driftedAccessUi + accessLoadingSource + accessRequestSource);
+    assert.ok(driftedPatched.startsWith(driftedAccessUi),
+      "an unknown access provider must remain unchanged");
+
     const serviceTierOptionsSource = [
       "const serviceTierMessageIds=[`serviceTier.standard.label`,`serviceTier.fast.label`];",
       "const messages={fastDescription:`Fast response`,fastLabel:`Fast`};",

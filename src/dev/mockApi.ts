@@ -851,7 +851,7 @@ if (import.meta.env.DEV) {
           activeNotificationChannelCount,
           traceLogWriteProtectionActive: previewConfig.disableTraceLogWrites,
           crashpadDiskProtectionActive:
-            previewClientPlatform === "macos" &&
+            ["macos", "windows"].includes(previewClientPlatform) &&
             previewConfig.protectCrashpadPending,
         };
       }

@@ -1,7 +1,7 @@
 // Codex's private desktop interfaces live behind this adapter. Installing it
 // does not mount controls, observe the DOM, or start background polling.
 (() => {
-  const version = 2;
+  const version = 3;
   const previous = window.__codeyNativeRuntime;
   if (previous?.version === version && previous.isActive?.()) return;
   previous?.dispose?.();
@@ -694,6 +694,7 @@
     version,
     isActive: () => !disposed,
     loadSessionController: loadCodexSessionController,
+    discoverAppAssetUrls: discoverCodexAppAssetUrls,
     waitForOperation: waitForNativeSessionOperation,
     dispose() {
       if (disposed) return;

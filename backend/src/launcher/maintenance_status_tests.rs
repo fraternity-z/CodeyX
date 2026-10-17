@@ -152,6 +152,41 @@ fn maintenance_status_exposes_structured_session_metrics() {
     assert_eq!(value["startupInjectionMode"], "node_options");
 }
 
+#[tokio::test]
+async fn crashpad_protection_status_requires_an_enabled_live_guard_on_supported_platforms() {
+    let runtime = CodeyRuntime::for_model_delivery_test(CodeyConfig::default(), "", None);
+    runtime.set_crashpad_pending_protection(true);
+    assert!(!runtime.crashpad_pending_protection_active().await);
+
+    // Model the worker lifetime without touching the user's Crashpad database.
+    let (shutdown, stopped) = oneshot::channel::<()>();
+    *runtime.crashpad_guard_task.lock().await = Some(tokio::spawn(async move {
+        let _ = stopped.await;
+    }));
+    assert_eq!(
+        runtime.crashpad_pending_protection_active().await,
+        cfg!(any(target_os = "macos", windows))
+    );
+    runtime.set_crashpad_pending_protection(false);
+    assert!(!runtime.crashpad_pending_protection_active().await);
+    runtime.set_crashpad_pending_protection(true);
+    assert_eq!(
+        runtime.crashpad_pending_protection_active().await,
+        cfg!(any(target_os = "macos", windows))
+    );
+
+    shutdown.send(()).unwrap();
+    runtime
+        .crashpad_guard_task
+        .lock()
+        .await
+        .as_mut()
+        .unwrap()
+        .await
+        .unwrap();
+    assert!(!runtime.crashpad_pending_protection_active().await);
+}
+
 #[test]
 fn startup_without_provider_rewrites_is_still_ready() {
     let cleanup = Ok(SessionIndexCleanupReport {

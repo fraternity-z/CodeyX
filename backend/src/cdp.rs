@@ -14,6 +14,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::error_log;
 
+mod runtime_optimizations;
+pub(crate) use runtime_optimizations::refresh_auxiliary_renderers;
+
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -34,6 +37,8 @@ const MCP_RELOAD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(20);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
 const CODEX_RUNTIME_ADAPTER_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/codex-runtime-adapter.js");
+const RUNTIME_OPTIMIZATIONS_SCRIPT: &str =
+    include_str!("../../dist-overlay/inject/runtime-optimizations.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str = concat!(
     include_str!("../../dist-overlay/inject/model-request-gate.js"),
     "\n",
@@ -181,6 +186,7 @@ pub struct InjectionScriptStatus {
 pub struct PreparedInjectionScripts {
     scripts: Arc<[String]>,
     descriptors: Arc<[InjectionScriptDescriptor]>,
+    runtime_optimizations: Arc<str>,
 }
 
 pub struct InjectedTarget {
@@ -388,6 +394,22 @@ pub fn prepare_injection_scripts(
             Feature,
         ),
         (
+            "runtime-optimizations",
+            "运行时资源优化",
+            RUNTIME_OPTIMIZATIONS_SCRIPT,
+            r#"(() => {
+              const status = window.__codeyRuntimeOptimizations?.snapshot?.();
+              if (!status) return "";
+              const active = [];
+              if (status.cpuSamplingDisabled) active.push("CPU 采样");
+              if (status.interactionHeartbeatDisabled) active.push("交互心跳");
+              if (status.appStateHeartbeatDisabled) active.push("诊断心跳");
+              if (status.petPrewarmDisabled) active.push("宠物自动预热");
+              return active.length ? { effective: true, detail: `已抑制：${active.join("、")}` } : "";
+            })()"#.to_string(),
+            Feature,
+        ),
+        (
             "conversation-git",
             "对话 Git 提交增强",
             CONVERSATION_GIT_SCRIPT,
@@ -417,6 +439,7 @@ pub fn prepare_injection_scripts(
     let mut core_bundle = String::with_capacity(
         CODEY_BRIDGE_SCRIPT.len()
             + CODEX_RUNTIME_ADAPTER_SCRIPT.len()
+            + RUNTIME_OPTIMIZATIONS_SCRIPT.len()
             + MODEL_WHITELIST_INJECT_SCRIPT.len()
             + RENDERER_INJECT_SCRIPT.len()
             + PET_CONTROL_SHIELD_SCRIPT.len()
@@ -469,6 +492,10 @@ pub fn prepare_injection_scripts(
     PreparedInjectionScripts {
         scripts: Arc::from(scripts),
         descriptors: Arc::from(descriptors),
+        runtime_optimizations: Arc::from(format!(
+            "{CODEX_RUNTIME_ADAPTER_SCRIPT}\n{}",
+            prepare_script(RUNTIME_OPTIMIZATIONS_SCRIPT, slim_codex_pet),
+        )),
     }
 }
 
@@ -2883,7 +2910,7 @@ const run = async (patch) => {
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 12);
+        assert_eq!(prepared.descriptors.len(), 13);
         assert!(
             prepared
                 .descriptors

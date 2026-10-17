@@ -1,0 +1,166 @@
+// CLI-only launches cannot install the main-process startup patch. Operate on
+// the native shared instances instead; keep application and voice RPCs intact.
+(() => {
+  const version = 1;
+  const slimPet = ["__CODEY_SLIM_PET__"][0] === "true";
+  const previous = window.__codeyRuntimeOptimizations;
+  if (previous?.version === version && previous.slimPet === slimPet && previous.isActive?.()) return;
+  previous?.dispose?.();
+  let disposed = false;
+  let pending = null;
+  let retryTimer = null;
+  let attempt = 0;
+  const restores = [];
+  const trackers = new Set();
+  const messengers = new Map();
+  const noSampling = () => null;
+  const noHeartbeat = () => {};
+  let suppressedHeartbeats = 0;
+  let suppressedPrewarms = 0;
+
+  const replaceMethod = (target, key, replacement) => {
+    const own = Object.getOwnPropertyDescriptor(target, key);
+    const original = target[key];
+    if (typeof original !== "function" || (own && (!own.writable || own.get))) return false;
+    try {
+      target[key] = replacement;
+      if (target[key] !== replacement) return false;
+    } catch { return false; }
+    restores.push(() => {
+      if (target[key] !== replacement) return;
+      if (own) Object.defineProperty(target, key, own);
+      else delete target[key];
+    });
+    return true;
+  };
+
+  const patchTracker = (tracker) => {
+    if (trackers.has(tracker)) return;
+    if (!replaceMethod(tracker, "beginCpuSampling", noSampling)) return;
+    if (replaceMethod(tracker, "ensureHeartbeat", noHeartbeat)) {
+      if (tracker.heartbeatTimer != null) window.clearInterval(tracker.heartbeatTimer);
+      tracker.heartbeatTimer = null;
+    }
+    // Spans already in progress keep their timestamps and lifecycle. Cancel
+    // only their optional CPU sampler, just as the native cancellation path does.
+    for (const interaction of tracker.activeInteractions.values()) {
+      const sampler = interaction?.cpuSampling;
+      if (!sampler || typeof sampler.cancel !== "function") continue;
+      try {
+        sampler.cancel();
+        if (interaction.cpuSampling === sampler) interaction.cpuSampling = null;
+      } catch { /* A native in-flight sampler can still finish normally. */ }
+    }
+    trackers.add(tracker);
+  };
+
+  const patchMessenger = (messenger) => {
+    if (messengers.has(messenger) || !slimPet) return;
+    const original = messenger.postMessage;
+    const wrapped = function (message, ...args) {
+      // This is the real send boundary. codex-message-from-view is emitted
+      // AFTER IPC and cannot prevent prewarming on frozen Electron bridges.
+      if (!disposed && message?.type === "electron-avatar-overlay-restore-ready"
+        && message.shouldPrewarmAvatarOverlay === true) {
+        message = { ...message, shouldPrewarmAvatarOverlay: false };
+        suppressedPrewarms += 1;
+      }
+      return Reflect.apply(original, this, [message, ...args]);
+    };
+    if (replaceMethod(messenger, "postMessage", wrapped)) messengers.set(messenger, wrapped);
+  };
+
+  const onMessage = (event) => {
+    if (disposed || (event.source != null && event.source !== window)) return;
+    if (event.origin !== window.location.origin && event.origin !== "null") return;
+    if (event.data?.type !== "electron-app-state-snapshot-request"
+      || event.data.reason !== "heartbeat") return;
+    // Host memory diagnostics are collected only after the renderer responds.
+    // Manual/error-triggered snapshots and every other native event pass through.
+    event.stopImmediatePropagation();
+    suppressedHeartbeats += 1;
+  };
+  window.addEventListener("message", onMessage, true);
+
+  const matchesTracker = (value) => value && typeof value === "object"
+    && value.activeInteractions instanceof Map
+    && typeof value.beginCpuSampling === "function"
+    && typeof value.ensureHeartbeat === "function"
+    && typeof value.recordHeartbeat === "function"
+    && "heartbeatTimer" in value;
+  const matchesMessenger = (value) => value && typeof value === "object"
+    && typeof value.postMessage === "function"
+    && typeof value.getState === "function" && typeof value.setState === "function"
+    && /sendMessageFromView/.test(Function.prototype.toString.call(value.postMessage))
+    && /codex-message-from-view/.test(Function.prototype.toString.call(value.postMessage));
+
+  const discover = async () => {
+    const urls = await window.__codeyNativeRuntime?.discoverAppAssetUrls?.() || [];
+    if (disposed) return;
+    const trackerCandidates = new Set();
+    const messengerCandidates = new Set();
+    for (const url of urls) {
+      // app-shared is already required by the native app. Never import pet,
+      // settings or other lazy routes just to optimize them.
+      if (!/\/app-shared-[^/?#]+\.js(?:\?[^#]*)?$/.test(url)) continue;
+      try {
+        const module = typeof window.__codeyImportCodexAsset === "function"
+          ? await window.__codeyImportCodexAsset(url) : await import(url);
+        if (disposed) return;
+        for (const value of Object.values(module)) {
+          if (matchesTracker(value)) trackerCandidates.add(value);
+          if (matchesMessenger(value)) messengerCandidates.add(value);
+        }
+      } catch { /* Unknown native shapes are left untouched. */ }
+    }
+    if (trackerCandidates.size === 1) patchTracker([...trackerCandidates][0]);
+    if (messengerCandidates.size === 1) patchMessenger([...messengerCandidates][0]);
+  };
+  const refresh = () => {
+    if (disposed) return Promise.resolve();
+    if (pending) return pending;
+    pending = discover().catch(() => {}).finally(() => { pending = null; });
+    return pending;
+  };
+  const snapshot = () => ({
+    cpuSamplingDisabled: !disposed && [...trackers].some(value => value.beginCpuSampling === noSampling),
+    interactionHeartbeatDisabled: !disposed && [...trackers].some(value => value.ensureHeartbeat === noHeartbeat && value.heartbeatTimer == null),
+    appStateHeartbeatDisabled: !disposed && (trackers.size > 0 || messengers.size > 0 || suppressedHeartbeats > 0),
+    petPrewarmDisabled: !disposed && slimPet && [...messengers].some(([value, wrapped]) => value.postMessage === wrapped),
+    suppressedHeartbeats,
+    suppressedPrewarms,
+  });
+  const retry = () => {
+    retryTimer = null;
+    void refresh().then(() => {
+      if (disposed) return;
+      const status = snapshot();
+      if (status.cpuSamplingDisabled && status.interactionHeartbeatDisabled
+        && (!slimPet || status.petPrewarmDisabled)) return;
+      const delay = [100, 300, 1_000, 3_000, 10_000][attempt++];
+      if (delay != null) retryTimer = window.setTimeout(retry, delay);
+    });
+  };
+  const api = Object.freeze({
+    version, slimPet, snapshot, refresh,
+    isActive: () => !disposed,
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      window.clearTimeout(retryTimer);
+      window.removeEventListener("message", onMessage, true);
+      for (const restore of restores.reverse()) {
+        try { restore(); } catch { /* Do not overwrite native replacements. */ }
+      }
+      // Restore heartbeat scheduling only when native interactions still exist.
+      for (const tracker of trackers) {
+        if (tracker.activeInteractions.size > 0 && tracker.ensureHeartbeat !== noHeartbeat) {
+          try { tracker.ensureHeartbeat(); } catch { /* Native shutdown. */ }
+        }
+      }
+      if (window.__codeyRuntimeOptimizations === api) delete window.__codeyRuntimeOptimizations;
+    },
+  });
+  window.__codeyRuntimeOptimizations = api;
+  retry();
+})();

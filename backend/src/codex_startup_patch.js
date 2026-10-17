@@ -251,6 +251,7 @@
     "`composer.toggleFastMode`",
     "composer.speedSlashCommand.disableDescription",
     "isServiceTierAllowed",
+    "serviceTierAccess",
     "selectedServiceTier",
     "featureRequirements?.fast_mode",
     "useHiddenModels",
@@ -648,6 +649,46 @@
         /(\b([$A-Z_a-z][$\w]*)\s*=\s*)([$A-Z_a-z][$\w]*)\s*&&\s*!([$A-Z_a-z][$\w]*)\s*&&\s*([$A-Z_a-z][$\w]*)\s*!=\s*null\s*&&\s*\5\?\.requirements\?\.featureRequirements\?\.fast_mode\s*!==\s*!1/g,
         (_match, assignment) => `${assignment}!0`,
         "service tier UI",
+      );
+    }
+    if (
+      source.includes("serviceTierAccess:") &&
+      source.includes("authMethod:") &&
+      /serviceTierAccess\s*:\s*[$A-Z_a-z][$\w]*\s*,\s*isLoading\s*:/.test(source)
+    ) {
+      // 26.1013 用逐档位 access 对象替代布尔权限；null 会同时隐藏入口、
+      // 过滤选项并拒绝保存。保留原生 hook 和模型目录，只解除账号依赖。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b([$A-Z_a-z][$\w]*)\s*=\s*)[$A-Z_a-z][$\w]*\s*&&\s*![$A-Z_a-z][$\w]*\s*&&\s*([$A-Z_a-z][$\w]*)\s*!=\s*null\s*\?\s*[$A-Z_a-z][$\w]*\(\s*\3\s*\)\s*:\s*null(?=\s*,)/g,
+        (_match, assignment) => `${assignment}{fast:!0,ultrafast:!0}`,
+        "service tier access UI",
+      );
+    }
+    if (
+      source.includes("serviceTierAccess:") &&
+      source.includes("serviceTierForRequest:") &&
+      source.includes("selectedServiceTierForModel:")
+    ) {
+      // 速度选项无需等待账号 requirements，模型及配置仍保留各自的加载状态。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /(\b[$A-Z_a-z][$\w]*\s*=\s*[^;{},\n]{0,200}?\.isLoading[^;{},\n]{0,200}?)\s*\|\|\s*[$A-Z_a-z][$\w]*\s*==\s*null\s*&&\s*[$A-Z_a-z][$\w]*(?=\s*,\s*[$A-Z_a-z][$\w]*\s*=\s*async\s*\()/g,
+        (_match, modelLoadingExpression) => modelLoadingExpression,
+        "service tier access loading",
+      );
+    }
+    if (
+      source.includes("Failed to read service tier for request") &&
+      source.includes("personalAccessToken")
+    ) {
+      // 发送路径独立读取 access，不能只恢复菜单后仍把已选档位清成 null。
+      patched = replaceUniqueRendererGate(
+        patched,
+        /async\s+function\s+([$A-Z_a-z][$\w]*)\(\s*([$A-Z_a-z][$\w]*)\s*,\s*([$A-Z_a-z][$\w]*)\s*\)\s*\{\s*let\s+([$A-Z_a-z][$\w]*)\s*=\s*await\s+[$A-Z_a-z][$\w]*\(\s*\2\s*,\s*\3\s*\)\s*;\s*if\s*\(\s*\4\s*!==\s*`chatgpt`\s*&&\s*\4\s*!==\s*`personalAccessToken`\s*\)\s*return\s+null\s*;\s*let\s+([$A-Z_a-z][$\w]*)\s*=\s*await\s+[$A-Z_a-z][$\w]*\(\s*\2\s*,\s*\3\s*,\s*\{priority:`critical`\}\s*\)\s*;\s*return\s+\2\.query\.setData\(\s*[$A-Z_a-z][$\w]*\s*,\s*\{authMethod:\4,hostId:\3\}\s*,\s*\5\s*\)\s*,\s*[$A-Z_a-z][$\w]*\(\s*\5\s*\)\s*\}/g,
+        (_match, functionName, firstArgumentName, secondArgumentName) =>
+          `async function ${functionName}(${firstArgumentName},${secondArgumentName}){return{fast:!0,ultrafast:!0}}`,
+        "service tier access request",
       );
     }
     if (

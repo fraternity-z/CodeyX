@@ -1297,6 +1297,13 @@ fn spawn_injection_watchdog(
             tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
+                _ = cdp::refresh_auxiliary_renderers(
+                    debug_port, target.websocket_url(), &watchdog_scripts,
+                ) => {}
+            }
+            tokio::select! {
+                biased;
+                _ = &mut shutdown_rx => break,
                 _ = interval.tick() => {}
             }
             // A finished message pump means the in-page bridge can no longer
@@ -2054,7 +2061,9 @@ impl CodeyRuntime {
     }
 
     pub async fn crashpad_pending_protection_active(&self) -> bool {
-        if !cfg!(target_os = "macos") || !self.crashpad_guard_enabled.load(Ordering::Acquire) {
+        if !cfg!(any(target_os = "macos", windows))
+            || !self.crashpad_guard_enabled.load(Ordering::Acquire)
+        {
             return false;
         }
 

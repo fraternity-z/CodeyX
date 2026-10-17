@@ -69,7 +69,7 @@ test("development preview follows the current runtime-status contract", () => {
   );
   assert.match(
     source,
-    /crashpadDiskProtectionActive:[\s\S]*?previewClientPlatform === "macos"[\s\S]*?previewConfig\.protectCrashpadPending/,
+    /crashpadDiskProtectionActive:[\s\S]*?\["macos", "windows"\]\.includes\(previewClientPlatform\)[\s\S]*?previewConfig\.protectCrashpadPending/,
   );
   assert.doesNotMatch(source, /command === "refresh_injection_status"/);
 });

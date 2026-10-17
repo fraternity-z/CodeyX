@@ -310,7 +310,103 @@ test(`Fast stays available across routes and models (native selection: ${nativeS
   assert.equal(requestCache[5].isServiceTierAllowed, false);
   assert.equal(alternateCache[5].isServiceTierAllowed, false);
 });
+
+test(`native speed access works without account login (native selection: ${nativeSelectionOnly})`, async () => {
+  for (const originalAccess of [null, undefined, Object.freeze({ fast: false, ultrafast: false, extra: "native" })]) {
+    const body = new FakeElementCore("body", { connected: true });
+    const trigger = body.appendChild(new FakeElementCore("button", {
+      attributes: { "aria-haspopup": "menu" },
+    }));
+    const model = { model: "relay/gpt-6-astra", serviceTiers: [{ id: "priority" }, { id: "ultrafast" }] };
+    const uiCache = [], requestCache = [], alternateCache = [];
+    let loading = false, selectedTier = "priority";
+    // Codex 26.1013 caches the returned access object separately from the
+    // account-derived access value, which remains null when signed out.
+    const nativePermission = (cache) => {
+      if (cache[7] !== loading || cache[8] !== originalAccess) {
+        cache[7] = loading;
+        cache[8] = originalAccess;
+        cache[9] = { serviceTierAccess: originalAccess, isLoading: loading };
+      }
+      return cache[9];
+    };
+    const picker = { model: model.model, models: [model], onSelectServiceTier: undefined };
+    const renderNative = () => {
+      const access = nativePermission(uiCache).serviceTierAccess;
+      const requestAccess = nativePermission(requestCache).serviceTierAccess;
+      nativePermission(alternateCache);
+      picker.onSelectServiceTier = access?.fast ? (tier) => { selectedTier = tier; } : undefined;
+      return {
+        showFast: access?.fast === true && model.serviceTiers.length > 0,
+        showUltra: access?.ultrafast === true && model.serviceTiers.length > 0,
+        serviceTierForRequest: requestAccess?.[selectedTier === "ultrafast" ? "ultrafast" : "fast"]
+          ? selectedTier : null,
+      };
+    };
+    const unrelated = { serviceTierAccess: null, isLoading: false };
+    trigger.__reactFiber$fastTest = {
+      memoizedProps: picker,
+      return: {
+        memoizedProps: { conversationId: null, hideLabel: false },
+        updateQueue: { memoCache: { data: [uiCache, requestCache] } },
+        alternate: { updateQueue: { memoCache: { data: [alternateCache] } } },
+        return: { updateQueue: { memoCache: { data: [[unrelated]] } } },
+      },
+    };
+    const runtime = await loadPatch({
+      status: "ok", native_selection_only: nativeSelectionOnly, models: [model.model], default_model: model.model,
+    },
+      [statsigClient()], { documentBody: body, nativeSelectionOnly });
+    assert.deepEqual(renderNative(), { showFast: false, showUltra: false, serviceTierForRequest: null });
+    runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+    assert.deepEqual(renderNative(), { showFast: true, showUltra: true, serviceTierForRequest: "priority" });
+    assert.equal(uiCache[8], originalAccess, "leave the native account-derived dependency intact");
+    assert.equal(alternateCache[9].serviceTierAccess.fast, true);
+    assert.equal(uiCache[9].serviceTierAccess.extra, originalAccess?.extra);
+    assert.equal(unrelated.serviceTierAccess, null, "do not mutate permissions outside the composer");
+    for (const tier of [null, "fast", "priority", "ultrafast"]) {
+      picker.onSelectServiceTier(tier);
+      runtime.dispatchDocumentEvent("keydown", { target: trigger, key: "Enter" });
+      assert.equal(renderNative().serviceTierForRequest, tier);
+    }
+    model.serviceTiers = [];
+    assert.equal(renderNative().showFast, false, "the native model's available tiers still control the menu");
+    loading = true;
+    renderNative();
+    runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+    assert.equal(uiCache[9].isLoading, true, "keep actual native loading state");
+    runtime.patch.dispose();
+    for (const cache of [uiCache, requestCache, alternateCache]) {
+      assert.equal(cache[9].serviceTierAccess, originalAccess, "restore the exact original permission value");
+    }
+  }
+});
 }
+
+test("native speed access tolerates immutable results and preserves later native updates", async () => {
+  const body = new FakeElementCore("body", { connected: true });
+  const trigger = body.appendChild(new FakeElementCore("button", { attributes: { "aria-haspopup": "menu" } }));
+  const frozen = Object.freeze({ serviceTierAccess: null, isLoading: false });
+  const malformed = { serviceTierAccess: { fast: false }, isLoading: false };
+  const permission = { serviceTierAccess: null, isLoading: false };
+  const alreadyAllowed = { serviceTierAccess: { fast: true, ultrafast: true }, isLoading: false };
+  const allowedAccess = alreadyAllowed.serviceTierAccess;
+  trigger.__reactFiber$fastTest = {
+    memoizedProps: { model: "relay/model", models: [], onSelectServiceTier: undefined },
+    updateQueue: { memoCache: { data: [[frozen, malformed, permission, alreadyAllowed]] } },
+  };
+  const runtime = await loadPatch({ status: "ok", models: ["relay/model"], default_model: "relay/model" },
+    [statsigClient()], { documentBody: body });
+  runtime.dispatchDocumentEvent("pointerdown", { target: trigger });
+  assert.equal(permission.serviceTierAccess.fast, true, "one immutable result must not stop other repairs");
+  assert.equal(frozen.serviceTierAccess, null);
+  assert.deepEqual(malformed.serviceTierAccess, { fast: false });
+  assert.equal(alreadyAllowed.serviceTierAccess, allowedAccess);
+  const nativeUpdate = { fast: false, ultrafast: true };
+  permission.serviceTierAccess = nativeUpdate;
+  runtime.patch.dispose();
+  assert.equal(permission.serviceTierAccess, nativeUpdate, "dispose must not overwrite a newer native result");
+});
 
 async function loadPatch(
   catalogResponse,
@@ -923,7 +1019,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "68");
+  assert.equal(patch.version, "69");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

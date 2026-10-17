@@ -889,7 +889,7 @@ pub struct CodeyConfig {
     #[serde(default = "default_true")]
     pub disable_trace_log_writes: bool,
     /// Keeps Codex/ChatGPT Crashpad pending reports below a bounded disk
-    /// budget. The guard only manages validated report files on macOS.
+    /// budget. The guard only manages validated report files on macOS and Windows.
     #[serde(default = "default_true")]
     pub protect_crashpad_pending: bool,
     #[serde(default = "default_true")]

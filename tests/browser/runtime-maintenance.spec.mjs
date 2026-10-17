@@ -9,8 +9,8 @@ const test = base.extend({
   },
 });
 
-async function openSettings(page, command) {
-  await page.goto("/codey/tests/ui-browser.html?platform=windows");
+async function openSettings(page, command, platform = "windows") {
+  await page.goto(`/codey/tests/ui-browser.html?platform=${platform}`);
   await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeVisible({ timeout: 60_000 });
   await page.evaluate(command => {
     const bridge = window.__codexSessionDeleteBridge;
@@ -46,6 +46,25 @@ test("诊断清理接线保留忙碌锁，结果替换进行提示，关闭重�
   await expect(page.getByText("Trace 日志：部分项目未完成", { exact: true })).not.toBeVisible();
   expect(await page.evaluate(() => window.maintenanceBehavior.calls.length)).toBe(1);
 });
+
+for (const platform of ["windows", "macos"]) {
+  test(`${platform} 显示 Crashpad 保护与清理入口，并使用正确的诊断目标`, async ({ page }) => {
+    await openSettings(page, "clear_diagnostic_storage", platform);
+    const protection = page.getByRole("switch", { name: "启用 Codex Crashpad 磁盘保护", exact: true });
+    await expect(protection).toBeChecked();
+    expect(await page.evaluate(async () => (
+      await window.__codexSessionDeleteBridge("/api/runtime_status", {})
+    ).crashpadDiskProtectionActive)).toBe(true);
+
+    const cleanup = page.getByRole("button", { name: "分析并清理 Crashpad 报告", exact: true });
+    await cleanup.click();
+    await expect(cleanup).toBeDisabled();
+    expect(await page.evaluate(() => window.maintenanceBehavior.calls)).toEqual([{ target: "crashpad" }]);
+    await page.evaluate(() => window.maintenanceBehavior.complete({ status: "ok", errors: [] }));
+    await expect(cleanup).toBeEnabled();
+    await expect(page.getByText("Crashpad：分析并清理完成", { exact: true })).toBeVisible();
+  });
+}
 
 test("系统设置修复须确认，执行时锁定按钮，完成后显示备份与重启提示", async ({ page }) => {
   await openSettings(page, "repair_codex_config");
