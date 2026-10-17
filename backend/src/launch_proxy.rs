@@ -84,6 +84,7 @@ impl CodexLaunchProxy {
         self.capture.clone()
     }
 
+    #[cfg(any(windows, target_os = "macos", test))]
     pub(crate) fn authentication(
         &self,
     ) -> Option<crate::network_proxy::process_gateway::ProcessProxyAuth> {

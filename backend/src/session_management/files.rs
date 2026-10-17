@@ -30,12 +30,12 @@ pub(super) fn checked(home: &Path, path: &Path) -> Result<()> {
         );
         current.push(component);
         let metadata = fs::symlink_metadata(&current)?;
-        let mut link = metadata.file_type().is_symlink();
+        let link = metadata.file_type().is_symlink();
         #[cfg(windows)]
-        {
+        let link = {
             use std::os::windows::fs::MetadataExt;
-            link |= metadata.file_attributes() & 0x400 != 0;
-        }
+            link || metadata.file_attributes() & 0x400 != 0
+        };
         ensure!(!link, "会话存储包含链接，已拒绝操作：{}", current.display());
     }
     ensure!(
