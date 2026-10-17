@@ -20,6 +20,7 @@ mod network_proxy;
 mod official_accounts;
 mod plugins;
 mod prompt_optimization;
+mod request_logs;
 mod runtime;
 mod sessions;
 mod updates;
@@ -109,7 +110,6 @@ use crate::notifications::NotificationChannelConfig;
 use crate::official_accounts::OfficialAccountStore;
 use crate::pending_approval;
 use crate::plugin_marketplace;
-use crate::route_request_log::RouteRequestLogQuery;
 use crate::route_request_log::RouteRequestLogReconfigure;
 use crate::session_metadata;
 use crate::session_transfer;
@@ -1137,44 +1137,11 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
                 .unwrap_or(false);
             runtime_status_with_options(state, refresh_injection_status).await
         }
-        "open_route_request_logs" => {
-            open_route_request_logs(state, args.get("theme").and_then(Value::as_str)).await
-        }
-        "query_route_request_logs" => {
-            match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
-                Ok(query) => query_route_request_logs(state, query).await,
-                Err(error) => Err(format!("请求日志查询参数无效：{error}")),
-            }
-        }
-        "query_route_request_log_models" => {
-            match serde_json::from_value::<crate::route_request_log::RouteRequestLogModelQuery>(
-                args.clone(),
-            ) {
-                Ok(query) => {
-                    let backend = state.config.read().await.route_request_log.backend;
-                    let root = codey_runtime_core::paths::default_app_state_dir();
-                    tokio::task::spawn_blocking(move || {
-                        crate::route_request_log::query_route_request_log_models(
-                            &root, backend, query,
-                        )
-                        .and_then(|page| serde_json::to_value(page).map_err(Into::into))
-                    })
-                    .await
-                    .map_err(|error| error.to_string())
-                    .and_then(|result| {
-                        result.map_err(|error| format!("查询模型候选失败：{error:#}"))
-                    })
-                }
-                Err(error) => Err(format!("模型候选查询参数无效：{error}")),
-            }
-        }
-        "query_route_request_log_stats" => {
-            match serde_json::from_value::<RouteRequestLogQuery>(args.clone()) {
-                Ok(query) => query_route_request_log_stats(state, query).await,
-                Err(error) => Err(format!("请求日志统计参数无效：{error}")),
-            }
-        }
-        "clear_route_request_logs" => clear_route_request_logs(state).await,
+        "open_route_request_logs"
+        | "query_route_request_logs"
+        | "query_route_request_log_models"
+        | "query_route_request_log_stats"
+        | "clear_route_request_logs" => request_logs::invoke(state, command, &args).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
         "clear_diagnostic_storage" | "repair_codex_config" | "repair_main_process_injection" => {
             diagnostics::invoke(state, command, &args).await
@@ -1260,24 +1227,6 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
     result.unwrap_or_else(api_error_message)
 }
 
-pub async fn open_route_request_logs(
-    state: &Arc<AppState>,
-    theme: Option<&str>,
-) -> Result<Value, String> {
-    let endpoint = state
-        .runtime
-        .lock()
-        .await
-        .as_ref()
-        .and_then(|runtime| runtime.local_router_endpoint())
-        .ok_or_else(|| "本地路由尚未运行，无法打开请求日志".to_string())?;
-    let url = endpoint.request_log_url(theme);
-    tokio::task::spawn_blocking(move || open_system_browser(&url))
-        .await
-        .map_err(|error| format!("打开系统浏览器任务异常退出：{error}"))??;
-    Ok(json!({"status":"ok"}))
-}
-
 pub(super) fn open_system_browser(url: &str) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     let mut command = Command::new("open");
@@ -1358,76 +1307,6 @@ mod file_manager_tests {
             PathBuf::from("/tmp/plugins")
         );
     }
-}
-
-pub async fn query_route_request_logs(
-    state: &Arc<AppState>,
-    query: RouteRequestLogQuery,
-) -> Result<Value, String> {
-    let backend = state.config.read().await.route_request_log.backend;
-    let root = codey_runtime_core::paths::default_app_state_dir();
-    let page = tokio::task::spawn_blocking(move || {
-        crate::route_request_log::query_route_request_logs(&root, backend, query)
-    })
-    .await
-    .map_err(|error| format!("请求日志查询任务异常退出：{error}"))?
-    .map_err(|error| format!("查询请求日志失败：{error:#}"))?;
-    serde_json::to_value(page).map_err(|error| format!("请求日志查询结果序列化失败：{error}"))
-}
-
-async fn query_route_request_log_stats(
-    state: &Arc<AppState>,
-    query: RouteRequestLogQuery,
-) -> Result<Value, String> {
-    let backend = state.config.read().await.route_request_log.backend;
-    let root = codey_runtime_core::paths::default_app_state_dir();
-    let stats = tokio::task::spawn_blocking(move || {
-        crate::route_request_log::query_route_request_log_stats(&root, backend, query)
-    })
-    .await
-    .map_err(|error| format!("请求日志统计任务异常退出：{error}"))?
-    .map_err(|error| format!("查询请求日志统计失败：{error:#}"))?;
-    let mut value =
-        serde_json::to_value(stats).map_err(|error| format!("请求日志统计序列化失败：{error}"))?;
-    let runtime = state.runtime.lock().await.clone();
-    if let Some(runtime) = runtime {
-        value["recordingHealth"] = serde_json::to_value(runtime.request_log_health().await)
-            .map_err(|error| format!("请求日志状态序列化失败：{error}"))?;
-    }
-    Ok(value)
-}
-
-pub async fn clear_route_request_logs(state: &Arc<AppState>) -> Result<Value, String> {
-    // Keep the runtime decision stable while the controller serializes the
-    // writer shutdown/delete/restart sequence. This does not stop or lock the
-    // request forwarding task itself.
-    let _runtime_operation = state.runtime_operation.lock().await;
-    let runtime = state.runtime.lock().await.clone();
-    let recording_enabled = {
-        let config = state.config.read().await;
-        config.route_request_log.enabled
-            && config.route_request_log.sample_rate_per_million > 0
-            && config.local_router_enabled
-    };
-    let result = if let Some(runtime) = runtime
-        && let Some(result) = runtime.clear_request_logs().await
-    {
-        result
-    } else {
-        let root = codey_runtime_core::paths::default_app_state_dir();
-        match tokio::task::spawn_blocking(move || {
-            crate::route_request_log::clear_route_request_log_files(&root, recording_enabled)
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(error) => crate::route_request_log::RouteRequestLogClearResult::failed(
-                recording_enabled,
-                format!("请求日志清理任务异常退出：{error}"),
-            ),
-        }
-    };
-    serde_json::to_value(result).map_err(|error| format!("请求日志清理结果序列化失败：{error}"))
 }
 
 pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
