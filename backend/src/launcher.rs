@@ -1824,6 +1824,11 @@ async fn prepare_startup_patches_with_port_selector(
     Ok(StartupPatchState { debug_port })
 }
 
+struct RuntimeLaunchOverrides<'a> {
+    runtime_config_overrides: &'a [String],
+    launch_proxy: Option<&'a crate::launch_proxy::CodexLaunchProxy>,
+}
+
 async fn spawn_and_inject_runtime(
     home: &std::path::Path,
     config: &CodeyConfig,
@@ -1831,9 +1836,12 @@ async fn spawn_and_inject_runtime(
     injection_scripts: &cdp::PreparedInjectionScripts,
     mut storage: StartupStorageState,
     patch: &StartupPatchState,
-    runtime_config_overrides: &[String],
-    launch_proxy: Option<&crate::launch_proxy::CodexLaunchProxy>,
+    overrides: RuntimeLaunchOverrides<'_>,
 ) -> Result<SpawnedRenderer> {
+    let RuntimeLaunchOverrides {
+        runtime_config_overrides,
+        launch_proxy,
+    } = overrides;
     let spawn_inject_started = Instant::now();
     let mut spawned = match spawn_codex(
         &mut storage.app_dir,
@@ -2233,8 +2241,10 @@ impl CodeyRuntime {
             &injection_scripts,
             storage,
             &patch,
-            &runtime_config_overrides,
-            launch_proxy.as_ref(),
+            RuntimeLaunchOverrides {
+                runtime_config_overrides: &runtime_config_overrides,
+                launch_proxy: launch_proxy.as_ref(),
+            },
         )
         .await
         {

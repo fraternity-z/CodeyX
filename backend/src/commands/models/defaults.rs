@@ -268,26 +268,30 @@ async fn commit_official_route_config(
     };
     let (account_id, warning) = match save_account.await {
         Ok(account_id) => (account_id, None),
-        Err(error) => match {
+        Err(error) => {
             let store = state.store.clone();
-            tokio::task::spawn_blocking(move || store.restore_after_failed_save(previous))
-                .await
-                .map_err(|error| format!("恢复 Codey 配置任务异常退出：{error}"))
-                .and_then(|result| result.map_err(|error| error.to_string()))
-        } {
-            Ok(restored) => {
-                *state.config.write().await = restored;
-                return Err(
-                    rollback_model_catalog_after_config_save_async(catalog_refresh, error).await,
-                );
+            let restored =
+                tokio::task::spawn_blocking(move || store.restore_after_failed_save(previous))
+                    .await
+                    .map_err(|error| format!("恢复 Codey 配置任务异常退出：{error}"))
+                    .and_then(|result| result.map_err(|error| error.to_string()));
+            match restored {
+                Ok(restored) => {
+                    *state.config.write().await = restored;
+                    return Err(rollback_model_catalog_after_config_save_async(
+                        catalog_refresh,
+                        error,
+                    )
+                    .await);
+                }
+                Err(rollback_error) => (
+                    None,
+                    Some(format!(
+                        "主配置已保存，但官方账号设置未保存：{error}；恢复主配置失败：{rollback_error}，请重新读取并确认线路设置"
+                    )),
+                ),
             }
-            Err(rollback_error) => (
-                None,
-                Some(format!(
-                    "主配置已保存，但官方账号设置未保存：{error}；恢复主配置失败：{rollback_error}，请重新读取并确认线路设置"
-                )),
-            ),
-        },
+        }
     };
     *state.config.write().await = config.clone();
     Ok(SavedOfficialRouteConfig {

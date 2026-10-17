@@ -357,8 +357,10 @@ pub(super) async fn spawn_codex(
                     &runtime_arguments,
                     runtime_config_overrides,
                     subagent_gate_active,
-                    launch_proxy_environment.as_deref(),
-                    options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
+                    WindowsLaunchProxyContext {
+                        environment: launch_proxy_environment.as_deref(),
+                        capture: options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
+                    },
                     format!(
                         "启动尝试 {attempt}/2：NODE_OPTIONS 注入不可用（{}），主进程 Inspector 不可用（{}），且 CLI 兼容入口不可用：{error:#}",
                         fuses.node_options.as_str(),
@@ -1659,6 +1661,12 @@ fn combined_startup_error(
     .into()
 }
 
+#[cfg(windows)]
+struct WindowsLaunchProxyContext<'a> {
+    environment: Option<&'a [(String, String)]>,
+    capture: Option<codey_traffic_service::client::ProcessScope>,
+}
+
 /// Launches Codex with no compatibility entry at all. Only allowed when the
 /// launch carries no runtime constraints; otherwise the caller must stop.
 #[cfg(windows)]
@@ -1668,8 +1676,7 @@ async fn launch_windows_codex_without_compatibility(
     runtime_arguments: &[String],
     runtime_config_overrides: &[String],
     subagent_gate_active: bool,
-    launch_proxy_environment: Option<&[(String, String)]>,
-    capture: Option<codey_traffic_service::client::ProcessScope>,
+    launch_proxy: WindowsLaunchProxyContext<'_>,
     startup_error: String,
 ) -> Result<SpawnedCodex> {
     if !runtime_config_overrides.is_empty() {
@@ -1686,9 +1693,9 @@ async fn launch_windows_codex_without_compatibility(
         app_dir,
         debug_port,
         runtime_arguments,
-        launch_proxy_environment.unwrap_or(&[]),
-        launch_proxy_environment.is_some(),
-        capture,
+        launch_proxy.environment.unwrap_or(&[]),
+        launch_proxy.environment.is_some(),
+        launch_proxy.capture,
     )
     .await
     .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;

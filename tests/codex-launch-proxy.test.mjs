@@ -86,7 +86,12 @@ test("launch proxy reaches Chromium arguments, spawn environment and restart det
   assert.match(proxySource, /"NO_PROXY"/);
   assert.match(
     processSource,
-    /local_router_proxy_bypass_environment[\s\S]*launch_proxy_environment/,
+    /let launch_proxy_environment = options\s*\.launch_proxy\s*\.map\(crate::launch_proxy::CodexLaunchProxy::environment\)/,
+  );
+  assert.match(processSource, /local_router_proxy_bypass_environment/);
+  assert.match(
+    processSource,
+    /if let Some\(environment\) = &launch_proxy_environment \{\s*launch_environment\.extend\(environment\.iter\(\)\.cloned\(\)\)/,
   );
   assert.match(
     appServerSource,

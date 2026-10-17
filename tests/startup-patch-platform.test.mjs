@@ -125,8 +125,9 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   assert.ok(overrideGuard >= 0 && overrideGuard < subagentGuard && subagentGuard < degradedLaunch);
   assert.match(
     noEntryLaunch.slice(degradedLaunch, degradedLaunch + 400),
-    /runtime_arguments,\s*launch_proxy_environment\.unwrap_or\(&\[\]\),\s*launch_proxy_environment\.is_some\(\)/,
+    /runtime_arguments,\s*launch_proxy\.environment\.unwrap_or\(&\[\]\),\s*launch_proxy\.environment\.is_some\(\),\s*launch_proxy\.capture/,
   );
+  assert.match(windowsSpawn.slice(noEntry, launch), /WindowsLaunchProxyContext \{\s*environment: launch_proxy_environment\.as_deref\(\),\s*capture: options\.launch_proxy\.and_then\(crate::launch_proxy::CodexLaunchProxy::capture_scope\)/);
   assert.match(noEntryLaunch, /performance_status = "degraded"/);
 });
 
