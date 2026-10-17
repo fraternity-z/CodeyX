@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readSessionToolsSource } from "./helpers/session-tools-source.mjs";
 import test from "node:test";
 import vm from "node:vm";
 
 import { FakeElementCore } from "./helpers/fake-element.mjs";
 
-const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
+const source = readSessionToolsSource();
 
 class FakeElement extends FakeElementCore {
   constructor(tag = "div", attributes = {}) {
@@ -135,6 +135,26 @@ function thread(document, sessionId, running = false) {
 }
 
 const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+test("session UI disposal and reload preserve the native adapter and in-flight operations", async () => {
+  let complete;
+  const runtime = fixture({ controller: { manager: {
+    sendRequest: () => new Promise((resolve) => { complete = resolve; }),
+  } } });
+  runtime.load();
+  const adapter = runtime.window.__codeyNativeRuntime;
+  const reload = runtime.window.__codeyReloadMcpServers;
+  const pending = reload();
+  await settle();
+  runtime.window.__codeySessionToolsInstall.dispose();
+  assert.equal(runtime.window.__codeyNativeRuntime, adapter);
+  assert.equal(runtime.window.__codeyReloadMcpServers, reload);
+  runtime.load();
+  assert.equal(runtime.window.__codeyNativeRuntime, adapter);
+  complete({});
+  assert.equal((await pending).ok, true);
+  assert.equal(runtime.window.__codeyPageCapabilities.mcpReload.status, "available");
+});
 
 for (const idle of [true, false]) {
   test(`dispose cancels the initial ${idle ? "idle callback" : "timeout"} and stale callbacks stay inert`, () => {

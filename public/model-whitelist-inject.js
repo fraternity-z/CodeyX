@@ -1,6 +1,6 @@
 // Keep Codex's native model allowlist aligned with the current CodeyX channel.
 (() => {
-  const patchVersion = "66";
+  const patchVersion = "67";
   const nativeSelectionOnly = window.__codeyNativeModelSelectionOnly === true;
   const officialProviderId = "openai";
   const localRouterProviderId = "codey_router";
@@ -3157,10 +3157,6 @@
     requestGatePending = Promise.resolve().then(async () => {
       const knownClient = window.__codeyAppServerRequestClients?.get?.("local");
       if (knownClient) return installRequestClientGate(knownClient);
-      if (typeof window.__codeyLoadCodexRequestClient !== "function"
-        && typeof window.__codexSessionDeleteBridge === "function") {
-        await window.__codexSessionDeleteBridge("/internal/codey/session-tools/load", {}, { timeoutMs: 20_000 });
-      }
       if (typeof window.__codeyLoadCodexRequestClient !== "function") throw new Error("模型请求校验尚未就绪");
       const client = await window.__codeyLoadCodexRequestClient();
       if (disposed) throw new Error("模型请求校验已重新加载");

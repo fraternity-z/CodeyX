@@ -3,19 +3,19 @@ import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import test from "node:test";
 
-const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
+const source = readFileSync(new URL("../public/codex-runtime-adapter.js", import.meta.url), "utf8");
 const resolverStart = source.indexOf("  const appServerManagerResolverFromModule =");
-const resolverEnd = source.indexOf("  window.__codeyAppServerManagerResolverFromModule =", resolverStart);
+const resolverEnd = source.indexOf("  const reactFiberFromElement =", resolverStart);
 assert.ok(resolverStart > 0 && resolverEnd > resolverStart);
 const resolverSource = source.slice(resolverStart, resolverEnd);
 const registryStart = source.indexOf("  const declaredMethod =");
-const registryEnd = source.indexOf("  window.__codeyAppServerManagerRegistryResolverFromModule =", registryStart);
+const registryEnd = source.indexOf("  const nativeAppServerManagerFromScope =", registryStart);
 assert.ok(registryStart > 0 && registryEnd > registryStart);
 const registrySource = source.slice(registryStart, registryEnd);
 const start = source.indexOf("  const remoteCreationInputsFactoryFromModule =");
-const end = source.indexOf("  window.__codeyRemoteControl = remoteControl;", start);
+const end = source.indexOf("  // Preserve existing host", start);
 assert.ok(start > 0 && end > start);
-const remoteSource = source.slice(start, end + "  window.__codeyRemoteControl = remoteControl;".length);
+const remoteSource = source.slice(start, end) + "\nwindow.__codeyRemoteControl = remoteControl;";
 
 function fixture({ compatible = true, ready = true, splitModules = true, managerAvailable = true, managerApi = "rpc", brokenAsset = false, nativeTier = false } = {}) {
   const calls = [];

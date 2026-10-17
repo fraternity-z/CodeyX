@@ -7,10 +7,12 @@ import { FakeElementCore } from "./helpers/fake-element.mjs";
 
 const source = readFileSync(new URL("../public/renderer-inject.js", import.meta.url), "utf8");
 const bridgeSource = readFileSync(new URL("../public/codey-bridge.js", import.meta.url), "utf8");
+const nativeRuntimeSource = readFileSync(new URL("../public/codex-runtime-adapter.js", import.meta.url), "utf8");
 
-const runRenderer = (sandbox) => {
+const runRenderer = (sandbox, { nativeRuntime = false } = {}) => {
   const context = vm.createContext(sandbox);
   vm.runInContext(bridgeSource, context);
+  if (nativeRuntime) vm.runInContext(nativeRuntimeSource, context);
   vm.runInContext(source, context);
 };
 
@@ -1516,7 +1518,7 @@ test("mounts usage into the sidebar footer container Codex renders itself", asyn
   assert.match(usage.innerHTML, /data-window="five-hour"/);
 });
 
-test("MCP reload bootstrap talks to the patched App Server client", async () => {
+test("the native adapter reloads MCP without loading session UI", async () => {
   const requests = [];
   const window = {
     __codeyRendererCoreLoaded: true,
@@ -1550,7 +1552,8 @@ test("MCP reload bootstrap talks to the patched App Server client", async () => 
     },
     URLSearchParams,
     window,
-  });
+  }, { nativeRuntime: true });
   assert.equal((await window.__codeyReloadMcpServers()).ok, true);
+  assert.equal(window.__codeySessionToolsInjectLoaded, undefined);
   assert.equal(JSON.stringify(requests), JSON.stringify([["config/mcpServer/reload", {}]]));
 });

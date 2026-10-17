@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readSessionToolsSource } from "./helpers/session-tools-source.mjs";
 import test from "node:test";
 import vm from "node:vm";
 
 import { FakeElementCore } from "./helpers/fake-element.mjs";
 
-const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
+const source = readSessionToolsSource();
 
 class FakeElement extends FakeElementCore {
   constructor(tagName = "div") {

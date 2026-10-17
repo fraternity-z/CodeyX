@@ -5,13 +5,14 @@ import vm from "node:vm";
 import { readSource } from "./helpers/read-source.mjs";
 
 test("renderer core loads session tools after idle time or sidebar use", async () => {
-  const [inject, sessionTools, bridge, petShield, securityShield, promptOptimize] = await Promise.all([
+  const [inject, sessionTools, bridge, petShield, securityShield, promptOptimize, nativeRuntime] = await Promise.all([
     readSource("public/renderer-inject.js"),
     readSource("public/codey-inject.js"),
     readSource("public/codey-bridge.js"),
     readSource("public/pet-control-shield.js"),
     readSource("public/security-warning-shield.js"),
     readSource("public/prompt-optimize.js"),
+    readSource("public/codex-runtime-adapter.js"),
   ]);
 
   assert.match(inject, /const queryWithin = \(root, selector\)/);
@@ -83,13 +84,13 @@ test("renderer core loads session tools after idle time or sidebar use", async (
     sessionTools,
     /loadCodexSessionController\(\{ requireCompletionReconcile: true \}\)/,
   );
-  assert.match(sessionTools, /fallbackDispatcher && !requireCompletionReconcile/);
-  assert.match(sessionTools, /feature === "mcpReload"/);
-  assert.match(sessionTools, /window\.__codeyAppServerRequestClients/);
-  assert.match(sessionTools, /sendRequest\("config\/mcpServer\/reload", \{\}\)/);
-  assert.match(sessionTools, /capabilityProbes\.delete\("mcpReload"\)/);
-  assert.match(inject, /window\.__codeyAppServerRequestClients/);
-  assert.match(inject, /bootstrapReloadMcpServers/);
+  assert.match(nativeRuntime, /fallbackDispatcher && !requireCompletionReconcile/);
+  assert.match(nativeRuntime, /feature === "mcpReload"/);
+  assert.match(nativeRuntime, /window\.__codeyAppServerRequestClients/);
+  assert.match(nativeRuntime, /sendRequest\("config\/mcpServer\/reload", \{\}\)/);
+  assert.match(nativeRuntime, /capabilityProbes\.delete\("mcpReload"\)/);
+  assert.doesNotMatch(sessionTools, /discoverCodexAppAssetUrls|appServerManagerFromReact|capabilityProbes/);
+  assert.doesNotMatch(inject, /bootstrapReloadMcpServers|window\.__codeyAppServerRequestClients/);
   assert.doesNotMatch(
     sessionTools,
     /stuckCompletion|stuckRunning|activityRevision|currentTurnRenderFingerprint|rehydrateRunningConversation|\/session\/completion-state/,

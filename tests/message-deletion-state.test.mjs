@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
+const source = readFileSync(new URL("../public/codex-runtime-adapter.js", import.meta.url), "utf8");
 const start = source.indexOf("  const messageDeletionMethods = {");
 const end = source.indexOf("  const isLocalMessageDeletionManager", start);
 assert.ok(start >= 0 && end > start);

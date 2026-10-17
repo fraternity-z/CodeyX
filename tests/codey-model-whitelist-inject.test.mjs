@@ -115,6 +115,14 @@ test("native request gate fails when the client cannot be verified", async () =>
   runtime.patch.dispose();
 });
 
+test("missing native adapter fails the request gate without loading session UI", async () => {
+  // The bridge fixture rejects every route except the model catalog. An
+  // accidental dependency on session-tools/load would change this failure.
+  const runtime = await loadPatch(mixedCompactionCatalog, [statsigClient()]);
+  await assert.rejects(runtime.patch.ensureRequestGate(), /模型请求校验尚未就绪/);
+  runtime.patch.dispose();
+});
+
 test("resume and fork retain the saved route after remote compaction is disabled", async () => {
   const catalog = {
     ...mixedCompactionCatalog,
@@ -893,7 +901,7 @@ test("a backend-pushed catalog updates immediately without a nested bridge reque
   const { patch } = runtime;
   const eventsBeforePush = client.events.length;
 
-  assert.equal(patch.version, "66");
+  assert.equal(patch.version, "67");
   assert.equal(await patch.setCatalog({
     status: "ok",
     models: ["gpt-5.6-sol", "provider-hot-pushed"],

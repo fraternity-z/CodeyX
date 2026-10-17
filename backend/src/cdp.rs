@@ -29,9 +29,11 @@ const DISCOVERY_RETRY_MAX_INTERVAL: Duration = Duration::from_millis(200);
 // 列表的 loopback 请求，远低于此值。
 const DISCOVERY_RETRY_COST_BUDGET: Duration = Duration::from_millis(100);
 const BRIDGE_RETRY_MAX_INTERVAL: Duration = Duration::from_millis(500);
-const SESSION_TOOLS_INJECT_TIMEOUT: Duration = Duration::from_secs(8);
+const NATIVE_RUNTIME_INJECT_TIMEOUT: Duration = Duration::from_secs(8);
 const MCP_RELOAD_EVALUATE_TIMEOUT: Duration = Duration::from_secs(20);
 const CODEY_BRIDGE_SCRIPT: &str = include_str!("../../dist-overlay/inject/codey-bridge.js");
+const CODEX_RUNTIME_ADAPTER_SCRIPT: &str =
+    include_str!("../../dist-overlay/inject/codex-runtime-adapter.js");
 const MODEL_WHITELIST_INJECT_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/model-whitelist-inject.js");
 const RENDERER_INJECT_SCRIPT: &str = include_str!("../../dist-overlay/inject/renderer-inject.js");
@@ -51,6 +53,7 @@ const MAX_INJECTION_ERROR_CHARS: usize = 500;
 // 面向用户的是归类后的摘要；完整错误链只进诊断与错误日志，单独给一个更大预算。
 const MAX_INJECTION_DETAIL_CHARS: usize = 2000;
 static SETTINGS_OVERLAY_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
+static NATIVE_RUNTIME_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 static SESSION_TOOLS_LOAD_SCRIPT: OnceLock<Arc<str>> = OnceLock::new();
 
 #[derive(Clone, Copy)]
@@ -264,6 +267,15 @@ pub fn prepare_injection_scripts(
         ),
 
         (
+            "native-runtime",
+            "原生接口适配",
+            CODEX_RUNTIME_ADAPTER_SCRIPT,
+            r#"window.__codeyNativeRuntime?.isActive?.() === true
+              ? "原生接口适配已加载，能力按需探测" : """#
+                .to_string(),
+            Internal,
+        ),
+        (
             "model-whitelist",
             "模型白名单",
             MODEL_WHITELIST_INJECT_SCRIPT,
@@ -401,6 +413,7 @@ pub fn prepare_injection_scripts(
     }
     let mut core_bundle = String::with_capacity(
         CODEY_BRIDGE_SCRIPT.len()
+            + CODEX_RUNTIME_ADAPTER_SCRIPT.len()
             + MODEL_WHITELIST_INJECT_SCRIPT.len()
             + RENDERER_INJECT_SCRIPT.len()
             + PET_CONTROL_SHIELD_SCRIPT.len()
@@ -1208,9 +1221,8 @@ pub struct ModelWhitelistRefresh {
 }
 
 pub async fn reload_mcp_servers(websocket_url: &str) -> Result<()> {
-    // 会话工具是按需注入的。若在已阻塞的 awaitPromise 里再走页面桥接去
-    // Runtime.evaluate 注入脚本，部分 Chromium/Electron 会把后续 evaluate 排
-    // 到当前 Promise 之后，形成死等。这里先用独立命令装好刷新入口。
+    // 在 awaitPromise 之前确认原生适配，避免嵌套 evaluate 等待；刷新接口
+    // 不依赖会话 UI 的安装，也不应触发侧栏和消息选择器的初始化。
     ensure_mcp_reload_function_ready(websocket_url).await;
     let response = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
         websocket_url,
@@ -1275,9 +1287,9 @@ async fn ensure_mcp_reload_function_ready(websocket_url: &str) {
     }
     let _ = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
         websocket_url,
-        &prepared_session_tools_load_script(),
+        &prepared_native_runtime_load_script(),
         false,
-        SESSION_TOOLS_INJECT_TIMEOUT,
+        NATIVE_RUNTIME_INJECT_TIMEOUT,
     )
     .await;
     for delay_ms in [80_u64, 200, 500, 1000] {
@@ -1303,9 +1315,9 @@ pub(crate) async fn remote_control_request(
     if runtime_value(&ready).and_then(serde_json::Value::as_bool) != Some(true) {
         let loaded = codey_runtime_core::bridge::evaluate_script_with_await_promise_timeout(
             websocket_url,
-            &prepared_session_tools_load_script(),
+            &prepared_native_runtime_load_script(),
             false,
-            SESSION_TOOLS_INJECT_TIMEOUT,
+            NATIVE_RUNTIME_INJECT_TIMEOUT,
         )
         .await
         .map_err(|_| "桌面会话接口加载失败，请重新连接")?;
@@ -1687,6 +1699,26 @@ fn prepared_settings_overlay_load_script() -> Arc<str> {
     SETTINGS_OVERLAY_LOAD_SCRIPT
         .get_or_init(|| Arc::from(settings_overlay_load_script(SETTINGS_OVERLAY_SCRIPT)))
         .clone()
+}
+
+fn prepared_native_runtime_load_script() -> Arc<str> {
+    NATIVE_RUNTIME_LOAD_SCRIPT
+        .get_or_init(|| Arc::from(native_runtime_load_script(CODEX_RUNTIME_ADAPTER_SCRIPT)))
+        .clone()
+}
+
+fn native_runtime_load_script(script: &str) -> String {
+    format!(
+        r#"(() => {{
+  try {{
+{script}
+  }} catch (error) {{
+    return String(error instanceof Error ? error.message : error);
+  }}
+  return window.__codeyNativeRuntime?.isActive?.() === true
+    ? "" : "未生成原生接口适配";
+}})()"#
+    )
 }
 
 fn prepared_session_tools_load_script() -> Arc<str> {
@@ -2139,7 +2171,8 @@ mod tests {
                             if expression == r#"typeof window.__codeyRemoteControl === "function""# {
                                 json!({"result":{"value":loaded}})
                             } else {
-                                assert!(expression.contains("__codeySessionToolsInjectLoaded"));
+                                assert!(expression.contains("__codeyNativeRuntime"));
+                                assert!(!expression.contains("__codeySessionToolsInjectLoaded"));
                                 loaded = true;
                                 json!({"result":{"value":""}})
                             }
@@ -2184,14 +2217,32 @@ mod tests {
         use futures_util::{SinkExt, StreamExt};
         use serde_json::json;
 
-        for (payload, succeeds) in [
-            (json!({"result":{"type":"boolean","value":true}}), true),
-            (json!({"result":{"type":"boolean","value":false}}), false),
-            (json!({"exceptionDetails":{"text":"Unknown method"}}), false),
+        for (payload, succeeds, already_loaded) in [
+            (
+                json!({"result":{"type":"boolean","value":true}}),
+                true,
+                true,
+            ),
+            (
+                json!({"result":{"type":"boolean","value":false}}),
+                false,
+                true,
+            ),
+            (
+                json!({"exceptionDetails":{"text":"Unknown method"}}),
+                false,
+                true,
+            ),
+            (
+                json!({"result":{"type":"boolean","value":true}}),
+                true,
+                false,
+            ),
         ] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let address = listener.local_addr().unwrap();
             let server = tokio::spawn(async move {
+                let mut adapter_ready = already_loaded;
                 loop {
                     let Ok((stream, _)) = listener.accept().await else {
                         break;
@@ -2224,8 +2275,12 @@ mod tests {
                             } else if expression
                                 .contains("typeof window.__codeyReloadMcpServers === \"function\"")
                             {
-                                json!({"result":{"type":"boolean","value":true}})
+                                json!({"result":{"type":"boolean","value":adapter_ready}})
                             } else {
+                                assert!(expression.contains("__codeyNativeRuntime"));
+                                assert!(!expression.contains("__codeySessionToolsInstall"));
+                                assert!(!expression.contains(SESSION_TOOLS_LOAD_PATH));
+                                adapter_ready = true;
                                 json!({"result":{"type":"string","value":""}})
                             }
                         } else {
@@ -2258,6 +2313,39 @@ mod tests {
             );
             server.await.unwrap();
         }
+    }
+
+    #[test]
+    fn native_runtime_loader_works_without_ui_and_reports_installation_failure() {
+        let scripts = [
+            native_runtime_load_script(CODEX_RUNTIME_ADAPTER_SCRIPT),
+            native_runtime_load_script("throw new Error('adapter failed');"),
+            native_runtime_load_script(""),
+        ];
+        let harness = r#"
+const assert = require('node:assert/strict');
+const vm = require('node:vm');
+const [source, broken, missing] = JSON.parse(process.argv[1]);
+const context = vm.createContext({ window: {} });
+assert.equal(vm.runInContext(source, context), '');
+const adapter = context.window.__codeyNativeRuntime;
+assert.equal(typeof context.window.__codeyReloadMcpServers, 'function');
+assert.equal(typeof context.window.__codeyRemoteControl, 'function');
+assert.equal(context.window.__codeySessionToolsInstall, undefined);
+assert.equal(vm.runInContext(source, context), '');
+assert.equal(context.window.__codeyNativeRuntime, adapter);
+assert.equal(vm.runInNewContext(broken, { window: {} }), 'adapter failed');
+assert.equal(vm.runInNewContext(missing, { window: {} }), '未生成原生接口适配');
+"#;
+        let output = std::process::Command::new("node")
+            .args(["-e", harness, &serde_json::to_string(&scripts).unwrap()])
+            .output()
+            .expect("Node should run the generated native adapter loader");
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     #[test]
@@ -2792,6 +2880,10 @@ const run = async (patch) => {
             .find("window.__codeyRendererCoreLoaded")
             .expect("renderer bootstrap must be part of renderer-controls");
         assert!(shared_runtime_offset < renderer_offset);
+        let native_runtime_offset = core.find("window.__codeyNativeRuntime").unwrap();
+        let model_patch_offset = core.find("window.__codeyModelWhitelistPatch").unwrap();
+        assert!(shared_runtime_offset < native_runtime_offset);
+        assert!(native_runtime_offset < model_patch_offset);
         assert!(core.contains("window.__codeyRendererCoreLoaded"));
         assert!(core.contains(r#"["false"][0]==="true""#));
         assert!(core.contains(SETTINGS_OVERLAY_LOAD_PATH));
@@ -2805,7 +2897,7 @@ const run = async (patch) => {
         assert!(prepared.scripts[1].contains("window.userScriptRan = true;"));
         assert!(prepared.scripts[1].contains(r#"status = "executed""#));
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
-        assert_eq!(prepared.descriptors.len(), 11);
+        assert_eq!(prepared.descriptors.len(), 12);
         assert!(
             prepared
                 .descriptors
@@ -2822,9 +2914,10 @@ const run = async (patch) => {
             prepared.descriptors[0].visibility,
             InjectionScriptVisibility::Internal
         );
-        assert_eq!(prepared.descriptors[5].id, "renderer-controls");
+        assert_eq!(prepared.descriptors[1].id, "native-runtime");
+        assert_eq!(prepared.descriptors[6].id, "renderer-controls");
         assert_eq!(
-            prepared.descriptors[5].visibility,
+            prepared.descriptors[6].visibility,
             InjectionScriptVisibility::Internal
         );
         assert!(
@@ -2925,10 +3018,12 @@ const run = async (patch) => {
         assert_eq!(statuses[0].id, "bridge-helpers");
         assert_eq!(statuses[0].status, "effective");
         assert_eq!(statuses[0].detail.as_deref(), Some("桥接函数可调用"));
-        assert_eq!(statuses[1].id, "model-whitelist");
+        assert_eq!(statuses[1].id, "native-runtime");
         assert_eq!(statuses[1].status, "unknown");
-        assert_eq!(statuses[3].id, "security-warning-shield");
-        assert_eq!(statuses[3].status, "inactive");
+        assert_eq!(statuses[2].id, "model-whitelist");
+        assert_eq!(statuses[2].status, "unknown");
+        assert_eq!(statuses[4].id, "security-warning-shield");
+        assert_eq!(statuses[4].status, "inactive");
         assert_eq!(
             statuses.last().map(|status| status.id.as_str()),
             Some("user-script-1")

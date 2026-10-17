@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readSessionToolsSource } from "./helpers/session-tools-source.mjs";
 import test from "node:test";
 
 import { flushMicrotasks } from "./helpers/flush.mjs";
@@ -8,7 +8,7 @@ import vm from "node:vm";
 
 import { FakeElementCore } from "./helpers/fake-element.mjs";
 
-const source = readFileSync(new URL("../public/codey-inject.js", import.meta.url), "utf8");
+const source = readSessionToolsSource();
 
 class FakeElement extends FakeElementCore {
   constructor(attributes = {}) {
@@ -963,7 +963,7 @@ test("disposed capability discovery cannot replace a new installation's controll
   });
   const pending = runtime.window.__codeyLoadCodexSessionController({ feature: "usage" });
   await flushMicrotasks();
-  runtime.window.__codeySessionToolsInstall.dispose();
+  runtime.window.__codeyNativeRuntime.dispose();
   const replacement = { kind: "manager", manager: { sendRequest() {} } };
   const replacementStatus = { usage: { status: "available", message: "" } };
   runtime.window.__codeyCodexSessionController = replacement;
