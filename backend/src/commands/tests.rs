@@ -18,19 +18,30 @@ async fn context_recovery_preserves_other_settings_and_backs_up_the_budget() {
             },
         )]),
     );
-    let state = AppState {
+    let state = Arc::new(AppState {
         store: ConfigStore::new(directory.path().join("config.json")),
         config: RwLock::new(config.clone()),
         ..AppState::default()
-    };
+    });
     state.store.save(&config).unwrap();
     let original = std::fs::read(state.store.path()).unwrap();
     restore_default_context_budgets(&state).await.unwrap();
     config.model_context_by_provider.clear();
+    config.settings_revision += 1;
     assert_eq!(*state.config.read().await, config);
     let saved: CodeyConfig =
         serde_json::from_slice(&std::fs::read(state.store.path()).unwrap()).unwrap();
     assert_eq!(saved, config);
+    restore_default_context_budgets(&state).await.unwrap();
+    assert_eq!(*state.config.read().await, config, "重复恢复不推进版本");
+    let stale = serde_json::from_slice(&original).unwrap();
+    assert!(
+        save_codey_config_locked(&state, CodeyConfigSaveInput::complete(stale))
+            .await
+            .err()
+            .unwrap()
+            .contains("已被其他操作更新")
+    );
     assert_eq!(
         std::fs::read(directory.path().join("config.json.bak.1")).unwrap(),
         original
@@ -174,6 +185,7 @@ async fn launch_context_recovery_clears_budgets_only_after_confirmation() {
     );
     assert!(saved_budgets(&state).is_empty());
     config.model_context_by_provider.clear();
+    config.settings_revision += 1;
     assert_eq!(*state.config.read().await, config);
     assert_eq!(
         std::fs::read(directory.path().join("config.json.bak.1")).unwrap(),
@@ -203,6 +215,50 @@ async fn launch_context_recovery_clears_budgets_only_after_confirmation() {
         .await
         .unwrap()
     );
+}
+
+#[tokio::test]
+async fn committed_config_save_survives_model_and_provider_status_read_failures() {
+    for (model_failed, provider_failed) in [(true, false), (false, true), (true, true)] {
+        let directory = tempfile::tempdir().unwrap();
+        let config = CodeyConfig {
+            protect_crashpad_pending: false,
+            ..CodeyConfig::default()
+        };
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            config: RwLock::new(config.clone()),
+            ..AppState::default()
+        });
+        let mut input = config;
+        input.stream_max_retries += 1;
+        let saved = save_codey_config_locked(&state, CodeyConfigSaveInput::complete(input))
+            .await
+            .unwrap();
+        let committed = saved.config.clone();
+        let model_state = if model_failed {
+            Err("模拟模型读取失败".to_string())
+        } else {
+            Ok(model_catalog::ModelSelectionState::default())
+        };
+        let provider_status = if provider_failed {
+            Err("模拟线路读取失败".to_string())
+        } else {
+            Ok(codex_provider::status_from_config(&committed))
+        };
+        let response =
+            finish_committed_config_save(&state, saved, model_state, provider_status).await;
+        assert_eq!(response["status"], "ok");
+        assert_eq!(
+            response["config"]["settingsRevision"],
+            committed.settings_revision
+        );
+        assert_eq!(response["modelState"].is_null(), model_failed);
+        assert_eq!(response["providerStatus"].is_null(), provider_failed);
+        assert!(response["warning"].as_str().unwrap().contains("未刷新"));
+        assert_eq!(state.store.load().unwrap(), committed);
+        assert_eq!(*state.config.read().await, committed);
+    }
 }
 
 #[tokio::test]

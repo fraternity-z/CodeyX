@@ -13,8 +13,8 @@ import { thirdPartyRouteModelState } from "./state";
 import type { RouteResult } from "./types";
 
 type Options = Pick<ReturnType<typeof useDraftConfig>,
-  "config" | "dirty" | "setConfig" | "setDirty" | "persistedConfigRef" | "setPersistedConfig" | "isOnlyNativeRouterToggle" | "adoptRouteConfig"
-> & Pick<ReturnType<typeof useModelSelection>, "modelState" | "setModelState" | "beginModelPickerLoad" | "completeModelPickerLoad"> & {
+  "config" | "dirty" | "setConfig" | "setDirty" | "persistedConfigRef" | "isOnlyNativeRouterToggle" | "adoptRouteConfig"
+> & Pick<ReturnType<typeof useModelSelection>, "modelState" | "setModelState" | "beginModelPickerLoad" | "completeModelPickerLoad" | "cancelModelPickerLoad"> & {
   active: boolean;
   isBusy: boolean;
   provider: ProviderStatus["provider"] | undefined;
@@ -27,8 +27,8 @@ type Options = Pick<ReturnType<typeof useDraftConfig>,
 };
 
 export function useRoutesController({ active, config, dirty, isBusy, provider, setConfig, setDirty,
-  persistedConfigRef, setPersistedConfig, isOnlyNativeRouterToggle, adoptRouteConfig,
-  modelState, setModelState, beginModelPickerLoad, completeModelPickerLoad,
+  persistedConfigRef, isOnlyNativeRouterToggle, adoptRouteConfig,
+  modelState, setModelState, beginModelPickerLoad, completeModelPickerLoad, cancelModelPickerLoad,
   setProviderStatus, setStatus, setNotice, setConfirmation, runOperation, persist,
 }: Options) {
   const mounted = useRef(true);
@@ -86,9 +86,10 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
   }
 
   function applyRouteResult(result: RouteResult) {
-    if (!mounted.current) return;
+    if (!mounted.current) return false;
     const merged = adoptRouteConfig(result.config);
-    if (!merged) return;
+    if (!merged) return false;
+    refreshGeneration.current++;
     if (result.providerStatus) setProviderStatus(result.providerStatus);
     if (result.modelState) setModelState(result.modelState);
     if (typeof result.restartRequired === "boolean") {
@@ -96,12 +97,13 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
     }
     setDirty(merged.dirty);
     window.dispatchEvent(new CustomEvent("codey:config-changed", { detail: { config: result.config } }));
+    return true;
   }
 
   const handleOfficialAccountsChanged = useStableEvent((result: OfficialAccountsResult) => {
-    rememberOfficialAccounts(result);
     if (!mounted.current) return;
-    if (result.config) applyRouteResult({ config: result.config, modelState: result.modelState, restartRequired: result.restartRequired });
+    if (result.config && !applyRouteResult({ config: result.config, modelState: result.modelState, restartRequired: result.restartRequired })) return;
+    rememberOfficialAccounts(result);
     if (typeof result.officialAccountAvailable === "boolean") {
       setStatus((current) => ({ ...current, officialAccountAvailable: result.officialAccountAvailable }));
     }
@@ -119,10 +121,10 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
       try {
         const result = await routeRequests.sync();
         if (!mounted.current) return;
-        setPersistedConfig(result.config);
-        setProviderStatus(result.providerStatus);
-        setModelState(result.modelState);
-        setStatus((current) => ({ ...current, restartRequired: result.restartRequired ?? current.restartRequired }));
+        if (!applyRouteResult(result)) {
+          if (nativeMode) cancelModelPickerLoad(session);
+          return;
+        }
         if (nativeMode) completeModelPickerLoad(session,
           result.providerStatus.provider.official ? result.modelState : { ...result.modelState, officialModels: [], officialModelIds: [] },
           "", result.providerStatus.provider.official ? null : result.providerStatus.provider.id);
@@ -164,7 +166,7 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
       const result = await routeRequests.setEnabled(routeId, enabled, config.settingsRevision);
       saved = true;
       if (!mounted.current) return;
-      applyRouteResult(result);
+      if (!applyRouteResult(result)) return;
       const reloadError = result.modelHotReloadError || result.subagentConfigHotReloadError;
       setNotice({ tone: reloadError || result.restartRequired ? "info" : "success",
         text: `线路「${route.name}」已${enabled ? "启用" : "停用"}${reloadError ? `，部分运行配置未更新：${reloadError}` : result.restartRequired ? "，重启 Codex 后完全生效" : ""}` });
@@ -193,7 +195,7 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
     await runRouteOperation("reorder-route-models", async () => {
       const result = await routeRequests.reorderModels(routeId, models, config.settingsRevision);
       if (!mounted.current) return;
-      applyRouteResult(result);
+      if (!applyRouteResult(result)) return;
       setNotice(result.modelHotReloadError
         ? { tone: "info", text: `模型顺序已保存，但模型列表未刷新：${result.modelHotReloadError}` }
         : { tone: "success", text: "模型顺序已保存" });
@@ -205,7 +207,7 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
     await runRouteOperation("delete-route", async () => {
       const result = await routeRequests.remove(routeId, config.settingsRevision);
       if (!mounted.current) return;
-      applyRouteResult(result);
+      if (!applyRouteResult(result)) return;
       setNotice({ tone: result.modelHotReloaded === false ? "info" : "success", text: "线路已删除，相关模型已从选择器移除" });
     });
   }
@@ -239,7 +241,7 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
       try {
         const result = await routeRequests.fetchModels(savedRoute.id, savedConfig.settingsRevision);
         if (!mounted.current) return;
-        applyRouteResult(result);
+        if (!applyRouteResult(result)) { cancelModelPickerLoad(session); return; }
         completeModelPickerLoad(session, savedRoute.authMode === "officialAccount"
           ? result.routeModelState : { ...result.routeModelState, officialModels: [], officialModelIds: [] }, "", savedRoute.id,
           result.config.profiles.find((profile) => profile.id === savedRoute.id)?.supportsAutoReview === true);
@@ -270,11 +272,12 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
         ...(upstreamProxy === undefined ? {} : { upstreamProxy }), ...routeSettings });
       saved = true;
       if (!mounted.current) return;
-      applyRouteResult(modelResult);
+      if (!applyRouteResult(modelResult)) return;
       if (routeSettings) handleOfficialAccountsChanged(modelResult);
       const restartNote = modelResult.restartRequired ? "，重启 Codex 后完全生效" : "，模型与额度展示已更新";
-      setNotice({ tone: modelResult.restartRequired || modelResult.customContextsRestored ? "info" : "success",
-        text: `官方账号设置已保存${restartNote}${customContextRestoredNote(modelResult)}` });
+      const warning = modelResult.warning || modelResult.modelHotReloadError || modelResult.subagentConfigHotReloadError;
+      setNotice({ tone: warning || modelResult.restartRequired || modelResult.customContextsRestored ? "info" : "success",
+        text: `官方账号设置已保存${warning ? `；${warning}` : restartNote}${customContextRestoredNote(modelResult)}` });
     });
     return saved;
   }
@@ -294,7 +297,7 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
     await runRouteOperation("save-default-model", async () => {
       const result = await routeRequests.setDefaultModel(routeId, model);
       if (!mounted.current) return;
-      applyRouteResult(result);
+      if (!applyRouteResult(result)) return;
       setNotice({ tone: result.restartRequired ? "info" : "success", text: `已将全局默认模型设为「${profile.name} / ${model}」` });
     });
   }

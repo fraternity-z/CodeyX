@@ -160,6 +160,7 @@ export type FastContextToolsStatus = {
 
 export type ConfigSaveResult = {
   config: Config;
+  warning?: string;
   providerStatus?: ProviderStatus;
   modelState?: ModelState;
   restartRequired?: boolean;

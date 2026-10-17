@@ -248,9 +248,8 @@ impl RouterServer {
                             .as_ref()
                             .map(|auth| auth.path.clone())
                             .unwrap_or_else(|| self.official_auth_path.clone());
-                        let mut cache = self.account_usage_cache.lock().await;
-                        crate::account_usage::query_snapshot_at(
-                            cache.for_auth_path(&auth_path),
+                        crate::account_usage::query_shared_snapshot_at(
+                            &self.account_usage_cache,
                             &auth_path,
                             args.force_refresh.unwrap_or(false),
                             route.upstream_proxy.as_deref(),

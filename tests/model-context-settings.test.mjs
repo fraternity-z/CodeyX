@@ -35,7 +35,7 @@ function officialPicker(localRouterEnabled = true) {
   const options = {
     config, currentProvider: null, officialAccountAvailable: true,
     runOperation: async (_name, action) => action(),
-    setPersistedConfig: () => {}, setStatus: () => {}, setNotice: () => {},
+    adoptRouteConfig: config => ({ config, dirty: false }), setDirty: () => {}, setStatus: () => {}, setNotice: () => {},
   };
   const render = () => {
     graph.restart();

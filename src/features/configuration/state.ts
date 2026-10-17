@@ -47,5 +47,13 @@ export function configSaveNotice(result: ConfigSaveResult, retryCountChanged: bo
     text += `；${subagentNote}`;
     if (tone === "success") tone = "info";
   }
+  if (result.modelHotReloadError) {
+    text += `；模型列表未能实时更新：${result.modelHotReloadError}`;
+    if (tone === "success") tone = "info";
+  }
+  if (result.warning) {
+    text += `；${result.warning}`;
+    if (tone === "success") tone = "info";
+  }
   return { tone, text };
 }

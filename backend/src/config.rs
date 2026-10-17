@@ -2872,6 +2872,15 @@ impl ConfigStore {
         Ok(config)
     }
 
+    /// 调用方持有配置写锁；失败事务的中间值不能进入正常备份链。
+    pub(crate) fn restore_after_failed_save(&self, config: CodeyConfig) -> Result<CodeyConfig> {
+        let config = config.normalize();
+        let bytes = serde_json::to_vec_pretty(&config)?;
+        crate::fs_util::atomic_write_private_with_parent(&self.path, &bytes)
+            .with_context(|| format!("恢复 Codey 配置失败：{}", self.path.display()))?;
+        Ok(config)
+    }
+
     #[cfg(test)]
     pub fn save(&self, config: &CodeyConfig) -> Result<()> {
         self.persist(config.clone()).map(|_| ())

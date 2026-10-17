@@ -71,7 +71,6 @@ export function App({
     dirty,
     setDirty,
     persistedConfigRef,
-    setPersistedConfig,
     canSyncCurrentProvider,
     editConfig,
     isOnlyNativeRouterToggle,
@@ -197,6 +196,7 @@ export function App({
     setModelPickerVisible,
     beginModelPickerLoad,
     completeModelPickerLoad,
+    cancelModelPickerLoad,
     customModelInput,
     modelInputError,
     modelSyncWarning,
@@ -222,7 +222,8 @@ export function App({
     currentProvider: provider ?? null,
     officialAccountAvailable: status.officialAccountAvailable === true,
     runOperation,
-    setPersistedConfig,
+    adoptRouteConfig,
+    setDirty,
     setStatus,
     setNotice,
   });
@@ -248,8 +249,8 @@ export function App({
   } = useRoutesController({
     active: !embedded || modalVisible,
     config, dirty, isBusy, provider, setConfig, setDirty, persistedConfigRef,
-    setPersistedConfig, isOnlyNativeRouterToggle, adoptRouteConfig,
-    modelState, setModelState, beginModelPickerLoad, completeModelPickerLoad,
+    isOnlyNativeRouterToggle, adoptRouteConfig,
+    modelState, setModelState, beginModelPickerLoad, completeModelPickerLoad, cancelModelPickerLoad,
     setProviderStatus, setStatus, setNotice, setConfirmation, runOperation, persist,
   });
   const {

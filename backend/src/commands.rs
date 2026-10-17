@@ -607,7 +607,11 @@ where
 pub(crate) async fn restore_default_context_budgets(state: &AppState) -> Result<(), String> {
     let _guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
+    if config.model_context_by_provider.is_empty() {
+        return Ok(());
+    }
     config.model_context_by_provider.clear();
+    config.settings_revision = config.settings_revision.saturating_add(1);
     let config = save_config_to_store(state, config).await?;
     *state.config.write().await = config;
     Ok(())
@@ -2236,13 +2240,24 @@ async fn finish_codey_config_save(
     state: &Arc<AppState>,
     saved: SavedCodeyConfig,
 ) -> Result<Value, String> {
+    let model_state = current_model_state_async(&saved.config).await;
+    let provider_status = current_provider_status_async(&saved.config).await;
+    Ok(finish_committed_config_save(state, saved, model_state, provider_status).await)
+}
+
+// 提交之后的状态查询失败只降低响应完整性，不再改变已保存结果。
+async fn finish_committed_config_save(
+    state: &Arc<AppState>,
+    saved: SavedCodeyConfig,
+    model_state: Result<model_catalog::ModelSelectionState, String>,
+    provider_status: Result<codex_provider::ProviderStatus, String>,
+) -> Value {
     sync_waiting_webhook_watcher(state).await;
     sync_wechat_claw_service(state).await;
     if let Some(runtime) = state.runtime.lock().await.clone() {
         runtime.set_crashpad_pending_protection(saved.config.protect_crashpad_pending);
     }
     schedule_crashpad_pending_refresh(state, saved.config.protect_crashpad_pending);
-    let model_state = current_model_state_async(&saved.config).await?;
     let model_hot_reload = hot_reload_runtime_models(state).await;
     let route_request_log_hot_reload = hot_reload_runtime_request_log(state, &saved.config).await;
     let subagent_hot_reload = if saved.reconcile_subagent_config {
@@ -2257,13 +2272,26 @@ async fn finish_codey_config_save(
     let subagent_config_health = subagent_hot_reload.health();
     let subagent_config_repair_reasons = subagent_hot_reload.repair_reasons();
     let subagent_config_hot_reload_error = subagent_hot_reload.error();
-    let provider_status = current_provider_status_async(&saved.config).await?;
+    let warnings = [
+        model_state
+            .as_ref()
+            .err()
+            .map(|error| format!("模型状态未刷新：{error}")),
+        provider_status
+            .as_ref()
+            .err()
+            .map(|error| format!("当前线路状态未刷新：{error}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
     let public_config = redacted_config(&saved.config);
-    Ok(model_hot_reload.add_to_response(json!({
+    model_hot_reload.add_to_response(json!({
         "status":"ok",
         "config":public_config,
-        "providerStatus":provider_status,
-        "modelState":model_state,
+        "providerStatus":provider_status.ok(),
+        "modelState":model_state.ok(),
+        "warning": if warnings.is_empty() { None } else { Some(warnings.join("；")) },
         "fastContextToolsStatus":saved.fast_context_tools_status,
         "restartRequired":restart_required,
         "routeRequestLogHotReloaded":route_request_log_hot_reload.reloaded(),
@@ -2274,7 +2302,7 @@ async fn finish_codey_config_save(
         "subagentConfigHealth":subagent_config_health,
         "subagentConfigRepairReasons":subagent_config_repair_reasons,
         "subagentConfigHotReloadError":subagent_config_hot_reload_error,
-    })))
+    }))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2765,10 +2793,9 @@ async fn query_official_account_usage(
     }
 
     let home = codex_home();
-    let mut cache = state.account_usage_cache.lock().await;
-    account_usage::query_snapshot(
-        cache.for_codex_home(home),
-        home,
+    account_usage::query_shared_snapshot_at(
+        &state.account_usage_cache,
+        &account_usage::codex_auth_path(home),
         force_refresh,
         official_proxy.as_deref(),
     )
@@ -2857,16 +2884,13 @@ async fn query_stored_official_account_usage(
         });
     }
     let upstream_proxy = official_account_usage_proxy(state, &account_id).await;
-    let snapshot = {
-        let mut cache = state.account_usage_cache.lock().await;
-        account_usage::query_snapshot_at(
-            cache.for_auth_path(&auth_path),
-            &auth_path,
-            force_refresh,
-            upstream_proxy.as_deref(),
-        )
-        .await
-    };
+    let snapshot = account_usage::query_shared_snapshot_at(
+        &state.account_usage_cache,
+        &auth_path,
+        force_refresh,
+        upstream_proxy.as_deref(),
+    )
+    .await;
     // 官方额度接口每次都带当前的套餐类型：降级或升级之后它最先变化，账号
     // 记录跟着更新，卡片和账号列表才不会一直显示历史套餐。页头的定时读取
     // 只负责显示，不带这个参数，避免后台轮询改账号信息。

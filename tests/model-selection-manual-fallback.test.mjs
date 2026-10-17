@@ -13,6 +13,7 @@ test("bulk model selection includes every filtered page and preserves unrelated 
   const state = [];
   let cursor = 0;
   const react = {
+    useEffect: () => {},
     useCallback: (callback) => callback,
     useMemo: (factory) => factory(),
     useRef: (initial) => ({ current: initial }),
@@ -146,6 +147,7 @@ test("model save notices distinguish delivery, pending restart and subagent erro
   const summary = "已保存 3 个模型";
   for (const [result, tone, suffix] of [
     [{}, "success", ""],
+    [{ warning: "模型状态未刷新" }, "info", "；模型状态未刷新"],
     [{ modelHotReloaded: true }, "success", ""],
     [{ modelHotReloaded: true, modelHotReloadDeferred: true }, "success", ""],
     [{ modelHotReloaded: true, restartRequired: true }, "info", "，需重启 Codex 后生效"],

@@ -27,7 +27,9 @@ export function useDraftConfig() {
   draftConfigRef.current = config;
 
   const setPersistedConfig = useCallback((next: Config) => {
+    if (persistedConfigRef.current && next.settingsRevision < persistedConfigRef.current.settingsRevision) return;
     persistedConfigRef.current = next;
+    draftConfigRef.current = next;
     setConfig(next);
   }, []);
 
@@ -39,6 +41,7 @@ export function useDraftConfig() {
   ), [config]);
 
   function editConfig(next: Config) {
+    draftConfigRef.current = next;
     setConfig(next);
     setDirty(true);
   }
@@ -74,6 +77,7 @@ export function useDraftConfig() {
 
   function discardDraft() {
     if (persistedConfigRef.current) {
+      draftConfigRef.current = persistedConfigRef.current;
       setConfig(persistedConfigRef.current);
     }
     setDirty(false);

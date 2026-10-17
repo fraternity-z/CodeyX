@@ -246,6 +246,8 @@ test("加载提示区分启动失败、配置损坏、待重启和就绪，空�
 test("保存提示保留热更新、生效失败、被新设置取代和重启语义", () => {
   const cases = [
     [{}, false, "success", "CodeyX 设置已保存"],
+    [{ warning: "模型状态未刷新：读取失败" }, false, "info", "CodeyX 设置已保存；模型状态未刷新：读取失败"],
+    [{ modelHotReloadError: "刷新失败" }, false, "info", "CodeyX 设置已保存；模型列表未能实时更新：刷新失败"],
     [{ restartRequired: true }, false, "info", "CodeyX 设置已保存，启动参数将在重启 Codex 后生效"],
     [{ subagentConfigRepaired: true, subagentConfigHotReloaded: true }, false, "success", "CodeyX 设置已保存；子代理配置已同步"],
     [{ subagentConfigHotReloaded: true }, false, "success", "CodeyX 设置已保存；子代理配置已实时更新"],

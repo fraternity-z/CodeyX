@@ -14,7 +14,7 @@ const baseline = () => ({
 const models = () => ({ officialModels: [], officialModelIds: ["official-model"], thirdPartyModels: ["m1", "m2"], manualThirdPartyModels: [], upstreamModels: [], defaultModel: "m1" });
 
 function createRoutesHarness(overrides = {}, handlers = {}) {
-  const calls = [], notices = [], completions = [], starts = [], saved = [], remembered = [];
+  const calls = [], notices = [], completions = [], starts = [], cancelled = [], saved = [], remembered = [];
   const options = {
     active: true, config: baseline(), dirty: false, isBusy: false,
     provider: { id: "a", name: "线路 A", official: false }, modelState: models(),
@@ -35,6 +35,7 @@ function createRoutesHarness(overrides = {}, handlers = {}) {
     setConfirmation(value) { options.confirmation = value; },
     beginModelPickerLoad(...args) { starts.push(args); return starts.length; },
     completeModelPickerLoad(...args) { completions.push(args); },
+    cancelModelPickerLoad(session) { cancelled.push(session); },
     async runOperation(_name, action) { try { await action(); } catch (error) { notices.push({ tone: "error", text: error.message }); } },
     async persist(value) { saved.push(value); if (handlers.persist) return handlers.persist(value); options.setPersistedConfig(value); options.dirty = false; return { config: value }; },
     ...overrides,
@@ -51,7 +52,7 @@ function createRoutesHarness(overrides = {}, handlers = {}) {
     "../runtime-status": { SETTINGS_OPENED_EVENT: "codey-settings-opened" },
   });
   const render = () => harness.render(options);
-  return { ...harness, render, options, calls, notices, completions, starts, saved, remembered };
+  return { ...harness, render, options, calls, notices, completions, starts, cancelled, saved, remembered };
 }
 
 test("线路保存沿用草稿，新增与更新不改变活动线路，失败保留编辑内容", async (t) => {
@@ -169,6 +170,37 @@ test("官方线路组合保存不清除省略的预算和代理，默认模型�
   assert.equal(h.calls.length, 2);
   await h.render().setRouteDefaultModel("a", "M1");
   assert.deepEqual(h.calls[2], { command: "save_default_model", args: { routeId: "a", model: "M1" } });
+});
+
+test("旧模型同步响应不能回退配置或覆盖新的草稿", async t => {
+  installControllerWindow(t);
+  const pending = deferred();
+  const config = { ...baseline(), localRouterEnabled: false };
+  const h = createRoutesHarness({ config }, { sync_current_provider: () => pending.promise });
+  const work = h.render().fetchRouteModels(config.profiles[0]);
+  h.options.adoptRouteConfig({ ...config, settingsRevision: 5 });
+  h.options.config = { ...h.options.config, streamMaxRetries: 9 };
+  pending.resolve({ config: { ...config, settingsRevision: 2 }, modelState: { ...models(), defaultModel: "old" },
+    providerStatus: { provider: { id: "old" } }, restartRequired: true });
+  await work;
+  assert.equal(h.options.config.settingsRevision, 5);
+  assert.equal(h.options.config.streamMaxRetries, 9);
+  assert.equal(h.options.provider.id, "a");
+  assert.equal(h.options.modelState.defaultModel, "m1");
+  assert.deepEqual(h.options.status, {});
+  assert.deepEqual(h.completions, []);
+  assert.deepEqual(h.cancelled, [1]);
+  assert.deepEqual(h.notices, []);
+});
+
+test("官方线路已保存的附属失败作为提示保留", async t => {
+  installControllerWindow(t);
+  const h = createRoutesHarness({}, { save_official_route_models: async () => ({
+    config: { ...baseline(), settingsRevision: 2 }, warning: "官方账号列表未刷新", modelState: models(),
+  }) });
+  assert.equal(await h.render().saveOfficialRouteSettings("official", ["official-model"], true, true, undefined), true);
+  assert.equal(h.notices.at(-1).tone, "info");
+  assert.match(h.notices.at(-1).text, /已保存；官方账号列表未刷新/);
 });
 
 test("被动刷新合并草稿，旧响应、隐藏与卸载不覆盖当前配置", async (t) => {

@@ -1,6 +1,7 @@
 import type { Notice } from "./App.types";
 
 export type ModelRuntimeUpdate = {
+  warning?: string;
   restartRequired?: boolean;
   modelHotReloaded?: boolean;
   modelHotReloadDeferred?: boolean;
@@ -51,6 +52,7 @@ export function customContextRestoredNote(result: {
 }
 
 function savedModelNotice(result: ModelRuntimeUpdate, summary: string): Notice {
+  if (result.warning) return { tone: "info", text: `${summary}；${result.warning}` };
   if (result.modelHotReloadError) {
     return {
       tone: "info",

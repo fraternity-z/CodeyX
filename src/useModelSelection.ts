@@ -1,5 +1,6 @@
 import {
   useCallback,
+  useEffect,
   useMemo,
   useRef,
   useState,
@@ -30,6 +31,7 @@ import {
 import { buildSubagentModelOptions } from "./subagentModels";
 import { routeProviderId } from "./modelRoutes";
 import { modelSelectionNotice, type ModelRuntimeUpdate } from "./modelSelectionNotice";
+import type { useDraftConfig } from "./useDraftConfig";
 import {
   autoReasoningEfforts,
   normalizeReasoningEfforts,
@@ -57,7 +59,8 @@ type UseModelSelectionOptions = {
   currentProvider: ProviderStatus["provider"] | null;
   officialAccountAvailable: boolean;
   runOperation: (name: string, action: () => Promise<void>) => Promise<void>;
-  setPersistedConfig: (config: Config) => void;
+  adoptRouteConfig: ReturnType<typeof useDraftConfig>["adoptRouteConfig"];
+  setDirty: Dispatch<SetStateAction<boolean>>;
   setStatus: Dispatch<SetStateAction<RuntimeStatus>>;
   setNotice: Dispatch<SetStateAction<Notice>>;
 };
@@ -67,10 +70,17 @@ export function useModelSelection({
   currentProvider,
   officialAccountAvailable,
   runOperation,
-  setPersistedConfig,
+  adoptRouteConfig,
+  setDirty,
   setStatus,
   setNotice,
 }: UseModelSelectionOptions) {
+  const mounted = useRef(true);
+  const saving = useRef(false);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const [modelState, setModelState] = useState<ModelState>({
     officialModels: [],
     officialModelIds: [],
@@ -301,6 +311,12 @@ export function useModelSelection({
     openModelPicker(state, warning, routeId, autoReviewSupported);
   }, [openModelPicker]);
 
+  const cancelModelPickerLoad = useCallback((session: number) => {
+    if (!mounted.current || modelPickerSession.current !== session) return;
+    setModelPickerLoading(false);
+    setModelSyncWarning("配置已更新，请关闭后重新同步模型");
+  }, []);
+
   const setModelPickerOpen = useCallback((open: boolean) => {
     if (!open) {
       modelPickerSession.current += 1;
@@ -446,6 +462,7 @@ export function useModelSelection({
     summary: string,
     closePicker: boolean,
   ) => {
+    const session = modelPickerSession.current;
     const declaredReasoningEfforts: Record<string, ModelReasoningEffort[]> = {};
     if (config?.localRouterEnabled === true) {
       for (const [key, efforts] of Object.entries(draftReasoningEfforts)) {
@@ -491,12 +508,16 @@ export function useModelSelection({
             : {}),
           ...(modelPickerRouteId == null ? {} : { routeId: modelPickerRouteId }),
         });
-    setPersistedConfig(result.config);
-    setModelState(result.modelState);
+    if (!mounted.current) return;
+    const merged = adoptRouteConfig(result.config);
+    if (!merged) return;
+    setDirty(merged.dirty);
+    if (result.modelState) setModelState(result.modelState);
     setStatus((current) => ({
       ...current,
       restartRequired: result.restartRequired ?? current.restartRequired,
     }));
+    if (modelPickerSession.current !== session) return;
     if (closePicker) {
       setModelPickerVisible(false);
       setModelPickerRouteId(null);
@@ -506,7 +527,8 @@ export function useModelSelection({
     setNotice(modelSelectionNotice(result, summary));
   }, [
     setNotice,
-    setPersistedConfig,
+    adoptRouteConfig,
+    setDirty,
     setStatus,
     modelPickerRouteId,
     officialRoutePicker,
@@ -520,27 +542,38 @@ export function useModelSelection({
   ]);
 
   const saveModelSelection = useCallback(async () => {
-    await runOperation("save-models", async () => {
-      const normalizedDraftModels = uniqueModelIds(draftModels);
-      const {
-        matching: officialModels,
-        remaining: thirdPartyModels,
-      } = partitionModelIdsByKey(normalizedDraftModels, officialSlugKeys);
-      const thirdPartyModelKeys = new Set(thirdPartyModels.map(modelKey));
-      const manualThirdPartyModels = draftManualThirdPartyModels.filter((model) =>
-        thirdPartyModelKeys.has(modelKey(model))
-      );
-      const totalCount = officialModels.length + thirdPartyModels.length;
-      await applyModelSelection(
-        officialModels,
-        thirdPartyModels,
-        manualThirdPartyModels,
-        deletedThirdPartyModels,
-        draftAutoReviewSupported,
-        totalCount > 0 ? `已保存 ${totalCount} 个模型` : "已保存模型",
-        true,
-      );
-    });
+    if (!mounted.current || saving.current) return;
+    saving.current = true;
+    const session = modelPickerSession.current;
+    try {
+      await runOperation("save-models", async () => {
+        try {
+          const normalizedDraftModels = uniqueModelIds(draftModels);
+          const {
+            matching: officialModels,
+            remaining: thirdPartyModels,
+          } = partitionModelIdsByKey(normalizedDraftModels, officialSlugKeys);
+          const thirdPartyModelKeys = new Set(thirdPartyModels.map(modelKey));
+          const manualThirdPartyModels = draftManualThirdPartyModels.filter((model) =>
+            thirdPartyModelKeys.has(modelKey(model))
+          );
+          const totalCount = officialModels.length + thirdPartyModels.length;
+          await applyModelSelection(
+            officialModels,
+            thirdPartyModels,
+            manualThirdPartyModels,
+            deletedThirdPartyModels,
+            draftAutoReviewSupported,
+            totalCount > 0 ? `已保存 ${totalCount} 个模型` : "已保存模型",
+            true,
+          );
+        } catch (error) {
+          if (mounted.current && modelPickerSession.current === session) throw error;
+        }
+      });
+    } finally {
+      saving.current = false;
+    }
   }, [
     applyModelSelection,
     deletedThirdPartyModels,
@@ -562,6 +595,7 @@ export function useModelSelection({
     setModelPickerVisible: setModelPickerOpen,
     beginModelPickerLoad,
     completeModelPickerLoad,
+    cancelModelPickerLoad,
     customModelInput,
     modelInputError,
     modelSyncWarning,

@@ -45,11 +45,14 @@ pub(super) async fn invoke(
                 if !official_account_available_for_usage(&*state.config.read().await) {
                     Err("当前没有可用的官方账号".to_string())
                 } else {
-                    state
+                    let cache = state
                         .account_usage_cache
                         .lock()
                         .await
-                        .for_codex_home(codex_home())
+                        .for_codex_home(codex_home());
+                    cache
+                        .lock()
+                        .await
                         .store_displayed_snapshot(
                             &crate::account_usage::codex_auth_path(codex_home()),
                             generation,
@@ -923,34 +926,43 @@ pub(crate) async fn refresh_official_route_after_account_change(
 ) -> Result<Value, String> {
     let prepare_error = prepare_routes_for_current_launch(state).await.err();
     let config = state.config.read().await.clone();
-    let model_state = current_model_state_async(&config).await?;
+    let model_state = current_model_state_async(&config).await;
     let hot_reload = hot_reload_runtime_models(state).await;
     let restart_required = runtime_config_requires_restart(state, &config).await;
     let store = state.official_accounts();
     let accounts = tokio::task::spawn_blocking(move || accounts_payload(&store))
         .await
-        .map_err(|error| format!("读取官方账号列表任务异常退出：{error}"))??;
+        .map_err(|error| format!("读取官方账号列表任务异常退出：{error}"))
+        .and_then(std::convert::identity);
     let unauthenticated =
         config.official_account_status_this_launch == LaunchOfficialAccountStatus::Unauthenticated;
     let mut response = hot_reload.add_to_response(json!({
         "status": "ok",
         "config": redacted_config(&config),
-        "modelState": model_state,
+        "modelState": model_state.as_ref().ok(),
         "officialAccountAvailable": config.official_account_available_this_launch,
         "officialAccountStatus": config.official_account_status_this_launch,
         "restartRequired": restart_required,
     }));
     // 存储账号的线路自带凭据，默认登录缺失时它们仍然可以继续使用。
     let routes_available = config.usable_official_routes().next().is_some();
+    let mut warnings = Vec::new();
     if let Some(error) = prepare_error {
-        response = merge(response, json!({ "warning": error }));
+        warnings.push(error);
     } else if unauthenticated && !routes_available {
-        response = merge(
-            response,
-            json!({ "warning": "当前没有默认官方账号，官方线路已停用" }),
-        );
+        warnings.push("当前没有默认官方账号，官方线路已停用".to_string());
     }
-    Ok(merge(response, accounts))
+    if let Err(error) = model_state {
+        warnings.push(format!("模型状态未刷新：{error}"));
+    }
+    match accounts {
+        Ok(accounts) => response = merge(response, accounts),
+        Err(error) => warnings.push(format!("官方账号列表未刷新：{error}")),
+    }
+    if !warnings.is_empty() {
+        response = merge(response, json!({ "warning": warnings.join("；") }));
+    }
+    Ok(response)
 }
 
 /// 官方线路派生时会按第三方线路占用的短名称调整编号，账号记录跟随写回后，

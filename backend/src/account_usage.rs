@@ -12,6 +12,7 @@ use base64::{
 use reqwest::{Client, StatusCode, header::ACCEPT};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use tokio::sync::Mutex;
 
 static LAST_GOOD_USAGE_ENDPOINT: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(0);
@@ -216,7 +217,6 @@ pub struct AccountUsageCache {
     auth_fingerprint_initialized: bool,
     auth_fingerprint: Option<OfficialAuthFingerprint>,
     auth_generation: u64,
-    last_used: u64,
 }
 
 /// Usage snapshots for several official accounts at once. Each credential file
@@ -224,27 +224,58 @@ pub struct AccountUsageCache {
 /// account being unavailable never hides another account's usage.
 #[derive(Debug, Default)]
 pub struct AccountUsageCaches {
-    caches: HashMap<String, AccountUsageCache>,
+    caches: HashMap<String, AccountUsageEntry>,
     usage_clock: u64,
 }
 
+#[derive(Debug, Default)]
+struct AccountUsageEntry {
+    cache: Arc<Mutex<AccountUsageCache>>,
+    last_used: u64,
+}
+
 impl AccountUsageCaches {
-    pub(crate) fn for_auth_path(&mut self, auth_path: &Path) -> &mut AccountUsageCache {
+    pub(crate) fn for_auth_path(&mut self, auth_path: &Path) -> Arc<Mutex<AccountUsageCache>> {
         let key = auth_path.to_string_lossy().into_owned();
-        if !self.caches.contains_key(&key) && self.caches.len() >= MAX_ACCOUNT_USAGE_CACHES {
-            evict_least_recently_used(&mut self.caches, |cache| cache.last_used);
+        // 在途账号不能被淘汰，否则同一账号会得到两把锁和两份缓存。
+        // 超限的在途条目在后续访问时收回，空闲缓存始终受容量限制。
+        let limit = MAX_ACCOUNT_USAGE_CACHES - usize::from(!self.caches.contains_key(&key));
+        while self.caches.len() > limit {
+            let candidate = self
+                .caches
+                .iter()
+                .filter(|(candidate, entry)| {
+                    *candidate != &key && Arc::strong_count(&entry.cache) == 1
+                })
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            let Some(candidate) = candidate else {
+                break;
+            };
+            self.caches.remove(&candidate);
         }
         self.usage_clock = self.usage_clock.saturating_add(1);
         let last_used = self.usage_clock;
         let cache = self.caches.entry(key).or_default();
         cache.last_used = last_used;
-        cache
+        Arc::clone(&cache.cache)
     }
 
-    pub(crate) fn for_codex_home(&mut self, codex_home: &Path) -> &mut AccountUsageCache {
+    pub(crate) fn for_codex_home(&mut self, codex_home: &Path) -> Arc<Mutex<AccountUsageCache>> {
         let auth_path = codex_home.join(CODEX_AUTH_FILE_NAME);
         self.for_auth_path(&auth_path)
     }
+}
+
+pub(crate) async fn query_shared_snapshot_at(
+    caches: &Mutex<AccountUsageCaches>,
+    auth_path: &Path,
+    force_refresh: bool,
+    upstream_proxy: Option<&str>,
+) -> Value {
+    let cache = caches.lock().await.for_auth_path(auth_path);
+    let mut cache = cache.lock().await;
+    query_snapshot_at(&mut cache, auth_path, force_refresh, upstream_proxy).await
 }
 
 /// Credential document of the account Codex itself is logged in as.
@@ -417,6 +448,7 @@ impl AccountUsageCache {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn query_snapshot(
     cache: &mut AccountUsageCache,
     home: &Path,
@@ -864,6 +896,8 @@ mod tests {
             .lock()
             .await
             .for_codex_home(home)
+            .lock()
+            .await
             .store_displayed_snapshot(&home.join(CODEX_AUTH_FILE_NAME), 1, snapshot.clone())
             .unwrap();
         let mut profile = crate::config::ProviderProfile::new("Official");
@@ -885,6 +919,8 @@ mod tests {
                 .lock()
                 .await
                 .for_codex_home(home)
+                .lock()
+                .await
                 .record_failure("offline".into(), Instant::now());
             let value: Value = client
                 .post(format!(
@@ -1348,19 +1384,19 @@ mod tests {
         assert_eq!(snapshot.secondary.unwrap().window_minutes, 10_080);
     }
 
-    #[test]
-    fn every_credential_file_keeps_its_own_usage_cache() {
+    #[tokio::test]
+    async fn every_credential_file_keeps_its_own_usage_cache() {
         let mut caches = AccountUsageCaches::default();
         let first = std::path::PathBuf::from("/tmp/codey-usage/acct_1.json");
         let second = std::path::PathBuf::from("/tmp/codey-usage/acct_2.json");
 
-        let first_cache = caches.for_auth_path(&first) as *const AccountUsageCache;
+        let first_cache = caches.for_auth_path(&first);
         assert!(
-            std::ptr::eq(first_cache, caches.for_auth_path(&first)),
+            Arc::ptr_eq(&first_cache, &caches.for_auth_path(&first)),
             "the same credential document reuses one cache entry"
         );
         assert!(
-            !std::ptr::eq(first_cache, caches.for_auth_path(&second)),
+            !Arc::ptr_eq(&first_cache, &caches.for_auth_path(&second)),
             "a second account never reuses the first account cache entry"
         );
 
@@ -1368,6 +1404,8 @@ mod tests {
             let path = std::path::PathBuf::from(format!("/tmp/codey-usage/acct_{index}.json"));
             caches
                 .for_auth_path(&path)
+                .lock()
+                .await
                 .record_failure("offline".into(), Instant::now());
         }
         assert!(
@@ -1376,16 +1414,20 @@ mod tests {
         );
     }
 
-    #[test]
-    fn usage_caches_evict_only_the_least_recently_used_credential_file() {
+    #[tokio::test]
+    async fn usage_caches_evict_only_the_least_recently_used_credential_file() {
         let mut caches = AccountUsageCaches::default();
         let oldest = "/tmp/codey-usage/oldest.json";
         let recent = "/tmp/codey-usage/recent.json";
         caches
             .for_auth_path(Path::new(oldest))
+            .lock()
+            .await
             .record_failure("offline".into(), Instant::now());
         caches
             .for_auth_path(Path::new(recent))
+            .lock()
+            .await
             .record_failure("offline".into(), Instant::now());
         for index in 0..MAX_ACCOUNT_USAGE_CACHES - 2 {
             let path = format!("/tmp/codey-usage/fill_{index}.json");
@@ -1426,5 +1468,68 @@ mod tests {
         );
         assert!(caches.caches.contains_key(recent));
         assert!(caches.caches.contains_key("/tmp/codey-auth/overflow.json"));
+    }
+
+    #[tokio::test]
+    async fn busy_usage_account_does_not_block_other_accounts_or_duplicate_its_cache() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = directory.path().join("first.json");
+        let second = directory.path().join("second.json");
+        let shared = Mutex::new(AccountUsageCaches::default());
+        let first_cache = shared.lock().await.for_auth_path(&first);
+        let mut busy = first_cache.lock().await;
+        busy.record_success(sample_snapshot(), Instant::now());
+        let second_cache = shared.lock().await.for_auth_path(&second);
+        let mut other = sample_snapshot();
+        other.plan_type = Some("pro".into());
+        second_cache
+            .lock()
+            .await
+            .record_success(other, Instant::now());
+
+        let waiting = query_shared_snapshot_at(&shared, &first, false, None);
+        tokio::pin!(waiting);
+        let result = tokio::time::timeout(Duration::from_secs(2), async {
+            tokio::select! {
+                biased;
+                _ = &mut waiting => panic!("同一账号必须等待已有查询释放锁"),
+                result = query_shared_snapshot_at(&shared, &second, false, None) => result,
+            }
+        })
+        .await
+        .expect("另一账号的缓存读取不应等待在途查询");
+        assert_eq!(result["planType"], "pro");
+
+        for index in 0..MAX_ACCOUNT_USAGE_CACHES + 2 {
+            shared
+                .lock()
+                .await
+                .for_auth_path(&directory.path().join(format!("{index}.json")));
+        }
+        assert!(Arc::ptr_eq(
+            &first_cache,
+            &shared.lock().await.for_auth_path(&first)
+        ));
+        drop(busy);
+        let result = waiting.await;
+        assert_eq!(result["planType"], "plus");
+    }
+
+    #[tokio::test]
+    async fn usage_cache_reclaims_overflow_only_after_in_flight_handles_are_released() {
+        let mut caches = AccountUsageCaches::default();
+        let handles = (0..MAX_ACCOUNT_USAGE_CACHES + 3)
+            .map(|index| caches.for_auth_path(Path::new(&format!("/tmp/usage-busy/{index}.json"))))
+            .collect::<Vec<_>>();
+        assert_eq!(caches.caches.len(), handles.len());
+        for (index, handle) in handles.iter().enumerate() {
+            assert!(Arc::ptr_eq(
+                handle,
+                &caches.for_auth_path(Path::new(&format!("/tmp/usage-busy/{index}.json")))
+            ));
+        }
+        drop(handles);
+        caches.for_auth_path(Path::new("/tmp/usage-busy/next.json"));
+        assert_eq!(caches.caches.len(), MAX_ACCOUNT_USAGE_CACHES);
     }
 }

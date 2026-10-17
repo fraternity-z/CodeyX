@@ -35,6 +35,7 @@ test("official picker draft starts in the order saved on the route", async () =>
   const state = [];
   let cursor = 0;
   const react = {
+    useEffect: () => {},
     useCallback: (callback) => callback,
     useMemo: (factory) => factory(),
     useRef: (initial) => ({ current: initial }),

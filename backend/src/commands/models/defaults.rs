@@ -93,7 +93,8 @@ pub async fn save_official_route_models(
     validate_requested_model_list_bounds("官方模型", &requested_models)?;
     let _config_write_guard = state.config_write_lock.lock().await;
     timings.mark("validationAndLockMs");
-    let mut config = state.config.read().await.clone();
+    let previous = state.config.read().await.clone();
+    let mut config = previous.clone();
     ensure_local_route_config_writable(&config)?;
     let route_id = route_id.trim();
     let profile_index = config
@@ -104,6 +105,15 @@ pub async fn save_official_route_models(
     let profile = &config.profiles[profile_index];
     if !profile.official_account || !config.official_route_usable(profile) {
         return Err("当前线路不是本次登录可用的官方账号线路".to_string());
+    }
+    let account_id = account_id
+        .map(|id| id.trim().to_string())
+        .filter(|id| !id.is_empty());
+    if account_id
+        .as_ref()
+        .is_some_and(|id| profile.official_account_id.as_ref() != Some(id))
+    {
+        return Err("官方账号与要保存的线路不匹配".to_string());
     }
     let provider_id = profile.provider_id().to_string();
     if let Some(enabled) = requested_enabled {
@@ -155,49 +165,40 @@ pub async fn save_official_route_models(
     subagent_policy::reconcile_with_model_state(&mut config, Some(&model_state));
     config = config.normalize();
     config.settings_revision = config.settings_revision.saturating_add(1);
-    let config = match save_config_to_store(state, config).await {
-        Ok(config) => config,
-        Err(error) => {
-            return Err(
-                rollback_model_catalog_after_config_save_async(catalog_refresh, error).await,
-            );
-        }
-    };
-    // 官方线路在每次启动准备时按账号记录重新派生，因此代理还要写回该线路自己
-    // 的账号记录，否则重启后会被派生结果覆盖。失败只降级为提示，不影响已经
-    // 生效的配置。
-    let mut account_override_warning: Option<String> = None;
+    // 账号记录是下次启动派生线路的来源，必须与主配置一起确认保存结果。
     let route_account_id = config
         .profiles
         .iter()
         .find(|profile| profile.id == route_id)
         .and_then(|profile| profile.official_account_id.clone());
-    let mut saved_account_id = None;
-    if let Some(account_id) = account_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|account_id| !account_id.is_empty())
-    {
-        match write_official_account_route_settings(
-            state,
-            account_id.to_string(),
-            route_name.unwrap_or_default(),
-            route_short_name.unwrap_or_default(),
-            requested_upstream_proxy.clone().unwrap_or_default(),
-            requested_base_url.clone().unwrap_or_default(),
-        )
-        .await
+    let save_account = async {
+        if let Some(account_id) = account_id {
+            write_official_account_route_settings(
+                state,
+                account_id,
+                route_name.unwrap_or_default(),
+                route_short_name.unwrap_or_default(),
+                requested_upstream_proxy.clone().unwrap_or_default(),
+                requested_base_url.clone().unwrap_or_default(),
+            )
+            .await
+            .map(Some)
+        } else if let Some(upstream_proxy) = mirrored_proxy
+            && let Some(account_id) = route_account_id
         {
-            Ok(account_id) => saved_account_id = Some(account_id),
-            Err(error) => return Err(error),
+            persist_official_account_proxy(state, account_id, upstream_proxy)
+                .await
+                .map(|()| None)
+        } else {
+            Ok(None)
         }
-    } else if let Some(upstream_proxy) = mirrored_proxy
-        && let Some(account_id) = route_account_id
-        && let Err(error) = persist_official_account_proxy(state, account_id, upstream_proxy).await
-    {
-        account_override_warning = Some(format!("线路代理未能写入官方账号记录：{error}"));
-    }
-    *state.config.write().await = config.clone();
+    };
+    let SavedOfficialRouteConfig {
+        config,
+        account_id: saved_account_id,
+        warning: account_override_warning,
+    } = commit_official_route_config(state, previous, config, catalog_refresh, save_account)
+        .await?;
     drop(_config_write_guard);
     timings.mark("saveConfigMs");
     let (mut response, subagent_hot_reload) = if saved_account_id.is_some() {
@@ -243,6 +244,59 @@ pub async fn save_official_route_models(
     ))
 }
 
+struct SavedOfficialRouteConfig {
+    config: CodeyConfig,
+    account_id: Option<String>,
+    warning: Option<String>,
+}
+
+/// 调用方持有配置写锁；账号提交失败时恢复主配置和目录，避免磁盘领先于内存。
+async fn commit_official_route_config(
+    state: &Arc<AppState>,
+    previous: CodeyConfig,
+    config: CodeyConfig,
+    catalog_refresh: Option<ModelCatalogRefresh>,
+    save_account: impl std::future::Future<Output = Result<Option<String>, String>>,
+) -> Result<SavedOfficialRouteConfig, String> {
+    let config = match save_config_to_store(state, config).await {
+        Ok(config) => config,
+        Err(error) => {
+            return Err(
+                rollback_model_catalog_after_config_save_async(catalog_refresh, error).await,
+            );
+        }
+    };
+    let (account_id, warning) = match save_account.await {
+        Ok(account_id) => (account_id, None),
+        Err(error) => match {
+            let store = state.store.clone();
+            tokio::task::spawn_blocking(move || store.restore_after_failed_save(previous))
+                .await
+                .map_err(|error| format!("恢复 Codey 配置任务异常退出：{error}"))
+                .and_then(|result| result.map_err(|error| error.to_string()))
+        } {
+            Ok(restored) => {
+                *state.config.write().await = restored;
+                return Err(
+                    rollback_model_catalog_after_config_save_async(catalog_refresh, error).await,
+                );
+            }
+            Err(rollback_error) => (
+                None,
+                Some(format!(
+                    "主配置已保存，但官方账号设置未保存：{error}；恢复主配置失败：{rollback_error}，请重新读取并确认线路设置"
+                )),
+            ),
+        },
+    };
+    *state.config.write().await = config.clone();
+    Ok(SavedOfficialRouteConfig {
+        config,
+        account_id,
+        warning,
+    })
+}
+
 /// 官方线路启用的模型按请求顺序保存，线路卡片和选择器都按这个顺序显示；
 /// 模型 ID 统一回写为官方目录里的拼写。
 pub(crate) fn ordered_official_selection(
@@ -283,9 +337,9 @@ async fn persist_official_account_proxy(
 ) -> Result<(), String> {
     let store = state.official_accounts();
     tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-        let Some(record) = store.get(&account_id)? else {
-            return Ok(());
-        };
+        let record = store
+            .get(&account_id)?
+            .ok_or_else(|| anyhow::anyhow!("找不到官方账号：{account_id}"))?;
         let upstream_proxy = upstream_proxy.trim();
         let upstream_proxy = (!upstream_proxy.is_empty()).then(|| upstream_proxy.to_string());
         store.update_route_settings(
@@ -355,4 +409,132 @@ pub(crate) fn current_model_state_at(
         requested_default_model.as_deref(),
     )
     .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod commit_tests {
+    use super::*;
+    use crate::config::ConfigStore;
+    use tokio::sync::RwLock;
+
+    #[tokio::test]
+    async fn official_route_account_failure_restores_config_and_catalog() {
+        let directory = tempfile::tempdir().unwrap();
+        let previous = CodeyConfig::default();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            config: RwLock::new(previous.clone()),
+            ..AppState::default()
+        });
+        state.store.save(&previous).unwrap();
+        let catalog_path = directory.path().join(model_catalog::relative_path());
+        std::fs::create_dir_all(catalog_path.parent().unwrap()).unwrap();
+        std::fs::write(&catalog_path, b"original catalog").unwrap();
+        let snapshot = model_catalog::snapshot(directory.path()).unwrap();
+        std::fs::write(&catalog_path, b"pending catalog").unwrap();
+        let mut next = previous.clone();
+        next.settings_revision += 1;
+        next.show_account_usage_in_header = false;
+        let error = commit_official_route_config(
+            &state,
+            previous.clone(),
+            next,
+            Some(ModelCatalogRefresh {
+                fallback: false,
+                snapshot,
+            }),
+            async { Err("模拟账号写入失败".into()) },
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(error.contains("模拟账号写入失败"));
+        assert_eq!(*state.config.read().await, previous);
+        assert_eq!(state.store.load().unwrap(), previous);
+        let backup: CodeyConfig = serde_json::from_slice(
+            &std::fs::read(directory.path().join("config.json.bak.1")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(backup, previous, "失败事务不进入正常备份链");
+        assert_eq!(std::fs::read(&catalog_path).unwrap(), b"original catalog");
+    }
+
+    #[tokio::test]
+    async fn official_route_config_failure_does_not_write_account() {
+        let directory = tempfile::tempdir().unwrap();
+        let previous = CodeyConfig::default();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path()),
+            config: RwLock::new(previous.clone()),
+            ..AppState::default()
+        });
+        let result =
+            commit_official_route_config(&state, previous.clone(), previous.clone(), None, async {
+                panic!("主配置失败后不能继续提交账号设置")
+            })
+            .await;
+        assert!(result.is_err());
+        assert_eq!(*state.config.read().await, previous);
+    }
+
+    #[tokio::test]
+    async fn official_route_commit_publishes_config_after_account_confirmation() {
+        let directory = tempfile::tempdir().unwrap();
+        let previous = CodeyConfig::default();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            config: RwLock::new(previous.clone()),
+            ..AppState::default()
+        });
+        let mut next = previous.clone();
+        next.settings_revision += 1;
+        next.show_account_usage_in_header = false;
+        let saved =
+            commit_official_route_config(&state, previous.clone(), next.clone(), None, async {
+                assert_eq!(*state.config.read().await, previous);
+                assert_eq!(state.store.load().unwrap(), next);
+                Ok(Some("account".into()))
+            })
+            .await
+            .unwrap();
+        assert_eq!(saved.account_id.as_deref(), Some("account"));
+        assert!(saved.warning.is_none());
+        assert_eq!(*state.config.read().await, next);
+        assert_eq!(state.store.load().unwrap(), next);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn official_route_rollback_failure_reports_the_committed_config() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = tempfile::tempdir().unwrap();
+        let previous = CodeyConfig::default();
+        let state = Arc::new(AppState {
+            store: ConfigStore::new(directory.path().join("config.json")),
+            config: RwLock::new(previous.clone()),
+            ..AppState::default()
+        });
+        let mut next = previous.clone();
+        next.settings_revision += 1;
+        next.show_account_usage_in_header = false;
+        let held = std::sync::Mutex::new(None);
+        let saved = commit_official_route_config(&state, previous, next.clone(), None, async {
+            // 模拟其他进程只共享读取，使随后的原子替换失败。
+            *held.lock().unwrap() = Some(
+                std::fs::OpenOptions::new()
+                    .read(true)
+                    .share_mode(1)
+                    .open(state.store.path())
+                    .unwrap(),
+            );
+            Err("模拟账号写入失败".into())
+        })
+        .await
+        .unwrap();
+        assert!(saved.warning.as_deref().unwrap().contains("恢复主配置失败"));
+        assert!(saved.account_id.is_none());
+        assert_eq!(saved.config, next);
+        assert_eq!(*state.config.read().await, next);
+        assert_eq!(state.store.load().unwrap(), next);
+    }
 }
