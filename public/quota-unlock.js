@@ -8,9 +8,9 @@
 // composer 输入区)整体锁死——判定数据全部来自渲染进程内解析的
 // /wham/usage 轮询响应与 /wham/usage/stream 的 usage.snapshot
 // SSE 事件(React Query ['rate-limit-status'] 缓存)。这些 JSON
-// 都在渲染进程里用 JSON.parse 解析,所以在 JSON.parse 层把
-// 限流字段漂白成"健康",所有锁定判定(bkn/Tkn/Vkn →
-// sendBlocked/inert)即恢复原状,第三方线路照常发请求。
+// 都在渲染进程里用 JSON.parse 解析,所以在 JSON.parse 层清除
+// 发送阻塞标记,让第三方线路继续发请求。保留真实用量、重置时间
+// 和余额,供官方套餐页面展示;服务端仍按实际额度校验官方请求。
 //
 // 关闭:在 Codex 页面 DevTools 执行
 //   localStorage.setItem("codeyQuotaUnlock","off") 后刷新;
@@ -27,7 +27,7 @@
   } catch {}
 
   const STATE = {
-    version: "1.0.0",
+    version: "1.0.1",
     enabled,
     installedAt: new Date().toISOString(),
     parsePatched: false,
@@ -47,22 +47,7 @@
 
   const nativeParse = JSON.parse;
 
-  // 把任意"限流窗口"对象的用量压到 3%、reset_at 修成未来 2 小时
-  function fixWindow(w) {
-    if (!w || typeof w !== "object") return;
-    if (typeof w.used_percent === "number") w.used_percent = Math.min(w.used_percent, 3);
-    if (typeof w.usedPercent === "number") w.usedPercent = Math.min(w.usedPercent, 3);
-    if ("reset_at" in w || "resetAt" in w) {
-      const t = Number(w.reset_at ?? w.resetAt);
-      if (!Number.isFinite(t) || t * 1000 <= Date.now()) {
-        const future = Math.floor(Date.now() / 1000) + 7200;
-        if ("reset_at" in w) w.reset_at = future;
-        if ("resetAt" in w) w.resetAt = future;
-      }
-    }
-  }
-
-  // 递归漂白:只改 OpenAI 限流语义的键,其余数据原样保留
+  // 只改发送阻塞状态。额度窗口和 credits 同时供计费页面使用,必须原样保留。
   function sanitize(node, depth) {
     if (!node || typeof node !== "object" || depth > 12) return;
     if (Array.isArray(node)) {
@@ -81,15 +66,9 @@
       node.allowed = true;
       node.limit_reached = false;
     }
-    // 2) 额度 / 花费控制
+    // 2) 花费阻塞状态
     const sc = node.spend_control;
     if (sc && typeof sc === "object" && "reached" in sc) sc.reached = false;
-    const cr = node.credits;
-    if (cr && typeof cr === "object") {
-      if ("has_credits" in cr) cr.has_credits = true;
-      if ("unlimited" in cr) cr.unlimited = true;
-      if (typeof cr.balance === "number") cr.balance = Math.max(cr.balance, 1000000);
-    }
     // 3) 横幅 / 侧边栏警告数据源
     if ("rate_limit_upsell" in node) node.rate_limit_upsell = null;
     if ("rate_limit_warning" in node) node.rate_limit_warning = null;
@@ -105,19 +84,14 @@
         (f) => !(f && typeof f === "object" && typeof f.remaining === "number" && f.remaining <= 0)
       );
     }
-    // 5) 用量窗口数值
-    fixWindow(node.primary_window);
-    fixWindow(node.secondary_window);
-    fixWindow(node.primary);
-    fixWindow(node.secondary);
-    // 6) 继续走子节点(覆盖 additional_rate_limits / code_review_rate_limit 等)
+    // 5) 继续走子节点(覆盖 additional_rate_limits / code_review_rate_limit 等)
     for (const k in node) {
       const v = node[k];
       if (v && typeof v === "object") sanitize(v, depth + 1);
     }
   }
 
-  // 浅层标记:只有命中 OpenAI 限流语义键才做深漂白,避免误伤普通解析
+  // 浅层标记:只有命中 OpenAI 限流语义键才处理发送状态,避免误伤普通解析
   const MARKERS = [
     "rate_limit",
     "rateLimits",
