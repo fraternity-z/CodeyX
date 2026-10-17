@@ -671,6 +671,22 @@ pub struct SubagentRoleConfig {
     pub model: String,
     #[serde(default = "default_subagent_reasoning_effort")]
     pub reasoning_effort: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub developer_instructions: String,
+    #[serde(default)]
+    pub access: SubagentAccess,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SubagentAccess {
+    ReadOnly,
+    #[default]
+    ReadWrite,
 }
 
 impl SubagentRoleConfig {
@@ -679,6 +695,10 @@ impl SubagentRoleConfig {
             enabled: true,
             model: model.into(),
             reasoning_effort: reasoning_effort.into(),
+            name: String::new(),
+            description: String::new(),
+            developer_instructions: String::new(),
+            access: SubagentAccess::ReadWrite,
         }
     }
 }
@@ -902,6 +922,8 @@ pub struct CodeyConfig {
     /// `default` role so older Codey stores and Codex builds remain readable.
     #[serde(default)]
     pub subagent_roles: BTreeMap<String, SubagentRoleConfig>,
+    #[serde(default = "default_subagent_max_threads")]
+    pub subagent_max_threads: u32,
     /// One route-aware model for Codex housekeeping calls: conversation
     /// naming, Git commit and pull-request message generation, and the
     /// automatic review fallback when no route serves `codex-auto-review`.
@@ -1042,6 +1064,7 @@ impl Default for CodeyConfig {
             subagent_model: default_subagent_model(),
             subagent_reasoning_effort: default_subagent_reasoning_effort(),
             subagent_roles: default_subagent_roles(),
+            subagent_max_threads: default_subagent_max_threads(),
             misc_model: String::new(),
             initial_route_import_completed: false,
             hide_full_access_warning: false,
@@ -2643,8 +2666,8 @@ pub const UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropicMessages";
 pub const UPSTREAM_PROTOCOL_GEMINI: &str = "gemini";
 pub const AUTH_MODE_OFFICIAL_ACCOUNT: &str = "officialAccount";
 pub const AUTH_MODE_API_KEY: &str = "apiKey";
-pub const SUBAGENT_REASONING_EFFORTS: [&str; 6] =
-    ["low", "medium", "high", "xhigh", "max", "ultra"];
+pub const SUBAGENT_REASONING_EFFORTS: [&str; 8] =
+    ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
 pub const SUBAGENT_ROLE_QUICK_SCAN: &str = "codey_quick_scan";
 pub const SUBAGENT_ROLE_DEEP_RESEARCH: &str = "codey_deep_research";
 pub const SUBAGENT_ROLE_VISUAL_ANALYSIS: &str = "codey_visual_analysis";
@@ -2746,7 +2769,10 @@ fn normalize_subagent_config(
     roles: &mut BTreeMap<String, SubagentRoleConfig>,
 ) {
     normalize_subagent_selection(model, reasoning_effort);
-    roles.retain(|role, _| SUBAGENT_ROLE_IDS.contains(&role.as_str()));
+    // Preserve complete custom definitions while ignoring unknown legacy keys.
+    roles.retain(|role, selection| SUBAGENT_ROLE_IDS.contains(&role.as_str())
+        || (valid_subagent_role_id(role) && !selection.name.trim().is_empty()
+            && !selection.description.trim().is_empty() && !selection.developer_instructions.trim().is_empty()));
     if roles.is_empty() {
         *roles = uniform_subagent_roles(model, reasoning_effort);
     } else {
@@ -2768,16 +2794,73 @@ fn normalize_subagent_config(
         reasoning_effort.clone_from(&default_role.reasoning_effort);
     }
     if let Some(default_role) = roles.get_mut(SUBAGENT_ROLE_DEFAULT) {
-        // `default` is an internal compatibility fallback rather than a
-        // user-selectable role. Keep it available so omitted legacy agent
-        // types cannot produce an empty or inconsistent runtime mapping.
+        // Retain the legacy selection for loading old settings. It is excluded
+        // from runtime registration and cannot admit an omitted agent_type.
         default_role.enabled = true;
     }
+}
+
+pub fn default_subagent_max_threads() -> u32 {
+    2
+}
+
+pub(crate) fn valid_subagent_role_id(role: &str) -> bool {
+    !role.is_empty()
+        && role.len() <= 64
+        && role.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && !matches!(role, "enabled" | "max_threads" | "max_concurrent_threads_per_session"
+            | "max_depth" | "job_max_runtime_seconds"
+            | "default_subagent_model" | "default_subagent_reasoning_effort" | "interrupt_message"
+            | "con" | "prn" | "aux" | "nul" | "com1" | "com2" | "com3" | "com4" | "com5"
+            | "com6" | "com7" | "com8" | "com9" | "lpt1" | "lpt2" | "lpt3" | "lpt4"
+            | "lpt5" | "lpt6" | "lpt7" | "lpt8" | "lpt9")
+}
+
+pub(crate) fn validate_subagent_config(config: &CodeyConfig) -> Result<(), String> {
+    if !(1..=64).contains(&config.subagent_max_threads) {
+        return Err("最大子代理数量必须是 1 到 64 之间的整数".into());
+    }
+    let custom_count = config.subagent_roles.keys()
+        .filter(|role| !SUBAGENT_ROLE_IDS.contains(&role.as_str())).count();
+    if custom_count > 32 {
+        return Err("最多可配置 32 个自定义子代理".into());
+    }
+    for (role, selection) in &config.subagent_roles {
+        if !valid_subagent_role_id(role) {
+            return Err(format!("子代理标识无效：{role}；请使用非保留的小写字母、数字或下划线，最多 64 字符"));
+        }
+        if !SUBAGENT_ROLE_IDS.contains(&role.as_str()) {
+            for (label, text, max) in [
+                ("名称", &selection.name, 80),
+                ("用途说明", &selection.description, 1000),
+                ("角色指令", &selection.developer_instructions, 4000),
+            ] {
+                if text.trim().is_empty() || text.len() > max {
+                    return Err(format!("子代理 {role} 的{label}不能为空且不能超过 {max} 字节"));
+                }
+            }
+        }
+        if selection.model.trim().is_empty() || selection.model.len() > 256 {
+            return Err(format!("子代理 {role} 的模型不能为空且不能超过 256 字节"));
+        }
+        if !SUBAGENT_REASONING_EFFORTS.contains(&selection.reasoning_effort.trim().to_ascii_lowercase().as_str()) {
+            return Err(format!("子代理 {role} 的思考深度无效"));
+        }
+    }
+    if config.subagent_optimization && !config.subagent_roles.iter()
+        .any(|(role, selection)| role != SUBAGENT_ROLE_DEFAULT && selection.enabled) {
+        return Err("至少需要保留一个启用的子代理角色".into());
+    }
+    Ok(())
 }
 
 fn default_subagent_model() -> String {
     DEFAULT_SUBAGENT_MODEL.to_string()
 }
+
+#[cfg(test)]
+#[path = "config/subagent_tests.rs"]
+mod subagent_config_tests;
 
 fn default_subagent_reasoning_effort() -> String {
     DEFAULT_SUBAGENT_REASONING_EFFORT.to_string()

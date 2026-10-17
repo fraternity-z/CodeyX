@@ -985,6 +985,19 @@ fn request_log_only_config_changes_do_not_require_restart() {
 }
 
 #[test]
+fn subagent_concurrency_requires_restart_even_after_role_hot_reload() {
+    for enabled in [false, true] {
+        let applied = CodeyConfig { subagent_optimization: enabled, ..CodeyConfig::default() };
+        let mut current = applied.clone();
+        current.subagent_max_threads = 4;
+        assert_eq!(config_requires_restart_with_route_status(
+            false, &applied, &RuntimeModelConfig::from_config(&current),
+            &RuntimeSubagentConfig::from_config(&current), &current,
+        ), enabled);
+    }
+}
+
+#[test]
 fn request_log_hot_reload_status_contract_is_stable() {
     let cases = [
         (

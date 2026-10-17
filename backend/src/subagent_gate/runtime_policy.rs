@@ -17,10 +17,12 @@ use super::{
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct RuntimeSubagentPolicy {
+pub(crate) struct RuntimeSubagentPolicy {
     pub(super) schema_version: u32,
-    pub(super) roles: BTreeMap<String, crate::config::SubagentRoleConfig>,
+    pub(crate) roles: BTreeMap<String, crate::config::SubagentRoleConfig>,
     pub(super) runtime_agent_hashes: BTreeMap<String, String>,
+    #[serde(default = "crate::config::default_subagent_max_threads")]
+    pub(crate) max_threads: u32,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -41,11 +43,13 @@ pub(crate) fn runtime_subagent_policy_paths(home: &Path) -> (PathBuf, PathBuf) {
 pub(crate) fn runtime_subagent_policy_bytes(
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    max_threads: u32,
 ) -> Result<Vec<u8>> {
     serde_json::to_vec_pretty(&RuntimeSubagentPolicy {
         schema_version: RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION,
         roles: roles.clone(),
         runtime_agent_hashes: runtime_agent_hashes.clone(),
+        max_threads,
     })
     .context("序列化 Codey 子代理运行时策略失败")
 }
@@ -54,9 +58,10 @@ pub(crate) fn begin_runtime_subagent_policy_update(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    max_threads: u32,
 ) -> Result<()> {
     let (_, pending_path) = runtime_subagent_policy_paths(home);
-    let target = runtime_subagent_policy_bytes(roles, runtime_agent_hashes)?;
+    let target = runtime_subagent_policy_bytes(roles, runtime_agent_hashes, max_threads)?;
     let pending = serde_json::to_vec_pretty(&RuntimeSubagentPolicyUpdate {
         schema_version: RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION,
         target_policy_sha256: crate::fs_util::sha256_hex(&target),
@@ -74,9 +79,10 @@ pub(crate) fn commit_runtime_subagent_policy(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    max_threads: u32,
 ) -> Result<()> {
     let (policy_path, pending_path) = runtime_subagent_policy_paths(home);
-    let policy = runtime_subagent_policy_bytes(roles, runtime_agent_hashes)?;
+    let policy = runtime_subagent_policy_bytes(roles, runtime_agent_hashes, max_threads)?;
     crate::fs_util::atomic_write_private_with_parent(&policy_path, &policy)
         .with_context(|| format!("写入 Codey 子代理运行时策略失败：{}", policy_path.display()))?;
     remove_optional_runtime_policy_file(&pending_path)
@@ -86,6 +92,7 @@ pub(crate) fn runtime_subagent_policy_matches(
     home: &Path,
     roles: &BTreeMap<String, crate::config::SubagentRoleConfig>,
     runtime_agent_hashes: &BTreeMap<String, String>,
+    max_threads: u32,
 ) -> Result<bool> {
     let (policy_path, pending_path) = runtime_subagent_policy_paths(home);
     if read_optional_runtime_policy_file(&pending_path)?.is_some() {
@@ -94,7 +101,24 @@ pub(crate) fn runtime_subagent_policy_matches(
     let Some(actual) = read_optional_runtime_policy_file(&policy_path)? else {
         return Ok(false);
     };
-    Ok(actual == runtime_subagent_policy_bytes(roles, runtime_agent_hashes)?)
+    Ok(actual == runtime_subagent_policy_bytes(roles, runtime_agent_hashes, max_threads)?)
+}
+
+pub(crate) fn load_runtime_subagent_policy(
+    state_root: &Path,
+) -> Result<Option<RuntimeSubagentPolicy>> {
+    let Some(bytes) =
+        read_optional_runtime_policy_file(&state_root.join(RUNTIME_SUBAGENT_POLICY_FILE))?
+    else {
+        return Ok(None);
+    };
+    let policy: RuntimeSubagentPolicy =
+        serde_json::from_slice(&bytes).context("解析 Codey 子代理运行时策略失败")?;
+    anyhow::ensure!(
+        policy.schema_version == RUNTIME_SUBAGENT_POLICY_SCHEMA_VERSION && policy.max_threads > 0,
+        "Codey 子代理运行时策略版本或并发数量无效"
+    );
+    Ok(Some(policy))
 }
 
 pub(crate) fn clear_runtime_subagent_policy(home: &Path) -> Result<()> {

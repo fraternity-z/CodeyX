@@ -5,6 +5,7 @@ import type { useDraftConfig } from "../../useDraftConfig";
 import { useStableEvent } from "../../useStableEvent";
 import { configurationRequests } from "./requests";
 import { configLoadNotice, configSaveNotice, UNKNOWN_FAST_CONTEXT_TOOLS_STATUS } from "./state";
+import { validateSubagents } from "../subagents";
 import type { ConfigLoadResult } from "./types";
 
 const CONFIG_LOAD_TIMEOUT_MS = 30_000;
@@ -131,6 +132,8 @@ export function useConfigurationController({ active, config, isBusy, persistedCo
   });
 
   const persist = useStableEvent(async (next: Config): Promise<ConfigSaveResult> => {
+    const subagentError = validateSubagents(next);
+    if (subagentError) throw new Error(subagentError);
     const scope = session.current;
     if (!mounted.current || !active || !scope) throw new Error("设置页面已关闭，请重新打开后保存");
     if (pending.current) throw new Error("配置正在保存，请等待完成");

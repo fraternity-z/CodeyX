@@ -751,7 +751,7 @@ fn is_canonical_hash(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-fn concurrency_denial(ledger: &SessionLedger, active_agents: usize) -> Option<String> {
+fn concurrency_denial(ledger: &SessionLedger, active_agents: usize, limit: usize) -> Option<String> {
     let tracked_active = ledger
         .reservations
         .values()
@@ -759,11 +759,11 @@ fn concurrency_denial(ledger: &SessionLedger, active_agents: usize) -> Option<St
         .collect::<Vec<_>>();
     let tracked_active_count = tracked_active.len();
     let observed_active = active_agents.max(tracked_active_count);
-    if observed_active < CONCURRENCY_LIMIT {
+    if observed_active < limit {
         return None;
     }
     Some(format!(
-        "{CONCURRENCY_LIMIT_ERROR_CODE}: Codey 子代理并发门禁：当前已有 {observed_active} 个活动代理，达到并发上限 {CONCURRENCY_LIMIT}。请先等待任一活动代理进入终态后再派发；该限制只约束同时运行数量，不限制后续批次或累计派发次数。"
+        "{CONCURRENCY_LIMIT_ERROR_CODE}: Codey 子代理并发门禁：当前已有 {observed_active} 个活动代理，达到并发上限 {limit}。请先等待任一活动代理进入终态后再派发；该限制只约束同时运行数量，不限制后续批次或累计派发次数。"
     ))
 }
 
@@ -830,7 +830,16 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
         active_agents,
         now_ms,
     } = context;
-    let loaded_rules = rules::load_logged(state_root);
+    let mut loaded_rules = rules::load_logged(state_root);
+    let runtime_policy = crate::subagent_gate::load_runtime_subagent_policy(state_root)?;
+    if let Some(policy) = &runtime_policy {
+        for (role, selection) in &policy.roles {
+            if selection.enabled && role != crate::config::SUBAGENT_ROLE_DEFAULT {
+                loaded_rules.rules.register_runtime_role(role,
+                    if selection.access == crate::config::SubagentAccess::ReadOnly { "read" } else { "write" });
+            }
+        }
+    }
     let store = LedgerStore::open(state_root, session_id)?;
     let mut ledger = store
         .load(runtime_id, session_id, now_ms)?
@@ -849,7 +858,8 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
     if let Some(reason) = ledger_capacity_denial(&ledger) {
         return Ok(Some(reason));
     }
-    if let Some(reason) = concurrency_denial(&ledger, active_agents) {
+    let limit = runtime_policy.as_ref().map_or(CONCURRENCY_LIMIT, |policy| policy.max_threads as usize);
+    if let Some(reason) = concurrency_denial(&ledger, active_agents, limit) {
         return Ok(Some(reason));
     }
 
@@ -2175,7 +2185,7 @@ pub(crate) fn authorize_child_tool(
         tool_name,
         tool_input,
     } = context;
-    let loaded_rules = rules::load_logged(state_root);
+    let mut loaded_rules = rules::load_logged(state_root);
     let tool_class = rules::classify_tool(tool_name);
     let store = LedgerStore::open(state_root, session_id)?;
     let mut ledger = store.load(runtime_id, session_id, now_ms)?;
@@ -2271,6 +2281,10 @@ pub(crate) fn authorize_child_tool(
             .and_then(|ledger| ledger.reservations.get(task_id))
     });
     let role = bound_reservation.map(|reservation| reservation.role.as_str());
+    if let Some(reservation) = bound_reservation {
+        loaded_rules.rules.register_runtime_role(&reservation.role,
+            if reservation_declares_write(reservation) { "write" } else { "read" });
+    }
     let decision = loaded_rules.rules.evaluate(&RuleContext {
         actor: RuleActor::Child,
         role,
@@ -2312,6 +2326,10 @@ pub(crate) fn authorize_child_tool(
                 "Codey 视觉门禁：attempt `{}` 未声明 `visual.inspect` capability，禁止工具 `{tool_name}`。请改派视觉角色或由主代理接管。",
                 reservation.attempt_id
             )),
+            Some(reservation) if !reservation_declares_write(reservation)
+                && rules::normalize_tool_name(tool_name) != "view_image" => Some(format!(
+                    "Codey 只读门禁：工具 `{tool_name}` 可能改变文件或应用状态，当前只读子代理仅可读取图片；请向主代理回报。"
+                )),
             Some(_) => None,
         },
         ToolClass::Command => match bound_reservation {

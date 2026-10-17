@@ -53,7 +53,7 @@ pub(super) fn refresh_runtime_subagent_roles_at(
     .context("预检 Codey 子代理运行时配置失败；未写入运行时配置")?;
     let expected_hashes = runtime_agent_plan_hashes(&plans);
     let runtime_home = runtime_home_for_lease(&state);
-    let mut snapshots = snapshot_runtime_agent_files(&constraints_dir)?;
+    let mut snapshots = snapshot_runtime_agent_files(&constraints_dir, &registered_roles)?;
     let (runtime_policy_path, runtime_policy_pending_path) =
         crate::subagent_gate::runtime_subagent_policy_paths(&runtime_home);
     snapshots.push(RuntimeAgentFileSnapshot {
@@ -70,6 +70,7 @@ pub(super) fn refresh_runtime_subagent_roles_at(
             &runtime_home,
             &runtime_roles,
             &expected_hashes,
+            state.subagent_max_threads,
         )?;
         let registrations = prepare_runtime_agent_files(
             &constraints_dir,
@@ -95,6 +96,7 @@ pub(super) fn refresh_runtime_subagent_roles_at(
             &runtime_home,
             &runtime_roles,
             &expected_hashes,
+            state.subagent_max_threads,
         )
     })();
 
@@ -111,11 +113,17 @@ pub(super) fn refresh_runtime_subagent_roles_at(
     Ok(())
 }
 
-fn snapshot_runtime_agent_files(constraints_dir: &Path) -> Result<Vec<RuntimeAgentFileSnapshot>> {
-    SUBAGENT_ROLE_IDS
-        .into_iter()
-        .map(|role| {
-            let path = runtime_agent_path(constraints_dir, role);
+fn snapshot_runtime_agent_files(
+    constraints_dir: &Path,
+    roles: &[String],
+) -> Result<Vec<RuntimeAgentFileSnapshot>> {
+    let mut files = runtime_agent_files(constraints_dir)?;
+    for role in roles {
+        files.insert(role.clone(), runtime_agent_path(constraints_dir, role));
+    }
+    files
+        .into_values()
+        .map(|path| {
             let contents = read_optional(&path)?;
             Ok(RuntimeAgentFileSnapshot { path, contents })
         })

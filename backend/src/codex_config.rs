@@ -86,7 +86,7 @@ const CODEY_HOOKS_DESCRIPTION: &str = "Codey runtime routing and coordination ho
 const CODEY_RUNTIME_CONFIG_LOCK_FILE: &str = "codex-runtime-config.lock";
 const RUNTIME_CONFIG_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 const RUNTIME_CONFIG_LOCK_RETRY: Duration = Duration::from_millis(10);
-const RUNTIME_AGENT_SCHEMA_VERSION: u32 = 1;
+const RUNTIME_AGENT_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -108,6 +108,8 @@ struct RuntimeConfigLease {
     subagent_roles: BTreeMap<String, SubagentRoleConfig>,
     #[serde(default)]
     registered_subagent_roles: Vec<String>,
+    #[serde(default = "crate::config::default_subagent_max_threads")]
+    subagent_max_threads: u32,
     #[serde(default)]
     runtime_home: PathBuf,
     #[serde(default)]
@@ -226,6 +228,7 @@ impl Drop for RuntimeConfigLock {
 }
 
 pub(crate) struct RuntimeRouterConfigOptions<'a> {
+    pub subagent_max_threads: u32,
     pub local_router: Option<&'a RuntimeRouterEndpoint>,
     pub remote_compaction_models: Option<&'a [String]>,
     pub use_official_catalog: bool,
@@ -256,6 +259,7 @@ pub(crate) struct FastContextToolsStatus {
 }
 
 struct RouterApplyOptions<'a> {
+    subagent_max_threads: Option<u32>,
     conversation_git: bool,
     local_router: Option<&'a RuntimeRouterEndpoint>,
     remote_compaction_models: Option<&'a [String]>,
@@ -318,6 +322,7 @@ pub(crate) fn apply_runtime_router_config(
     let applied = apply_isolated_runtime_router_config(
         home,
         RouterApplyOptions {
+            subagent_max_threads: Some(options.subagent_max_threads),
             local_router: options.local_router,
             remote_compaction_models: options.remote_compaction_models,
             conversation_git: options.conversation_git,
@@ -401,6 +406,7 @@ fn apply_isolated_runtime_router_config(
     options: RouterApplyOptions<'_>,
 ) -> Result<AppliedRuntimeRouterConfig> {
     let RouterApplyOptions {
+        subagent_max_threads,
         conversation_git,
         local_router,
         remote_compaction_models,
@@ -466,6 +472,18 @@ fn apply_isolated_runtime_router_config(
         },
     )?;
     let mut effective_document = parse_document(&effective).context("解析 Codey 运行时约束失败")?;
+    if subagent_optimization
+        && let Some(limit) = subagent_max_threads
+    {
+        anyhow::ensure!((1..=64).contains(&limit), "最大子代理数量必须在 1 到 64 之间");
+        effective_document["agents"]["max_concurrent_threads_per_session"] = value(i64::from(limit));
+    }
+    let subagent_max_threads = effective_document
+        .get("agents")
+        .and_then(|agents| agents.get("max_concurrent_threads_per_session"))
+        .and_then(Item::as_integer)
+        .and_then(|limit| u32::try_from(limit).ok())
+        .unwrap_or_else(crate::config::default_subagent_max_threads);
     if use_official_catalog {
         update_model_catalog_reference(
             &mut effective_document,
@@ -495,9 +513,11 @@ fn apply_isolated_runtime_router_config(
     let runtime_roles =
         runtime_subagent_roles(subagent_roles, subagent_model, subagent_reasoning_effort);
     let registered_subagent_roles = if subagent_optimization {
-        SUBAGENT_ROLE_IDS
-            .into_iter()
-            .map(str::to_string)
+        subagent_roles
+            .cloned()
+            .unwrap_or_else(crate::config::default_subagent_roles)
+            .into_keys()
+            .filter(|role| role != SUBAGENT_ROLE_DEFAULT)
             .collect::<Vec<_>>()
     } else {
         Vec::new()
@@ -633,6 +653,7 @@ fn apply_isolated_runtime_router_config(
         subagent_reasoning_effort: subagent_reasoning_effort.to_string(),
         subagent_roles: runtime_roles,
         registered_subagent_roles,
+        subagent_max_threads,
         runtime_home: home.to_path_buf(),
         runtime_agent_schema_version: if subagent_optimization {
             RUNTIME_AGENT_SCHEMA_VERSION
@@ -687,6 +708,7 @@ fn apply_isolated_runtime_router_config(
             home,
             &state.subagent_roles,
             &state.runtime_agent_hashes,
+            state.subagent_max_threads,
         )
     } else {
         crate::subagent_gate::clear_runtime_subagent_policy(home)
@@ -728,6 +750,7 @@ fn apply_isolated_test_runtime_config(
     apply_isolated_runtime_router_config(
         home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             local_router: Some(test_runtime_router_endpoint()),
             remote_compaction_models: None,
             conversation_git: false,
@@ -781,15 +804,12 @@ fn runtime_subagent_roles(
         .and_then(|roles| roles.get(SUBAGENT_ROLE_DEFAULT))
         .cloned()
         .unwrap_or_else(|| SubagentRoleConfig::new(legacy_model, legacy_reasoning_effort));
-    SUBAGENT_ROLE_IDS
-        .into_iter()
-        .filter_map(|role| {
-            let selection = configured
-                .and_then(|roles| roles.get(role))
-                .cloned()
-                .unwrap_or_else(|| fallback.clone());
-            selection.enabled.then(|| (role.to_string(), selection))
-        })
+    let mut roles = configured.cloned().unwrap_or_default();
+    for role in SUBAGENT_ROLE_IDS {
+        roles.entry(role.to_string()).or_insert_with(|| fallback.clone());
+    }
+    roles.into_iter()
+        .filter(|(role, selection)| role != SUBAGENT_ROLE_DEFAULT && selection.enabled)
         .collect()
 }
 
@@ -800,10 +820,13 @@ fn runtime_registration_roles(
     legacy_model: &str,
     legacy_reasoning_effort: &str,
 ) -> Result<BTreeMap<String, SubagentRoleConfig>> {
+    if registered_roles.iter().any(|role| role == SUBAGENT_ROLE_DEFAULT) {
+        return Err(SubagentRoleRegistrationChanged.into());
+    }
     anyhow::ensure!(
         registered_roles
             .iter()
-            .all(|role| SUBAGENT_ROLE_IDS.contains(&role.as_str())),
+            .all(|role| crate::config::valid_subagent_role_id(role)),
         "Codey 子代理注册集合包含未知角色"
     );
     if enabled_roles
@@ -820,7 +843,13 @@ fn runtime_registration_roles(
     Ok(registered_roles
         .iter()
         .map(|role| {
-            let selection = enabled_roles.get(role).unwrap_or(&fallback).clone();
+            let mut selection = enabled_roles.get(role).unwrap_or(&fallback).clone();
+            if !SUBAGENT_ROLE_IDS.contains(&role.as_str()) && !enabled_roles.contains_key(role) {
+                selection.name = role.clone();
+                selection.description = "已停用的自定义子代理，请使用当前启用的角色。".into();
+                selection.developer_instructions = "角色已停用，不执行新任务；向主代理回报。".into();
+                selection.access = crate::config::SubagentAccess::ReadOnly;
+            }
             (role.clone(), selection)
         })
         .collect())
@@ -875,11 +904,10 @@ fn remove_unplanned_runtime_agent_files(
         .iter()
         .map(|registration| registration.role.as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    for role in SUBAGENT_ROLE_IDS {
-        if active_roles.contains(role) {
+    for (role, path) in runtime_agent_files(constraints_dir)? {
+        if active_roles.contains(role.as_str()) {
             continue;
         }
-        let path = runtime_agent_path(constraints_dir, role);
         match fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -896,6 +924,30 @@ fn remove_unplanned_runtime_agent_files(
     Ok(())
 }
 
+fn runtime_agent_files(constraints_dir: &Path) -> Result<BTreeMap<String, PathBuf>> {
+    let mut files = BTreeMap::from([(
+        SUBAGENT_ROLE_DEFAULT.to_string(),
+        runtime_agent_path(constraints_dir, SUBAGENT_ROLE_DEFAULT),
+    )]);
+    let directory = constraints_dir.join(CODEY_RUNTIME_AGENTS_DIR);
+    let entries = match fs::read_dir(&directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(files),
+        Err(error) => return Err(error).context("读取 Codey 生成的子代理目录失败"),
+    };
+    for entry in entries {
+        let entry = entry?;
+        let path = entry.path();
+        if path.extension().is_some_and(|extension| extension == "toml")
+            && let Some(role) = path.file_stem().and_then(|stem| stem.to_str())
+            && crate::config::valid_subagent_role_id(role)
+        {
+            files.insert(role.to_string(), path);
+        }
+    }
+    Ok(files)
+}
+
 fn plan_runtime_agent_files(
     constraints_dir: &Path,
     roles: &BTreeMap<String, SubagentRoleConfig>,
@@ -903,27 +955,35 @@ fn plan_runtime_agent_files(
     remote_compaction_models: Option<&HashSet<String>>,
 ) -> Result<Vec<RuntimeAgentPlan>> {
     let mut plans = Vec::with_capacity(roles.len());
-    for role in SUBAGENT_ROLE_IDS {
-        let Some(selection) = roles.get(role) else {
-            continue;
-        };
-        let default_source = subagent_source_config(role)
-            .with_context(|| format!("缺少 Codey 子代理约束模板：{role}"))?;
-        let source_path = if role == SUBAGENT_ROLE_DEFAULT {
-            constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE)
+    for (role, selection) in roles {
+        anyhow::ensure!(
+            crate::config::valid_subagent_role_id(role),
+            "子代理标识无效：{role}"
+        );
+        let source = if let Some(default_source) = subagent_source_config(role) {
+            let source_path = if role == SUBAGENT_ROLE_DEFAULT {
+                constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE)
+            } else {
+                constraints_dir
+                    .join(CODEY_SUBAGENT_SOURCES_DIR)
+                    .join(format!("{role}.toml"))
+            };
+            if let Some(parent) = source_path.parent() {
+                create_private_dir_all(parent)?;
+            }
+            read_or_create_versioned_constraint_file(
+                &source_path,
+                default_source,
+                &subagent_source_config_versions(role).unwrap(),
+            )?
         } else {
-            constraints_dir
-                .join(CODEY_SUBAGENT_SOURCES_DIR)
-                .join(format!("{role}.toml"))
+            let mut source = DocumentMut::new();
+            source["description"] = value(format!(
+                "{}：{}", selection.name.trim(), selection.description.trim()
+            ));
+            source["developer_instructions"] = value(selection.developer_instructions.trim());
+            document_string(&source)?
         };
-        if let Some(parent) = source_path.parent() {
-            create_private_dir_all(parent)?;
-        }
-        let source = read_or_create_versioned_constraint_file(
-            &source_path,
-            default_source,
-            &subagent_source_config_versions(role).unwrap(),
-        )?;
         let runtime_path = runtime_agent_path(constraints_dir, role);
         let (contents, description) = render_runtime_agent(
             &source,
@@ -1002,6 +1062,20 @@ fn render_runtime_agent(
         SUBAGENT_TASK_BOUNDARY_GUARD,
         "developer_instructions",
     )?;
+    if selection.access == crate::config::SubagentAccess::ReadOnly {
+        append_table_constraint_text(
+            document.as_table_mut(),
+            "developer_instructions",
+            READ_ONLY_AGENT_WRITE_GUARD,
+            "developer_instructions",
+        )?;
+        // Official custom agents inherit their parent's sandbox. Capability
+        // reduction complements the trusted hook's read-only allowlist.
+        let features = ensure_root_table(&mut document, "features")?;
+        for feature in ["shell_tool", "apps", "plugins", "request_permissions_tool"] {
+            features[feature] = value(false);
+        }
+    }
     document["name"] = value(role);
     document["model"] = value(model);
     if remote_compaction_models.is_some() {
@@ -1299,6 +1373,7 @@ fn reconcile_runtime_subagent_roles_with_compaction(
         &runtime_home,
         &runtime_roles,
         &expected_hashes,
+        state.subagent_max_threads,
     )?;
     let mut reasons = Vec::new();
     if !lease_matches {
@@ -2339,8 +2414,6 @@ fn enable_subagent_optimization(
     if !has_valid_concurrency {
         agents["max_concurrent_threads_per_session"] = value(DEFAULT_SUBAGENT_MAX_CONCURRENCY);
     }
-    agents["default_subagent_model"] = value(subagent_model);
-    agents["default_subagent_reasoning_effort"] = value(subagent_reasoning_effort);
     let features = ensure_root_table(doc, "features")?;
     if features.get("multi_agent_v2").is_none() {
         features["multi_agent_v2"] = Item::Table(Table::new());
@@ -2783,14 +2856,6 @@ fn build_isolated_runtime_overrides(
             (
                 &["agents", "max_concurrent_threads_per_session"][..],
                 "agents.max_concurrent_threads_per_session",
-            ),
-            (
-                &["agents", "default_subagent_model"][..],
-                "agents.default_subagent_model",
-            ),
-            (
-                &["agents", "default_subagent_reasoning_effort"][..],
-                "agents.default_subagent_reasoning_effort",
             ),
             (
                 &["features", "multi_agent_v2", "enabled"][..],

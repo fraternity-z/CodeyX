@@ -211,22 +211,20 @@ fn repair_at(home: &Path, marker: &Path, runtime_active: bool) -> RepairResult<C
         let lease = lease.as_ref().expect("active role lease");
         // Saved settings can have pending edits. Preserve the settings currently
         // attested by this lease rather than applying the next launch's settings.
-        let applied_roles = SUBAGENT_ROLE_IDS
-            .into_iter()
-            .map(|role| {
-                let selection = lease.subagent_roles.get(role).cloned().unwrap_or_else(|| {
-                    let mut disabled = SubagentRoleConfig::new(
-                        &lease.subagent_model,
-                        &lease.subagent_reasoning_effort,
-                    );
-                    disabled.enabled = false;
-                    disabled
-                });
-                (role.to_string(), selection)
-            })
-            .collect();
+        let mut applied_roles = lease.subagent_roles.clone();
+        for role in SUBAGENT_ROLE_IDS {
+            applied_roles.entry(role.to_string()).or_insert_with(|| {
+                let mut disabled = SubagentRoleConfig::new(
+                    &lease.subagent_model,
+                    &lease.subagent_reasoning_effort,
+                );
+                disabled.enabled = false;
+                disabled
+            });
+        }
         let applied = CodeyConfig {
             subagent_optimization: true,
+            subagent_max_threads: lease.subagent_max_threads,
             subagent_model: lease.subagent_model.clone(),
             subagent_reasoning_effort: lease.subagent_reasoning_effort.clone(),
             subagent_roles: applied_roles,
@@ -727,6 +725,13 @@ mod tests {
         let original = "# retain user model\nmodel='user-model'\n";
         fs::write(home.join("config.toml"), original).unwrap();
         let mut configured = crate::config::default_subagent_roles();
+        configured.insert("reviewer".into(), SubagentRoleConfig {
+            name: "审查员".into(),
+            description: "检查变更".into(),
+            developer_instructions: "提供证据".into(),
+            access: crate::config::SubagentAccess::ReadOnly,
+            ..SubagentRoleConfig::new(DEFAULT_SUBAGENT_MODEL, "high")
+        });
         configured
             .get_mut(crate::config::SUBAGENT_ROLE_WORKER)
             .unwrap()
@@ -734,6 +739,7 @@ mod tests {
         apply_isolated_runtime_router_config(
             &home,
             RouterApplyOptions {
+                subagent_max_threads: Some(5),
                 remote_compaction_models: Some(&[DEFAULT_SUBAGENT_MODEL.to_string()]),
                 conversation_git: false,
                 model_contexts: None,
@@ -755,7 +761,7 @@ mod tests {
             serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
         let role_path = runtime_agent_path(
             &marker.with_file_name(CODEY_CONSTRAINTS_DIR),
-            SUBAGENT_ROLE_DEFAULT,
+            "reviewer",
         );
         let original_role = fs::read(&role_path).unwrap();
         let document = str::from_utf8(&original_role)
@@ -788,6 +794,9 @@ mod tests {
         );
         let (policy, _) = crate::subagent_gate::runtime_subagent_policy_paths(&home);
         let policy: serde_json::Value = serde_json::from_slice(&fs::read(policy).unwrap()).unwrap();
+        assert_eq!(policy["maxThreads"], 5);
+        assert_eq!(policy["roles"]["reviewer"]["access"], "readOnly");
+        assert_eq!(policy["roles"]["reviewer"]["developerInstructions"], "提供证据");
         assert!(
             policy["roles"]
                 .get(crate::config::SUBAGENT_ROLE_WORKER)

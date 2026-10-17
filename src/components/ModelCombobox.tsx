@@ -98,7 +98,7 @@ export function ModelCombobox({
       onSelectionChange={(key) => {
         if (key != null) onChange(String(key));
       }}
-      menuTrigger="focus"
+      menuTrigger="input"
     >
       <ComboBox.InputGroup>
         {unavailableValue ? (

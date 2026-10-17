@@ -49,7 +49,7 @@ pub(super) fn prepare_task_capsule(
         return Err(contract_error("message 为空"));
     }
     validate_task_id(task_name)?;
-    rule_set
+    let policy = rule_set
         .role_policy(role)
         .ok_or_else(|| contract_error(&format!("未知或不允许的 agent_type `{role}`")))?;
     let workspace_root = hook_workspace_root
@@ -59,14 +59,18 @@ pub(super) fn prepare_task_capsule(
     if workspace_root.is_none() {
         return Err(contract_error("子代理缺少可信工作目录"));
     }
-    // All roles share capabilities. Only trusted native workspace metadata
-    // establishes the workspace identity; task text cannot change it.
-    let capabilities = vec![
-        "command.execute".to_string(),
-        "files.read".to_string(),
-        "workspace.write".to_string(),
-        "visual.inspect".to_string(),
-    ];
+    // Capabilities come from the trusted role policy and remain fixed for this
+    // attempt even if the saved role is later edited or deleted.
+    let capabilities = if policy.access == "read" {
+        vec!["files.read".to_string(), "visual.inspect".to_string()]
+    } else {
+        vec![
+            "command.execute".to_string(),
+            "files.read".to_string(),
+            "workspace.write".to_string(),
+            "visual.inspect".to_string(),
+        ]
+    };
     Ok(PreparedContract {
         capsule: TaskCapsule {
             id: task_name.to_string(),

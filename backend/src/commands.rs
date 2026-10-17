@@ -1576,6 +1576,7 @@ struct CodeyConfigSaveInput {
     route_request_log_present: bool,
     stream_max_retries_present: bool,
     subagent_roles_present: bool,
+    subagent_max_threads_present: bool,
     subagent_model_present: bool,
     subagent_reasoning_effort_present: bool,
     misc_model_present: bool,
@@ -1593,6 +1594,7 @@ impl CodeyConfigSaveInput {
             route_request_log_present: true,
             stream_max_retries_present: true,
             subagent_roles_present: true,
+            subagent_max_threads_present: true,
             subagent_model_present: true,
             subagent_reasoning_effort_present: true,
             misc_model_present: true,
@@ -1616,6 +1618,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     let route_request_log_present = fields.contains_key("routeRequestLog");
     let stream_max_retries_present = fields.contains_key("streamMaxRetries");
     let subagent_roles_present = fields.contains_key("subagentRoles");
+    let subagent_max_threads_present = fields.contains_key("subagentMaxThreads");
     let subagent_model_present = fields.contains_key("subagentModel");
     let subagent_reasoning_effort_present = fields.contains_key("subagentReasoningEffort");
     let misc_model_present = fields.contains_key("miscModel");
@@ -1630,6 +1633,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         route_request_log_present,
         stream_max_retries_present,
         subagent_roles_present,
+        subagent_max_threads_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
         misc_model_present,
@@ -1666,6 +1670,7 @@ async fn save_codey_config_locked(
         route_request_log_present,
         stream_max_retries_present,
         subagent_roles_present,
+        subagent_max_threads_present,
         subagent_model_present,
         subagent_reasoning_effort_present,
         misc_model_present,
@@ -1817,6 +1822,9 @@ async fn save_codey_config_locked(
         &fast_context_tools_status,
     );
     config.subagent_optimization = config_input.subagent_optimization;
+    if subagent_max_threads_present {
+        config.subagent_max_threads = config_input.subagent_max_threads;
+    }
     let mut explicitly_configured_subagent_models = Vec::new();
     let default_role_supplied = subagent_roles_present
         && !config_input.subagent_roles.is_empty()
@@ -1824,21 +1832,24 @@ async fn save_codey_config_locked(
             .subagent_roles
             .contains_key(SUBAGENT_ROLE_DEFAULT);
     if subagent_roles_present && !config_input.subagent_roles.is_empty() {
+        // The submitted matrix owns custom-role deletion; omitted legacy fields
+        // still preserve the saved matrix and built-in compatibility defaults.
+        config.subagent_roles.retain(|role, _| {
+            SUBAGENT_ROLE_IDS.contains(&role.as_str()) || config_input.subagent_roles.contains_key(role)
+        });
         for (role, selection) in config_input.subagent_roles {
-            if SUBAGENT_ROLE_IDS.contains(&role.as_str()) {
-                let selection_changed = config.subagent_roles.get(&role).is_none_or(|previous| {
-                    previous.enabled != selection.enabled
-                        || !model_id::equal(&previous.model, &selection.model)
-                        || !previous
-                            .reasoning_effort
-                            .trim()
-                            .eq_ignore_ascii_case(selection.reasoning_effort.trim())
-                });
-                if selection_changed {
-                    explicitly_configured_subagent_models.push(selection.model.clone());
-                }
-                config.subagent_roles.insert(role, selection);
+            let selection_changed = config.subagent_roles.get(&role).is_none_or(|previous| {
+                previous.enabled != selection.enabled
+                    || !model_id::equal(&previous.model, &selection.model)
+                    || !previous
+                        .reasoning_effort
+                        .trim()
+                        .eq_ignore_ascii_case(selection.reasoning_effort.trim())
+            });
+            if selection_changed {
+                explicitly_configured_subagent_models.push(selection.model.clone());
             }
+            config.subagent_roles.insert(role, selection);
         }
     }
     if !default_role_supplied && (subagent_model_present || subagent_reasoning_effort_present) {
@@ -1869,6 +1880,7 @@ async fn save_codey_config_locked(
     }
     config.hide_full_access_warning = config_input.hide_full_access_warning;
     config.show_account_usage_in_header = config_input.show_account_usage_in_header;
+    crate::config::validate_subagent_config(&config)?;
     let mut config = config.normalize();
     validate_official_account_config_change(&previous, &config)?;
     if previous.local_router_enabled && config.local_router_enabled {
@@ -3063,6 +3075,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.fast_context_tools != current.fast_context_tools
         || applied.conversation_git.enabled != current.conversation_git.enabled
         || applied.subagent_optimization != current.subagent_optimization
+        || (current.subagent_optimization && applied.subagent_max_threads != current.subagent_max_threads)
         || !applied
             .misc_model
             .trim()

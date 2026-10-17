@@ -188,8 +188,8 @@ fn discarding_a_cancelled_startup_clears_active_and_pending_runtime_policy() {
     fs::write(&marker, b"lease").unwrap();
     let roles = crate::config::uniform_subagent_roles("provider-model", "high");
     let hashes = BTreeMap::from([("default".to_string(), "digest".to_string())]);
-    crate::subagent_gate::commit_runtime_subagent_policy(&home, &roles, &hashes).unwrap();
-    crate::subagent_gate::begin_runtime_subagent_policy_update(&home, &roles, &hashes).unwrap();
+    crate::subagent_gate::commit_runtime_subagent_policy(&home, &roles, &hashes, 2).unwrap();
+    crate::subagent_gate::begin_runtime_subagent_policy_update(&home, &roles, &hashes, 2).unwrap();
 
     discard_runtime_lease(&home, &marker, &backup_dir).unwrap();
 
@@ -684,6 +684,7 @@ fn isolated_runtime_restores_live_disk_provider_to_resume_shim() {
     apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -849,6 +850,7 @@ fn local_router_accepts_a_codey_owned_resume_shim() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -902,6 +904,7 @@ fn isolated_runtime_config_creates_empty_codex_config_when_missing() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -1015,10 +1018,11 @@ fn disabled_subagent_roles_are_registered_with_safe_defaults_but_omitted_from_po
     );
     assert!(!runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_WORKER));
     assert!(runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_QUICK_SCAN));
-    assert!(runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_DEFAULT));
+    assert!(!runtime_roles.contains_key(crate::config::SUBAGENT_ROLE_DEFAULT));
 
     let registered = SUBAGENT_ROLE_IDS
         .into_iter()
+        .filter(|role| *role != SUBAGENT_ROLE_DEFAULT)
         .map(str::to_string)
         .collect::<Vec<_>>();
     let registration_roles = runtime_registration_roles(
@@ -1028,14 +1032,14 @@ fn disabled_subagent_roles_are_registered_with_safe_defaults_but_omitted_from_po
         DEFAULT_SUBAGENT_REASONING_EFFORT,
     )
     .unwrap();
-    assert_eq!(registration_roles.len(), SUBAGENT_ROLE_IDS.len());
+    assert_eq!(registration_roles.len(), SUBAGENT_ROLE_IDS.len() - 1);
     assert_eq!(
         registration_roles[crate::config::SUBAGENT_ROLE_WORKER],
-        runtime_roles[SUBAGENT_ROLE_DEFAULT]
+        *runtime_roles.values().next().unwrap()
     );
     let plans =
         plan_runtime_agent_files(&constraints_dir, &registration_roles, None, None).unwrap();
-    assert_eq!(plans.len(), SUBAGENT_ROLE_IDS.len());
+    assert_eq!(plans.len(), SUBAGENT_ROLE_IDS.len() - 1);
 
     let stale_worker_path =
         runtime_agent_path(&constraints_dir, crate::config::SUBAGENT_ROLE_WORKER);
@@ -1045,7 +1049,7 @@ fn disabled_subagent_roles_are_registered_with_safe_defaults_but_omitted_from_po
     fs::write(&stale_worker_path, b"stale worker runtime file").unwrap();
     let registrations =
         prepare_runtime_agent_files(&constraints_dir, &registration_roles, None, None).unwrap();
-    assert_eq!(registrations.len(), SUBAGENT_ROLE_IDS.len());
+    assert_eq!(registrations.len(), SUBAGENT_ROLE_IDS.len() - 1);
     let worker = fs::read_to_string(&stale_worker_path).unwrap();
     assert!(!worker.contains("missing/disabled-model"));
     assert!(worker.contains(DEFAULT_SUBAGENT_MODEL));
@@ -1057,18 +1061,124 @@ fn dynamic_role_runtime_fixture(
     config: &CodeyConfig,
 ) -> AppliedRuntimeRouterConfig {
     fs::create_dir_all(home).unwrap();
-    apply_isolated_test_runtime_config(
+    apply_isolated_runtime_router_config(
         home,
-        false,
-        None,
-        true,
-        &config.subagent_model,
-        &config.subagent_reasoning_effort,
-        Some(&config.subagent_roles),
-        marker,
-        &marker.with_file_name("backups"),
+        RouterApplyOptions {
+            subagent_max_threads: Some(config.subagent_max_threads),
+            local_router: Some(test_runtime_router_endpoint()),
+            remote_compaction_models: None,
+            conversation_git: false,
+            stream_max_retries: 5,
+            model_contexts: None,
+            use_official_catalog: false,
+            default_model: None,
+            fastctx_command: None,
+            subagent_optimization: true,
+            subagent_model: &config.subagent_model,
+            subagent_reasoning_effort: &config.subagent_reasoning_effort,
+            subagent_roles: Some(&config.subagent_roles),
+            marker,
+            backup_root: &marker.with_file_name("backups"),
+        },
     )
     .unwrap()
+}
+
+#[test]
+fn custom_subagents_render_official_fields_and_refresh_permissions_without_changing_live_limit() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("home");
+    let marker = temp.path().join("state/lease.json");
+    fs::create_dir_all(&home).unwrap();
+    let user_config = "[agents]\nmax_concurrent_threads_per_session = 1\n";
+    fs::write(home.join("config.toml"), user_config).unwrap();
+    let mut config = CodeyConfig {
+        subagent_optimization: true,
+        subagent_max_threads: 4,
+        ..CodeyConfig::default()
+    };
+    let custom = SubagentRoleConfig {
+        name: "审查员".into(),
+        description: "检查边界行为".into(),
+        developer_instructions: "引用原始证据\n不要猜测".into(),
+        access: crate::config::SubagentAccess::ReadOnly,
+        ..SubagentRoleConfig::new("review-route/review-model", "high")
+    };
+    config.subagent_roles.insert("reviewer".into(), custom.clone());
+    let applied = dynamic_role_runtime_fixture(&home, &marker, &config);
+    assert!(applied.runtime_config_overrides.iter().any(|entry| entry == "agents.max_concurrent_threads_per_session=4"));
+    assert!(applied.runtime_config_overrides.iter().any(|entry| entry.starts_with("agents.reviewer.config_file=")));
+    assert!(applied.runtime_config_overrides.iter().all(|entry| !entry.starts_with("agents.default")));
+    assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), user_config);
+    let constraints = marker.with_file_name(CODEY_CONSTRAINTS_DIR);
+    let path = runtime_agent_path(&constraints, "reviewer");
+    let document = parse_document(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(document["name"].as_str(), Some("reviewer"));
+    assert_eq!(document["description"].as_str(), Some("审查员：检查边界行为"));
+    assert_eq!(document["model"].as_str(), Some(custom.model.as_str()));
+    assert_eq!(document["model_reasoning_effort"].as_str(), Some("high"));
+    let instructions = document["developer_instructions"].as_str().unwrap();
+    assert!(instructions.contains(&custom.developer_instructions));
+    assert!(instructions.contains(READ_ONLY_AGENT_WRITE_GUARD));
+    for feature in ["shell_tool", "apps", "plugins", "request_permissions_tool"] {
+        assert_eq!(document["features"][feature].as_bool(), Some(false));
+    }
+    assert!(document.get("sandbox_mode").is_none(), "permissions inherit from the parent");
+    let state_root = home.join(crate::subagent_gate::STATE_DIRECTORY);
+    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root).unwrap().unwrap();
+    assert_eq!(policy.roles["reviewer"], custom);
+    assert_eq!(policy.max_threads, 4);
+    assert!(!policy.roles.contains_key(SUBAGENT_ROLE_DEFAULT));
+
+    config.subagent_max_threads = 7;
+    let selection = config.subagent_roles.get_mut("reviewer").unwrap();
+    selection.access = crate::config::SubagentAccess::ReadWrite;
+    selection.reasoning_effort = "low".into();
+    assert!(reconcile_runtime_subagent_roles_at(&config, &marker).unwrap().repaired);
+    let document = parse_document(&fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(document["model_reasoning_effort"].as_str(), Some("low"));
+    assert!(!document["developer_instructions"].as_str().unwrap().contains(READ_ONLY_AGENT_WRITE_GUARD));
+    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root).unwrap().unwrap();
+    assert_eq!(policy.max_threads, 4, "a changed concurrency setting requires a restart");
+    assert_eq!(policy.roles["reviewer"].access, crate::config::SubagentAccess::ReadWrite);
+
+    config.subagent_roles.remove("reviewer");
+    assert!(reconcile_runtime_subagent_roles_at(&config, &marker).unwrap().repaired);
+    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root).unwrap().unwrap();
+    assert!(!policy.roles.contains_key("reviewer"));
+    assert!(fs::read_to_string(&path).unwrap().contains("角色已停用"));
+    restore_runtime_config_at(&home, &marker, true).unwrap();
+    dynamic_role_runtime_fixture(&home, &marker, &config);
+    assert!(!path.exists(), "restarting removes stale generated custom-role files");
+    assert!(!constraints.join(CODEY_RUNTIME_DEFAULT_AGENT_FILE).exists());
+}
+
+#[test]
+fn added_custom_subagent_and_legacy_default_registration_require_restart_without_writes() {
+    for legacy_default in [false, true] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let marker = temp.path().join("state/lease.json");
+        let mut config = CodeyConfig { subagent_optimization: true, ..CodeyConfig::default() };
+        dynamic_role_runtime_fixture(&home, &marker, &config);
+        if legacy_default {
+            let mut lease: RuntimeConfigLease = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+            lease.registered_subagent_roles.push(SUBAGENT_ROLE_DEFAULT.into());
+            write_lease(&marker, &lease).unwrap();
+        } else {
+            config.subagent_roles.insert("reviewer".into(), SubagentRoleConfig {
+                name: "审查".into(), description: "审查变更".into(), developer_instructions: "核验".into(),
+                ..SubagentRoleConfig::new("review-model", "high")
+            });
+        }
+        let original = fs::read(&marker).unwrap();
+        let (policy_path, _) = crate::subagent_gate::runtime_subagent_policy_paths(&home);
+        let policy = fs::read(&policy_path).unwrap();
+        let error = reconcile_runtime_subagent_roles_at(&config, &marker).unwrap_err();
+        assert!(error.is::<SubagentRoleRegistrationChanged>());
+        assert_eq!(fs::read(&marker).unwrap(), original);
+        assert_eq!(fs::read(policy_path).unwrap(), policy);
+    }
 }
 
 #[test]
@@ -1092,7 +1202,7 @@ fn dynamic_roles_can_be_enabled_disabled_and_reenabled_without_changing_registra
     let initial: RuntimeConfigLease = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
     assert_eq!(
         initial.registered_subagent_roles.len(),
-        SUBAGENT_ROLE_IDS.len()
+        SUBAGENT_ROLE_IDS.len() - 1
     );
     assert!(!initial.subagent_roles.contains_key(role));
     let worker_path = runtime_agent_path(&marker.with_file_name(CODEY_CONSTRAINTS_DIR), role);
@@ -1117,7 +1227,7 @@ fn dynamic_roles_can_be_enabled_disabled_and_reenabled_without_changing_registra
             current.registered_subagent_roles,
             initial.registered_subagent_roles
         );
-        assert_eq!(current.runtime_agent_hashes.len(), SUBAGENT_ROLE_IDS.len());
+        assert_eq!(current.runtime_agent_hashes.len(), SUBAGENT_ROLE_IDS.len() - 1);
         assert_eq!(current.subagent_roles.contains_key(role), enabled);
         let (policy_path, pending) = crate::subagent_gate::runtime_subagent_policy_paths(&home);
         let policy: serde_json::Value =
@@ -1155,7 +1265,7 @@ fn legacy_role_coverage_is_preserved_when_disabling_then_reenabling() {
     let migrated: RuntimeConfigLease = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
     assert_eq!(
         migrated.registered_subagent_roles.len(),
-        SUBAGENT_ROLE_IDS.len()
+        SUBAGENT_ROLE_IDS.len() - 1
     );
 }
 
@@ -1591,6 +1701,7 @@ fn native_runtime_forwards_user_catalog_with_the_same_resolved_path() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -1637,6 +1748,7 @@ fn native_isolated_runtime_does_not_create_a_missing_codex_config() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -1699,6 +1811,7 @@ fn runtime_context_overlay_uses_user_catalog_and_reset_restores_its_path() {
         let applied = apply_isolated_runtime_router_config(
             &home,
             RouterApplyOptions {
+                subagent_max_threads: None,
                 remote_compaction_models: None,
                 conversation_git: false,
                 local_router: router.then(test_runtime_router_endpoint),
@@ -1778,6 +1891,7 @@ fn context_budget_startup_applies_and_recovers_global_conflicts() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             local_router: Some(test_runtime_router_endpoint()),
@@ -1851,6 +1965,7 @@ fn isolated_runtime_skips_retry_overrides_for_builtin_providers() {
         let applied = apply_isolated_runtime_router_config(
             &home,
             RouterApplyOptions {
+                subagent_max_threads: None,
                 remote_compaction_models: None,
                 conversation_git: false,
                 model_contexts: None,
@@ -1899,6 +2014,7 @@ fn isolated_runtime_keeps_retry_overrides_for_custom_providers() {
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -1957,6 +2073,7 @@ fn isolated_runtime_preserves_computer_use_without_adding_an_mcp() {
             let applied = apply_isolated_runtime_router_config(
                 &home,
                 RouterApplyOptions {
+                    subagent_max_threads: None,
                     remote_compaction_models: None,
                     conversation_git: false,
                     model_contexts: None,
@@ -2011,6 +2128,7 @@ wire_api = "responses"
     apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -2975,14 +3093,8 @@ command = "echo preserve-user-hook"
         agents["max_concurrent_threads_per_session"].as_integer(),
         Some(DEFAULT_SUBAGENT_MAX_CONCURRENCY)
     );
-    assert_eq!(
-        agents["default_subagent_model"].as_str(),
-        Some("gpt-5.6-sol")
-    );
-    assert_eq!(
-        agents["default_subagent_reasoning_effort"].as_str(),
-        Some("high")
-    );
+    assert!(agents.get("default_subagent_model").is_none());
+    assert!(agents.get("default_subagent_reasoning_effort").is_none());
     assert_eq!(multi_agent["enabled"].as_bool(), Some(true));
     assert_eq!(multi_agent["wait_agent_enabled"].as_bool(), Some(true));
     assert_eq!(
@@ -3149,10 +3261,7 @@ fn subagent_optimization_accepts_dynamic_model_ids_and_rejects_empty_values() {
     )
     .unwrap();
     let document = patched.parse::<DocumentMut>().unwrap();
-    assert_eq!(
-        document["agents"]["default_subagent_model"].as_str(),
-        Some("gpt-5.6-luna")
-    );
+    assert!(document["agents"].get("default_subagent_model").is_none());
 
     let error = patch_config_with_fastctx_mode(
         "",
@@ -3353,6 +3462,7 @@ experimental_bearer_token = "upstream-secret-token"
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -3490,6 +3600,7 @@ fn official_login_uses_the_websocket_router_without_overriding_builtin_openai() 
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -3531,6 +3642,7 @@ fn builtin_catalog_roles_keep_the_selected_routes_compaction_mode() {
     apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: Some(&[DEFAULT_SUBAGENT_MODEL.to_string()]),
             conversation_git: false,
             local_router: Some(test_runtime_router_endpoint()),
@@ -3550,7 +3662,7 @@ fn builtin_catalog_roles_keep_the_selected_routes_compaction_mode() {
     .unwrap();
     let path = runtime_agent_path(
         &marker.with_file_name(CODEY_CONSTRAINTS_DIR),
-        SUBAGENT_ROLE_DEFAULT,
+        crate::config::SUBAGENT_ROLE_WORKER,
     );
     let role = fs::read_to_string(path)
         .unwrap()
@@ -3585,6 +3697,7 @@ wire_api = "responses"
     let error = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: false,
             model_contexts: None,
@@ -3831,19 +3944,8 @@ wire_api = "responses"
         == &format!(
             "agents.max_concurrent_threads_per_session={DEFAULT_SUBAGENT_MAX_CONCURRENCY}"
         )));
-    assert!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .any(|entry| entry == "agents.default_subagent_model=\"gpt-5.6-mini\"")
-    );
-    assert!(
-        applied
-            .runtime_config_overrides
-            .iter()
-            .any(|entry| entry.starts_with("agents.default.config_file="))
-    );
-    for role in SUBAGENT_ROLE_IDS {
+    assert!(applied.runtime_config_overrides.iter().all(|entry| !entry.starts_with("agents.default")));
+    for role in SUBAGENT_ROLE_IDS.into_iter().filter(|role| *role != SUBAGENT_ROLE_DEFAULT) {
         for field in ["config_file", "description"] {
             let key = format!("agents.{role}.{field}");
             assert!(
@@ -3904,10 +4006,6 @@ wire_api = "responses"
         "tool_output_token_limit",
         "agents.enabled",
         "agents.max_concurrent_threads_per_session",
-        "agents.default_subagent_model",
-        "agents.default_subagent_reasoning_effort",
-        "agents.default.config_file",
-        "agents.default.description",
         "features.multi_agent_v2.enabled",
         "features.multi_agent_v2.wait_agent_enabled",
         "features.multi_agent_v2.hide_spawn_agent_metadata",
@@ -4005,27 +4103,21 @@ wire_api = "responses"
         fs::read_to_string(constraints_dir.join(CODEY_COLLABORATION_HINT_FILE)).unwrap(),
         ROOT_AGENT_COLLABORATION_USAGE_HINT
     );
-    assert!(constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE).exists());
+    assert!(!constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE).exists());
     assert!(
-        constraints_dir
+        !constraints_dir
             .join(CODEY_RUNTIME_DEFAULT_AGENT_FILE)
             .exists()
     );
-    for role in SUBAGENT_ROLE_IDS {
-        let runtime_path = if role == SUBAGENT_ROLE_DEFAULT {
-            constraints_dir.join(CODEY_RUNTIME_DEFAULT_AGENT_FILE)
-        } else {
-            assert!(
-                constraints_dir
-                    .join(CODEY_SUBAGENT_SOURCES_DIR)
-                    .join(format!("{role}.toml"))
-                    .exists(),
-                "missing editable source for {role}"
-            );
-            constraints_dir
-                .join(CODEY_RUNTIME_AGENTS_DIR)
-                .join(format!("{role}.toml"))
-        };
+    for role in SUBAGENT_ROLE_IDS.into_iter().filter(|role| *role != SUBAGENT_ROLE_DEFAULT) {
+        assert!(
+        constraints_dir
+            .join(CODEY_SUBAGENT_SOURCES_DIR)
+            .join(format!("{role}.toml"))
+            .exists(),
+            "missing editable source for {role}"
+        );
+        let runtime_path = runtime_agent_path(&constraints_dir, role);
         let runtime = fs::read_to_string(runtime_path)
             .unwrap()
             .parse::<DocumentMut>()
@@ -4063,8 +4155,8 @@ wire_api = "responses"
     )
     .unwrap();
     fs::write(
-        constraints_dir.join(CODEY_SUBAGENT_SOURCE_FILE),
-        r#"name = "default"
+        constraints_dir.join(CODEY_SUBAGENT_SOURCES_DIR).join("codey_worker.toml"),
+        r#"name = "codey_worker"
 description = "Custom editable subagent"
 developer_instructions = "CUSTOM SUBAGENT CONSTRAINT"
 "#,
@@ -4109,7 +4201,7 @@ developer_instructions = "CUSTOM SUBAGENT CONSTRAINT"
         Some("CUSTOM COLLABORATION HINT")
     );
     let runtime_agent =
-        fs::read_to_string(constraints_dir.join(CODEY_RUNTIME_DEFAULT_AGENT_FILE)).unwrap();
+        fs::read_to_string(runtime_agent_path(&constraints_dir, crate::config::SUBAGENT_ROLE_WORKER)).unwrap();
     assert!(runtime_agent.contains("CUSTOM SUBAGENT CONSTRAINT"));
     assert!(runtime_agent.contains("CUSTOM FASTCTX CONSTRAINT"));
     assert!(restore_runtime_config_at(&home, &marker, true).unwrap());
@@ -4270,6 +4362,7 @@ fn conversation_git_installs_only_trusted_edit_hooks_without_other_enhancements(
     let applied = apply_isolated_runtime_router_config(
         &home,
         RouterApplyOptions {
+            subagent_max_threads: None,
             remote_compaction_models: None,
             conversation_git: true,
             local_router: None,

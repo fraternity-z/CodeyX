@@ -49,18 +49,16 @@ export type PromptOptimizationConfig = {
   instruction: string;
 };
 
-export type SubagentRoleId =
-  | "codey_quick_scan"
-  | "codey_deep_research"
-  | "codey_visual_analysis"
-  | "codey_worker"
-  | "codey_visual_worker"
-  | "default";
+export type SubagentRoleId = string;
 
 export type SubagentRoleConfig = {
   enabled: boolean;
   model: string;
   reasoningEffort: string;
+  name?: string;
+  description?: string;
+  developerInstructions?: string;
+  access?: "readOnly" | "readWrite";
 };
 
 export type RouteRequestLogConfig = {
@@ -121,6 +119,7 @@ export type Config = {
   subagentModel: string;
   subagentReasoningEffort: string;
   subagentRoles: Record<SubagentRoleId, SubagentRoleConfig>;
+  subagentMaxThreads?: number;
   miscModel: string;
   hideFullAccessWarning: boolean;
   showAccountUsageInHeader: boolean;

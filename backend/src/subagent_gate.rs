@@ -24,6 +24,7 @@ use runtime_policy::{RuntimeSubagentPolicy, read_optional_runtime_policy_file};
 pub(crate) use runtime_policy::{
     begin_runtime_subagent_policy_update, clear_runtime_subagent_policy,
     commit_runtime_subagent_policy, runtime_subagent_policy_matches, runtime_subagent_policy_paths,
+    load_runtime_subagent_policy,
 };
 use state::*;
 
@@ -1140,13 +1141,16 @@ fn runtime_role_admission_denial(state_root: &Path, role: &str) -> Result<Option
             )));
         }
     };
-    if policy.roles.contains_key(role) {
+    if role != crate::config::SUBAGENT_ROLE_DEFAULT
+        && policy.roles.get(role).is_some_and(|selection| selection.enabled)
+    {
         Ok(None)
-    } else if crate::config::SUBAGENT_ROLE_IDS.contains(&role) {
+    } else if crate::config::SUBAGENT_ROLE_IDS.contains(&role) || policy.roles.contains_key(role) {
         let available = policy
             .roles
-            .keys()
-            .map(String::as_str)
+            .iter()
+            .filter(|(role, selection)| role.as_str() != crate::config::SUBAGENT_ROLE_DEFAULT && selection.enabled)
+            .map(|(role, _)| role.as_str())
             .collect::<Vec<_>>()
             .join("、");
         Ok(Some(format!(

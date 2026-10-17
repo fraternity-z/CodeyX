@@ -6,7 +6,7 @@ const root = new URL("../", import.meta.url);
 
 test("subagent settings expose the five supported role controls", async () => {
   const [featurePolicySource, modelHookSource, modelOptionsSource, comboboxSource] = await Promise.all([
-    readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
+    readFile(new URL("src/features/subagents/SubagentPolicyCard.tsx", root), "utf8"),
     readFile(new URL("src/useModelSelection.ts", root), "utf8"),
     readFile(new URL("src/subagentModels.ts", root), "utf8"),
     readFile(new URL("src/components/ModelCombobox.tsx", root), "utf8"),
@@ -15,8 +15,9 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.match(featurePolicySource, /checked=\{config\.subagentOptimization\}/);
   assert.match(
     featurePolicySource,
-    /onCheckedChange=\{\(checked\) =>\s*onSubagentOptimizationChange\(checked\)\s*\}/,
+    /onCheckedChange=\{onSubagentOptimizationChange\}/,
   );
+  const roleSource = await readFile(new URL("src/features/subagents/state.ts", root), "utf8");
   for (const [id, name] of [
     ["codey_quick_scan", "快速定位"],
     ["codey_deep_research", "深度检索"],
@@ -24,17 +25,16 @@ test("subagent settings expose the five supported role controls", async () => {
     ["codey_worker", "代码实施"],
     ["codey_visual_worker", "视觉实施"],
   ]) {
-    assert.match(featurePolicySource, new RegExp(`id: "${id}"`));
-    assert.match(featurePolicySource, new RegExp(`name: "${name}"`));
+    assert.match(roleSource, new RegExp(`id: "${id}"`));
+    assert.match(roleSource, new RegExp(`name: "${name}"`));
   }
-  assert.match(featurePolicySource, /config\.subagentRoles\[task\.id\]/);
+  assert.match(featurePolicySource, /config\.subagentRoles\[id\]/);
   assert.match(featurePolicySource, /checked=\{selection\.enabled\}/);
-  assert.match(featurePolicySource, /onCheckedChange=\{\(enabled\) => updateRole\(\{ enabled \}\)\}/);
-  assert.match(featurePolicySource, /各角色工具权限一致/);
-  assert.doesNotMatch(featurePolicySource, /默认只读|默认可写|不产生写入操作/);
-  assert.match(featurePolicySource, /roleDisabled/);
-  assert.match(featurePolicySource, /kind: "analysis"/);
-  assert.match(featurePolicySource, /kind: "implementation"/);
+  assert.match(featurePolicySource, /controller\.updateRole\(id, \{ enabled \}\)/);
+  assert.match(featurePolicySource, /只读/);
+  assert.doesNotMatch(featurePolicySource, /默认子代理|各角色工具权限一致/);
+  assert.match(roleSource, /kind: "analysis"/);
+  assert.match(roleSource, /kind: "implementation"/);
   assert.match(featurePolicySource, /<ModelCombobox/);
   assert.match(
     modelHookSource,

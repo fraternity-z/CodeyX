@@ -36,6 +36,7 @@ fn write_test_runtime_policy(state_root: &Path) {
         runtime_policy::runtime_subagent_policy_bytes(
             &crate::config::default_subagent_roles(),
             &BTreeMap::new(),
+            2,
         )
         .unwrap(),
     )
@@ -108,7 +109,7 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
     fs::create_dir_all(&sessions).unwrap();
     let roles = crate::config::default_subagent_roles();
     let hashes = BTreeMap::new();
-    commit_runtime_subagent_policy(home, &roles, &hashes).unwrap();
+    commit_runtime_subagent_policy(home, &roles, &hashes, 2).unwrap();
     let role = crate::config::SUBAGENT_ROLE_QUICK_SCAN;
     let expected = roles.get(role).unwrap();
     let session_id = "attestation-parent";
@@ -159,7 +160,7 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
         None
     );
 
-    begin_runtime_subagent_policy_update(home, &roles, &hashes).unwrap();
+    begin_runtime_subagent_policy_update(home, &roles, &hashes, 2).unwrap();
     // Already-attested children may finish their existing turn while new
     // children are fenced until the pending generation is committed.
     assert_eq!(
@@ -180,7 +181,7 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
     .unwrap()
     .unwrap();
     assert!(pending.contains("CODEY_SUBAGENT_RUNTIME_UPDATE_IN_PROGRESS"));
-    commit_runtime_subagent_policy(home, &roles, &hashes).unwrap();
+    commit_runtime_subagent_policy(home, &roles, &hashes, 2).unwrap();
 
     let wrong_agent = "01a01f94-0000-7000-8000-000000000003";
     let wrong_transcript = write_transcript(
@@ -211,7 +212,7 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
 
     let mut disabled = roles.clone();
     disabled.remove(role);
-    commit_runtime_subagent_policy(home, &disabled, &hashes).unwrap();
+    commit_runtime_subagent_policy(home, &disabled, &hashes, 2).unwrap();
     assert!(
         runtime_role_admission_denial(&state_root, role)
             .unwrap()
@@ -231,7 +232,7 @@ fn child_tools_require_turn_context_model_attestation_and_cache_success() {
         .unwrap()
         .is_some()
     );
-    commit_runtime_subagent_policy(home, &roles, &hashes).unwrap();
+    commit_runtime_subagent_policy(home, &roles, &hashes, 2).unwrap();
     assert_eq!(
         runtime_role_admission_denial(&state_root, role).unwrap(),
         None
@@ -355,7 +356,7 @@ fn disabled_runtime_role_is_rejected_before_spawn_reservation() {
     let state_root = home.join(STATE_DIRECTORY);
     let mut roles = crate::config::default_subagent_roles();
     roles.remove(crate::config::SUBAGENT_ROLE_WORKER);
-    commit_runtime_subagent_policy(home, &roles, &BTreeMap::new()).unwrap();
+    commit_runtime_subagent_policy(home, &roles, &BTreeMap::new(), 2).unwrap();
 
     let mut spawn = input("PreToolUse", "disabled-role-session");
     spawn.turn_id = Some("root-turn-a".to_string());
@@ -426,6 +427,28 @@ fn hook_input_accepts_common_camel_case_and_subagent_aliases() {
         Some("/tmp/child.jsonl")
     );
     assert_eq!(input.cwd.as_deref(), Some("/repo"));
+}
+
+#[test]
+fn default_omitted_and_unknown_roles_are_denied_before_reservation() {
+    let temp = tempfile::tempdir().unwrap();
+    let state_root = temp.path().join(STATE_DIRECTORY);
+    // Legacy policies can still contain a default entry; it is never admitted.
+    write_test_runtime_policy(&state_root);
+    for role in [Some("default"), None, Some("unknown")] {
+        let mut spawn = input("PreToolUse", "explicit-role-session");
+        spawn.turn_id = Some("root-turn".into());
+        spawn.cwd = Some("/repo".into());
+        spawn.tool_name = Some("agents.spawn_agent".into());
+        let mut args = json!({"task_name": "explicit_role", "message": "检查事实"});
+        if let Some(role) = role { args["agent_type"] = json!(role); }
+        spawn.tool_input = Some(args);
+        let denied = handle_hook_for_runtime_at(&spawn, &state_root, "runtime-a", 20).unwrap();
+        assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
+        assert_eq!(crate::subagent_orchestrator::active_reservation_count(
+            &state_root, "runtime-a", "explicit-role-session", 30
+        ).unwrap(), None);
+    }
 }
 
 #[test]

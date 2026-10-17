@@ -5,7 +5,8 @@ import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 
 const feature = new URL("../src/features/configuration/", import.meta.url);
 const state = createModuleGraph(new URL("state.ts", feature)).exports;
-const config = (patch = {}) => ({ settingsRevision: 1, profiles: [], activeProfileId: "", streamMaxRetries: 2, retained: "saved", ...patch });
+const subagents = createModuleGraph(new URL("../subagents/state.ts", feature)).exports;
+const config = (patch = {}) => ({ settingsRevision: 1, profiles: [], activeProfileId: "", streamMaxRetries: 2, subagentRoles: {}, retained: "saved", ...patch });
 const provider = { changed: false, provider: { id: "test", name: "Test", official: false, baseUrl: "https://api.example.com" } };
 const models = { officialModels: [], officialModelIds: [], thirdPartyModels: [], manualThirdPartyModels: [], upstreamModels: [], defaultModel: "" };
 const loadResult = (patch = {}) => ({ config: config(), providerStatus: provider, modelState: models, ...patch });
@@ -28,6 +29,7 @@ function fixture(t, extra = {}) {
     ...extra,
   };
   const h = createControllerHarness(new URL("useConfigurationController.ts", feature), "useConfigurationController", {
+    "../subagents": subagents,
     "../../api": { invoke(command, args) { const call = { command, args, ...deferred() }; calls.push(call); return call.promise; } },
   });
   const render = () => {
@@ -266,5 +268,5 @@ test("保存提示保留热更新、生效失败、被新设置取代和重启�
 });
 
 test("配置功能只公开 controller，传输和纯规则留在功能内部", () => {
-  assert.deepEqual(Object.keys(createModuleGraph(new URL("index.ts", feature)).exports), ["useConfigurationController"]);
+  assert.deepEqual(Object.keys(createModuleGraph(new URL("index.ts", feature), { stubs: { "../subagents": subagents } }).exports), ["useConfigurationController"]);
 });
