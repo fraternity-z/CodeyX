@@ -751,7 +751,11 @@ fn is_canonical_hash(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-fn concurrency_denial(ledger: &SessionLedger, active_agents: usize, limit: usize) -> Option<String> {
+fn concurrency_denial(
+    ledger: &SessionLedger,
+    active_agents: usize,
+    limit: usize,
+) -> Option<String> {
     let tracked_active = ledger
         .reservations
         .values()
@@ -835,8 +839,14 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
     if let Some(policy) = &runtime_policy {
         for (role, selection) in &policy.roles {
             if selection.enabled && role != crate::config::SUBAGENT_ROLE_DEFAULT {
-                loaded_rules.rules.register_runtime_role(role,
-                    if selection.access == crate::config::SubagentAccess::ReadOnly { "read" } else { "write" });
+                loaded_rules.rules.register_runtime_role(
+                    role,
+                    if selection.access == crate::config::SubagentAccess::ReadOnly {
+                        "read"
+                    } else {
+                        "write"
+                    },
+                );
             }
         }
     }
@@ -858,7 +868,9 @@ pub(crate) fn pre_spawn_with_workspace_and_turn(
     if let Some(reason) = ledger_capacity_denial(&ledger) {
         return Ok(Some(reason));
     }
-    let limit = runtime_policy.as_ref().map_or(CONCURRENCY_LIMIT, |policy| policy.max_threads as usize);
+    let limit = runtime_policy
+        .as_ref()
+        .map_or(CONCURRENCY_LIMIT, |policy| policy.max_threads as usize);
     if let Some(reason) = concurrency_denial(&ledger, active_agents, limit) {
         return Ok(Some(reason));
     }
@@ -2282,8 +2294,14 @@ pub(crate) fn authorize_child_tool(
     });
     let role = bound_reservation.map(|reservation| reservation.role.as_str());
     if let Some(reservation) = bound_reservation {
-        loaded_rules.rules.register_runtime_role(&reservation.role,
-            if reservation_declares_write(reservation) { "write" } else { "read" });
+        loaded_rules.rules.register_runtime_role(
+            &reservation.role,
+            if reservation_declares_write(reservation) {
+                "write"
+            } else {
+                "read"
+            },
+        );
     }
     let decision = loaded_rules.rules.evaluate(&RuleContext {
         actor: RuleActor::Child,

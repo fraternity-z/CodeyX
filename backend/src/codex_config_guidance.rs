@@ -1085,7 +1085,10 @@ mod tests {
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("explicitly set `agent_type`"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("custom roles are also available"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Never omit agent_type or use default"));
-        assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("Read-only roles cannot write or execute commands"));
+        assert!(
+            ROOT_AGENT_MULTI_AGENT_MODE_HINT
+                .contains("Read-only roles cannot write or execute commands")
+        );
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("There is no fixed spawn budget"));
         assert!(ROOT_AGENT_MULTI_AGENT_MODE_HINT.contains("configured concurrency limit"));
         for retired in [

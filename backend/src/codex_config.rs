@@ -472,11 +472,13 @@ fn apply_isolated_runtime_router_config(
         },
     )?;
     let mut effective_document = parse_document(&effective).context("解析 Codey 运行时约束失败")?;
-    if subagent_optimization
-        && let Some(limit) = subagent_max_threads
-    {
-        anyhow::ensure!((1..=64).contains(&limit), "最大子代理数量必须在 1 到 64 之间");
-        effective_document["agents"]["max_concurrent_threads_per_session"] = value(i64::from(limit));
+    if subagent_optimization && let Some(limit) = subagent_max_threads {
+        anyhow::ensure!(
+            (1..=64).contains(&limit),
+            "最大子代理数量必须在 1 到 64 之间"
+        );
+        effective_document["agents"]["max_concurrent_threads_per_session"] =
+            value(i64::from(limit));
     }
     let subagent_max_threads = effective_document
         .get("agents")
@@ -806,9 +808,12 @@ fn runtime_subagent_roles(
         .unwrap_or_else(|| SubagentRoleConfig::new(legacy_model, legacy_reasoning_effort));
     let mut roles = configured.cloned().unwrap_or_default();
     for role in SUBAGENT_ROLE_IDS {
-        roles.entry(role.to_string()).or_insert_with(|| fallback.clone());
+        roles
+            .entry(role.to_string())
+            .or_insert_with(|| fallback.clone());
     }
-    roles.into_iter()
+    roles
+        .into_iter()
         .filter(|(role, selection)| role != SUBAGENT_ROLE_DEFAULT && selection.enabled)
         .collect()
 }
@@ -820,7 +825,10 @@ fn runtime_registration_roles(
     legacy_model: &str,
     legacy_reasoning_effort: &str,
 ) -> Result<BTreeMap<String, SubagentRoleConfig>> {
-    if registered_roles.iter().any(|role| role == SUBAGENT_ROLE_DEFAULT) {
+    if registered_roles
+        .iter()
+        .any(|role| role == SUBAGENT_ROLE_DEFAULT)
+    {
         return Err(SubagentRoleRegistrationChanged.into());
     }
     anyhow::ensure!(
@@ -847,7 +855,8 @@ fn runtime_registration_roles(
             if !SUBAGENT_ROLE_IDS.contains(&role.as_str()) && !enabled_roles.contains_key(role) {
                 selection.name = role.clone();
                 selection.description = "已停用的自定义子代理，请使用当前启用的角色。".into();
-                selection.developer_instructions = "角色已停用，不执行新任务；向主代理回报。".into();
+                selection.developer_instructions =
+                    "角色已停用，不执行新任务；向主代理回报。".into();
                 selection.access = crate::config::SubagentAccess::ReadOnly;
             }
             (role.clone(), selection)
@@ -938,7 +947,9 @@ fn runtime_agent_files(constraints_dir: &Path) -> Result<BTreeMap<String, PathBu
     for entry in entries {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|extension| extension == "toml")
+        if path
+            .extension()
+            .is_some_and(|extension| extension == "toml")
             && let Some(role) = path.file_stem().and_then(|stem| stem.to_str())
             && crate::config::valid_subagent_role_id(role)
         {
@@ -979,7 +990,9 @@ fn plan_runtime_agent_files(
         } else {
             let mut source = DocumentMut::new();
             source["description"] = value(format!(
-                "{}：{}", selection.name.trim(), selection.description.trim()
+                "{}：{}",
+                selection.name.trim(),
+                selection.description.trim()
             ));
             source["developer_instructions"] = value(selection.developer_instructions.trim());
             document_string(&source)?

@@ -222,7 +222,10 @@ fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>)
     let (config, reason) = match store.load_with_recovery() {
         Ok((config, false)) => return (config, None),
         Ok((config, true)) => (config, "Codey 主配置无法读取，已加载备份供检查"),
-        Err(_) => (CodeyConfig::default(), "Codey 配置无法读取，已加载默认值供检查"),
+        Err(_) => (
+            CodeyConfig::default(),
+            "Codey 配置无法读取，已加载默认值供检查",
+        ),
     };
     let preserved = store.preserve_unreadable();
     let preserved = if preserved.is_empty() {
@@ -349,22 +352,41 @@ fn bridge_string_array(payload: &Value, name: &str, limit: usize) -> Vec<String>
 }
 
 impl AppState {
-    pub(crate) async fn network_proxy_egress(&self) -> Arc<crate::network_proxy::egress::EgressPool> {
+    pub(crate) async fn network_proxy_egress(
+        &self,
+    ) -> Arc<crate::network_proxy::egress::EgressPool> {
         // Hold the config read lock through initialization, so a save cannot
         // publish its policy before an older initial policy is installed.
         let config = self.config.read().await;
-        self.network_proxy_egress.get_or_init(|| {
-            let mut egress = crate::network_proxy::egress::EgressPool::for_config(self.store.path(), config.network_proxy.clone());
-            if self.config_load_error.is_some() { egress.require_configuration_recovery(); }
-            Arc::new(egress)
-        }).clone()
+        self.network_proxy_egress
+            .get_or_init(|| {
+                let mut egress = crate::network_proxy::egress::EgressPool::for_config(
+                    self.store.path(),
+                    config.network_proxy.clone(),
+                );
+                if self.config_load_error.is_some() {
+                    egress.require_configuration_recovery();
+                }
+                Arc::new(egress)
+            })
+            .clone()
     }
 
-    pub(crate) async fn proxy_for_profile(&self, profile: &crate::config::ProviderProfile) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
-        self.network_proxy_egress().await.proxy_for_profile(
-            &profile.id, Some(&profile.upstream_proxy),
-            profile.plugin_route_spec.as_ref().is_some_and(|spec| spec.transport.is_some()),
-        ).await
+    pub(crate) async fn proxy_for_profile(
+        &self,
+        profile: &crate::config::ProviderProfile,
+    ) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
+        self.network_proxy_egress()
+            .await
+            .proxy_for_profile(
+                &profile.id,
+                Some(&profile.upstream_proxy),
+                profile
+                    .plugin_route_spec
+                    .as_ref()
+                    .is_some_and(|spec| spec.transport.is_some()),
+            )
+            .await
     }
 
     /// Codey's own store of ChatGPT accounts, kept next to the config file.
@@ -1086,8 +1108,10 @@ async fn resolve_session_name_cached(
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
-        "network_proxy_get" | "network_proxy_save" | "network_proxy_test" | "network_proxy_test_chain" =>
-            network_proxy::invoke(state, command, &args).await,
+        "network_proxy_get"
+        | "network_proxy_save"
+        | "network_proxy_test"
+        | "network_proxy_test_chain" => network_proxy::invoke(state, command, &args).await,
         "remote_control_status"
         | "start_remote_control"
         | "stop_remote_control"
@@ -1212,7 +1236,9 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "codex_extensions" => extensions::invoke(state, &args).await,
         "builtin_tools" => builtin_tools::invoke(state, &args).await,
-        "list_codex_sessions" | "delete_codex_sessions" => sessions::invoke(state, command, &args).await,
+        "list_codex_sessions" | "delete_codex_sessions" => {
+            sessions::invoke(state, command, &args).await
+        }
         "repair_plugin_marketplace" => repair_plugin_marketplace().await,
         "prepare_computer_use" => prepare_computer_use().await,
         "get_codey_plugin_host_info"
@@ -1443,7 +1469,9 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
 }
 
 pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool {
-    if state.config_load_error.is_some() { return false; }
+    if state.config_load_error.is_some() {
+        return false;
+    }
     let config = state.config.read().await.clone();
     if !config.local_router_enabled
         || !config.needs_initial_route_import()
@@ -1860,7 +1888,8 @@ async fn save_codey_config_locked(
         // The submitted matrix owns custom-role deletion; omitted legacy fields
         // still preserve the saved matrix and built-in compatibility defaults.
         config.subagent_roles.retain(|role, _| {
-            SUBAGENT_ROLE_IDS.contains(&role.as_str()) || config_input.subagent_roles.contains_key(role)
+            SUBAGENT_ROLE_IDS.contains(&role.as_str())
+                || config_input.subagent_roles.contains_key(role)
         });
         for (role, selection) in config_input.subagent_roles {
             let selection_changed = config.subagent_roles.get(&role).is_none_or(|previous| {
@@ -2831,7 +2860,9 @@ async fn query_official_account_usage(
     let official_proxy = match official_proxy {
         Some(profile) => match state.proxy_for_profile(&profile).await {
             Ok(proxy) => Some(proxy),
-            Err(message) => return json!({"status":"error", "reason":"proxy_unavailable", "message":message}),
+            Err(message) => {
+                return json!({"status":"error", "reason":"proxy_unavailable", "message":message});
+            }
         },
         None => None,
     };
@@ -2929,7 +2960,9 @@ async fn query_stored_official_account_usage(
     }
     let upstream_proxy = match official_account_usage_proxy(state, &account_id).await {
         Ok(proxy) => proxy,
-        Err(message) => return json!({"status":"error", "reason":"proxy_unavailable", "message":message}),
+        Err(message) => {
+            return json!({"status":"error", "reason":"proxy_unavailable", "message":message});
+        }
     };
     let snapshot = account_usage::query_shared_snapshot_at(
         &state.account_usage_cache,
@@ -3045,20 +3078,29 @@ async fn mark_official_account_invalid(
 
 /// Resolve even a temporarily absent account route by its stable profile ID.
 /// A stored pool binding must never disappear because its token became invalid.
-async fn official_account_usage_proxy(state: &Arc<AppState>, account_id: &str) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
-    let profile = state.config.read().await
-            .profiles
-            .iter()
-            .find(|profile| {
-                profile.official_account
-                    && profile.official_account_id.as_deref() == Some(account_id)
-            })
-            .cloned();
+async fn official_account_usage_proxy(
+    state: &Arc<AppState>,
+    account_id: &str,
+) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
+    let profile = state
+        .config
+        .read()
+        .await
+        .profiles
+        .iter()
+        .find(|profile| {
+            profile.official_account && profile.official_account_id.as_deref() == Some(account_id)
+        })
+        .cloned();
     match profile {
         Some(profile) => state.proxy_for_profile(&profile).await,
-        None => state.network_proxy_egress().await.proxy_for_profile(
-            &crate::config::official_profile_id(account_id), None, false,
-        ).await,
+        None => {
+            state
+                .network_proxy_egress()
+                .await
+                .proxy_for_profile(&crate::config::official_profile_id(account_id), None, false)
+                .await
+        }
     }
 }
 
@@ -3112,7 +3154,8 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.fast_context_tools != current.fast_context_tools
         || applied.conversation_git.enabled != current.conversation_git.enabled
         || applied.subagent_optimization != current.subagent_optimization
-        || (current.subagent_optimization && applied.subagent_max_threads != current.subagent_max_threads)
+        || (current.subagent_optimization
+            && applied.subagent_max_threads != current.subagent_max_threads)
         || !applied
             .misc_model
             .trim()

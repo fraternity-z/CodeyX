@@ -1089,17 +1089,27 @@ impl CodeyConfig {
         !self.codex_launch_proxy.trim().is_empty()
             || self.network_proxy.has_process_proxy()
             || self.network_proxy.has_upstream_bindings()
-            || self.profiles.iter().any(|profile| profile.enabled && !profile.upstream_proxy.trim().is_empty())
+            || self
+                .profiles
+                .iter()
+                .any(|profile| profile.enabled && !profile.upstream_proxy.trim().is_empty())
     }
 
     pub(crate) fn validate_network_proxy(&self) -> Result<(), String> {
         self.network_proxy.validate()?;
         if !self.local_router_enabled && self.network_proxy.has_upstream_bindings() {
-            return Err("线路正在使用代理池出口，请先解除出口选择再关闭本地路由；原生模式暂不支持该出口".into());
+            return Err(
+                "线路正在使用代理池出口，请先解除出口选择再关闭本地路由；原生模式暂不支持该出口"
+                    .into(),
+            );
         }
         for profile in &self.profiles {
             if self.network_proxy.uses_pool(&profile.id)
-                && profile.plugin_route_spec.as_ref().is_some_and(|spec| spec.transport.is_some()) {
+                && profile
+                    .plugin_route_spec
+                    .as_ref()
+                    .is_some_and(|spec| spec.transport.is_some())
+            {
                 return Err("插件自建传输暂不支持代理池出口，请先解除该线路的出口选择".into());
             }
         }
@@ -1743,7 +1753,8 @@ impl CodeyConfig {
     pub(crate) fn route_supports_websockets_this_launch(&self, profile: &ProviderProfile) -> bool {
         self.route_supports_websockets_this_launch_with_proxy(
             profile,
-            self.network_proxy.uses_pool(&profile.id) || local_router::outbound_proxy_applies_to_route(profile),
+            self.network_proxy.uses_pool(&profile.id)
+                || local_router::outbound_proxy_applies_to_route(profile),
         )
     }
 
@@ -2691,8 +2702,9 @@ pub const UPSTREAM_PROTOCOL_ANTHROPIC_MESSAGES: &str = "anthropicMessages";
 pub const UPSTREAM_PROTOCOL_GEMINI: &str = "gemini";
 pub const AUTH_MODE_OFFICIAL_ACCOUNT: &str = "officialAccount";
 pub const AUTH_MODE_API_KEY: &str = "apiKey";
-pub const SUBAGENT_REASONING_EFFORTS: [&str; 8] =
-    ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
+pub const SUBAGENT_REASONING_EFFORTS: [&str; 8] = [
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra",
+];
 pub const SUBAGENT_ROLE_QUICK_SCAN: &str = "codey_quick_scan";
 pub const SUBAGENT_ROLE_DEEP_RESEARCH: &str = "codey_deep_research";
 pub const SUBAGENT_ROLE_VISUAL_ANALYSIS: &str = "codey_visual_analysis";
@@ -2795,9 +2807,13 @@ fn normalize_subagent_config(
 ) {
     normalize_subagent_selection(model, reasoning_effort);
     // Preserve complete custom definitions while ignoring unknown legacy keys.
-    roles.retain(|role, selection| SUBAGENT_ROLE_IDS.contains(&role.as_str())
-        || (valid_subagent_role_id(role) && !selection.name.trim().is_empty()
-            && !selection.description.trim().is_empty() && !selection.developer_instructions.trim().is_empty()));
+    roles.retain(|role, selection| {
+        SUBAGENT_ROLE_IDS.contains(&role.as_str())
+            || (valid_subagent_role_id(role)
+                && !selection.name.trim().is_empty()
+                && !selection.description.trim().is_empty()
+                && !selection.developer_instructions.trim().is_empty())
+    });
     if roles.is_empty() {
         *roles = uniform_subagent_roles(model, reasoning_effort);
     } else {
@@ -2832,27 +2848,61 @@ pub fn default_subagent_max_threads() -> u32 {
 pub(crate) fn valid_subagent_role_id(role: &str) -> bool {
     !role.is_empty()
         && role.len() <= 64
-        && role.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
-        && !matches!(role, "enabled" | "max_threads" | "max_concurrent_threads_per_session"
-            | "max_depth" | "job_max_runtime_seconds"
-            | "default_subagent_model" | "default_subagent_reasoning_effort" | "interrupt_message"
-            | "con" | "prn" | "aux" | "nul" | "com1" | "com2" | "com3" | "com4" | "com5"
-            | "com6" | "com7" | "com8" | "com9" | "lpt1" | "lpt2" | "lpt3" | "lpt4"
-            | "lpt5" | "lpt6" | "lpt7" | "lpt8" | "lpt9")
+        && role
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        && !matches!(
+            role,
+            "enabled"
+                | "max_threads"
+                | "max_concurrent_threads_per_session"
+                | "max_depth"
+                | "job_max_runtime_seconds"
+                | "default_subagent_model"
+                | "default_subagent_reasoning_effort"
+                | "interrupt_message"
+                | "con"
+                | "prn"
+                | "aux"
+                | "nul"
+                | "com1"
+                | "com2"
+                | "com3"
+                | "com4"
+                | "com5"
+                | "com6"
+                | "com7"
+                | "com8"
+                | "com9"
+                | "lpt1"
+                | "lpt2"
+                | "lpt3"
+                | "lpt4"
+                | "lpt5"
+                | "lpt6"
+                | "lpt7"
+                | "lpt8"
+                | "lpt9"
+        )
 }
 
 pub(crate) fn validate_subagent_config(config: &CodeyConfig) -> Result<(), String> {
     if !(1..=64).contains(&config.subagent_max_threads) {
         return Err("最大子代理数量必须是 1 到 64 之间的整数".into());
     }
-    let custom_count = config.subagent_roles.keys()
-        .filter(|role| !SUBAGENT_ROLE_IDS.contains(&role.as_str())).count();
+    let custom_count = config
+        .subagent_roles
+        .keys()
+        .filter(|role| !SUBAGENT_ROLE_IDS.contains(&role.as_str()))
+        .count();
     if custom_count > 32 {
         return Err("最多可配置 32 个自定义子代理".into());
     }
     for (role, selection) in &config.subagent_roles {
         if !valid_subagent_role_id(role) {
-            return Err(format!("子代理标识无效：{role}；请使用非保留的小写字母、数字或下划线，最多 64 字符"));
+            return Err(format!(
+                "子代理标识无效：{role}；请使用非保留的小写字母、数字或下划线，最多 64 字符"
+            ));
         }
         if !SUBAGENT_ROLE_IDS.contains(&role.as_str()) {
             for (label, text, max) in [
@@ -2861,19 +2911,31 @@ pub(crate) fn validate_subagent_config(config: &CodeyConfig) -> Result<(), Strin
                 ("角色指令", &selection.developer_instructions, 4000),
             ] {
                 if text.trim().is_empty() || text.len() > max {
-                    return Err(format!("子代理 {role} 的{label}不能为空且不能超过 {max} 字节"));
+                    return Err(format!(
+                        "子代理 {role} 的{label}不能为空且不能超过 {max} 字节"
+                    ));
                 }
             }
         }
         if selection.model.trim().is_empty() || selection.model.len() > 256 {
             return Err(format!("子代理 {role} 的模型不能为空且不能超过 256 字节"));
         }
-        if !SUBAGENT_REASONING_EFFORTS.contains(&selection.reasoning_effort.trim().to_ascii_lowercase().as_str()) {
+        if !SUBAGENT_REASONING_EFFORTS.contains(
+            &selection
+                .reasoning_effort
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+        ) {
             return Err(format!("子代理 {role} 的思考深度无效"));
         }
     }
-    if config.subagent_optimization && !config.subagent_roles.iter()
-        .any(|(role, selection)| role != SUBAGENT_ROLE_DEFAULT && selection.enabled) {
+    if config.subagent_optimization
+        && !config
+            .subagent_roles
+            .iter()
+            .any(|(role, selection)| role != SUBAGENT_ROLE_DEFAULT && selection.enabled)
+    {
         return Err("至少需要保留一个启用的子代理角色".into());
     }
     Ok(())
@@ -2977,7 +3039,9 @@ impl ConfigStore {
     }
 
     pub(crate) fn persist(&self, config: CodeyConfig) -> Result<CodeyConfig> {
-        config.validate_network_proxy().map_err(anyhow::Error::msg)?;
+        config
+            .validate_network_proxy()
+            .map_err(anyhow::Error::msg)?;
         let config = config.normalize();
         let bytes = serde_json::to_vec_pretty(&config)?;
         self.rotate_backups_best_effort(&bytes);

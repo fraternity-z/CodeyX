@@ -23,7 +23,8 @@ pub(crate) struct CodexLaunchProxy {
 
 impl std::fmt::Debug for CodexLaunchProxy {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.debug_struct("CodexLaunchProxy")
+        formatter
+            .debug_struct("CodexLaunchProxy")
             .field("chromium_server", &self.chromium_server)
             .field("authenticated", &self.auth.is_some())
             .finish_non_exhaustive()
@@ -66,16 +67,26 @@ impl CodexLaunchProxy {
         }))
     }
 
-    pub(crate) fn from_gateway(gateway: &crate::network_proxy::process_gateway::ProcessGateway) -> Self {
-        Self { url: gateway.proxy_url(), chromium_server: gateway.server_url(), auth: Some(gateway.auth()),
-            #[cfg(windows)] capture: gateway.capture_scope(),
+    pub(crate) fn from_gateway(
+        gateway: &crate::network_proxy::process_gateway::ProcessGateway,
+    ) -> Self {
+        Self {
+            url: gateway.proxy_url(),
+            chromium_server: gateway.server_url(),
+            auth: Some(gateway.auth()),
+            #[cfg(windows)]
+            capture: gateway.capture_scope(),
         }
     }
 
     #[cfg(windows)]
-    pub(crate) fn capture_scope(&self) -> Option<codey_traffic_service::client::ProcessScope> { self.capture.clone() }
+    pub(crate) fn capture_scope(&self) -> Option<codey_traffic_service::client::ProcessScope> {
+        self.capture.clone()
+    }
 
-    pub(crate) fn authentication(&self) -> Option<crate::network_proxy::process_gateway::ProcessProxyAuth> {
+    pub(crate) fn authentication(
+        &self,
+    ) -> Option<crate::network_proxy::process_gateway::ProcessProxyAuth> {
         self.auth.clone()
     }
 
@@ -116,10 +127,7 @@ impl CodexLaunchProxy {
                 ("http_proxy".to_string(), self.url.clone()),
                 ("https_proxy".to_string(), self.url.clone()),
                 ("all_proxy".to_string(), self.url.clone()),
-                (
-                    "NO_PROXY".to_string(),
-                    self.no_proxy(uppercase.as_deref()),
-                ),
+                ("NO_PROXY".to_string(), self.no_proxy(uppercase.as_deref())),
                 (
                     "no_proxy".to_string(),
                     self.no_proxy(lowercase.as_deref().or(uppercase.as_deref())),
@@ -132,7 +140,9 @@ impl CodexLaunchProxy {
 
 /// 记录本次 Codey 启动的运行时代理；只对 Codey 拉起的进程生效。
 pub(crate) fn set_active(proxy: Option<CodexLaunchProxy>) {
-    let mut active = ACTIVE.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut active = ACTIVE
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     active.0 = active.0.wrapping_add(1);
     active.1 = Some(proxy);
 }
@@ -159,9 +169,13 @@ pub(crate) fn shared_app_server_launch() -> Result<SharedAppServerLaunch, String
         Ok(config.codex_launch_proxy)
     })?;
     Ok(SharedAppServerLaunch {
-        environment, generation,
+        environment,
+        generation,
         #[cfg(windows)]
-        capture: active.as_ref().and_then(Option::as_ref).and_then(CodexLaunchProxy::capture_scope),
+        capture: active
+            .as_ref()
+            .and_then(Option::as_ref)
+            .and_then(CodexLaunchProxy::capture_scope),
     })
 }
 
@@ -297,19 +311,38 @@ mod tests {
     #[test]
     fn private_pool_entry_redacts_debug_and_does_not_inherit_global_bypass() {
         let auth = crate::network_proxy::process_gateway::ProcessProxyAuth {
-            host: "127.0.0.1".into(), port: 49152, username: "codeyx".into(),
-            password: "fixture-local-secret".into(), realm: "fixture-realm".into(),
+            host: "127.0.0.1".into(),
+            port: 49152,
+            username: "codeyx".into(),
+            password: "fixture-local-secret".into(),
+            realm: "fixture-realm".into(),
         };
         let proxy = CodexLaunchProxy {
             url: "http://codeyx:fixture-local-secret@127.0.0.1:49152".into(),
-            chromium_server: "http://127.0.0.1:49152".into(), auth: Some(auth),
-            #[cfg(windows)] capture: None,
+            chromium_server: "http://127.0.0.1:49152".into(),
+            auth: Some(auth),
+            #[cfg(windows)]
+            capture: None,
         };
         assert!(!format!("{proxy:?}").contains("fixture-local-secret"));
-        assert_eq!(proxy.chromium_argument(), "--proxy-server=http://127.0.0.1:49152");
-        assert_eq!(proxy.no_proxy(Some("*,external.example")), "127.0.0.1,localhost,::1");
-        assert!(proxy.environment().iter().any(|(name, value)| name == "HTTPS_PROXY" && value == &proxy.url));
-        assert_eq!(proxy.authentication().unwrap().password, "fixture-local-secret");
+        assert_eq!(
+            proxy.chromium_argument(),
+            "--proxy-server=http://127.0.0.1:49152"
+        );
+        assert_eq!(
+            proxy.no_proxy(Some("*,external.example")),
+            "127.0.0.1,localhost,::1"
+        );
+        assert!(
+            proxy
+                .environment()
+                .iter()
+                .any(|(name, value)| name == "HTTPS_PROXY" && value == &proxy.url)
+        );
+        assert_eq!(
+            proxy.authentication().unwrap().password,
+            "fixture-local-secret"
+        );
     }
 
     #[test]

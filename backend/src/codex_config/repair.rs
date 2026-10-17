@@ -725,13 +725,16 @@ mod tests {
         let original = "# retain user model\nmodel='user-model'\n";
         fs::write(home.join("config.toml"), original).unwrap();
         let mut configured = crate::config::default_subagent_roles();
-        configured.insert("reviewer".into(), SubagentRoleConfig {
-            name: "审查员".into(),
-            description: "检查变更".into(),
-            developer_instructions: "提供证据".into(),
-            access: crate::config::SubagentAccess::ReadOnly,
-            ..SubagentRoleConfig::new(DEFAULT_SUBAGENT_MODEL, "high")
-        });
+        configured.insert(
+            "reviewer".into(),
+            SubagentRoleConfig {
+                name: "审查员".into(),
+                description: "检查变更".into(),
+                developer_instructions: "提供证据".into(),
+                access: crate::config::SubagentAccess::ReadOnly,
+                ..SubagentRoleConfig::new(DEFAULT_SUBAGENT_MODEL, "high")
+            },
+        );
         configured
             .get_mut(crate::config::SUBAGENT_ROLE_WORKER)
             .unwrap()
@@ -759,10 +762,8 @@ mod tests {
         .unwrap();
         let original_lease: serde_json::Value =
             serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
-        let role_path = runtime_agent_path(
-            &marker.with_file_name(CODEY_CONSTRAINTS_DIR),
-            "reviewer",
-        );
+        let role_path =
+            runtime_agent_path(&marker.with_file_name(CODEY_CONSTRAINTS_DIR), "reviewer");
         let original_role = fs::read(&role_path).unwrap();
         let document = str::from_utf8(&original_role)
             .unwrap()
@@ -796,7 +797,10 @@ mod tests {
         let policy: serde_json::Value = serde_json::from_slice(&fs::read(policy).unwrap()).unwrap();
         assert_eq!(policy["maxThreads"], 5);
         assert_eq!(policy["roles"]["reviewer"]["access"], "readOnly");
-        assert_eq!(policy["roles"]["reviewer"]["developerInstructions"], "提供证据");
+        assert_eq!(
+            policy["roles"]["reviewer"]["developerInstructions"],
+            "提供证据"
+        );
         assert!(
             policy["roles"]
                 .get(crate::config::SUBAGENT_ROLE_WORKER)

@@ -441,13 +441,22 @@ fn default_omitted_and_unknown_roles_are_denied_before_reservation() {
         spawn.cwd = Some("/repo".into());
         spawn.tool_name = Some("agents.spawn_agent".into());
         let mut args = json!({"task_name": "explicit_role", "message": "检查事实"});
-        if let Some(role) = role { args["agent_type"] = json!(role); }
+        if let Some(role) = role {
+            args["agent_type"] = json!(role);
+        }
         spawn.tool_input = Some(args);
         let denied = handle_hook_for_runtime_at(&spawn, &state_root, "runtime-a", 20).unwrap();
         assert_eq!(denied["hookSpecificOutput"]["permissionDecision"], "deny");
-        assert_eq!(crate::subagent_orchestrator::active_reservation_count(
-            &state_root, "runtime-a", "explicit-role-session", 30
-        ).unwrap(), None);
+        assert_eq!(
+            crate::subagent_orchestrator::active_reservation_count(
+                &state_root,
+                "runtime-a",
+                "explicit-role-session",
+                30
+            )
+            .unwrap(),
+            None
+        );
     }
 }
 

@@ -811,17 +811,29 @@ pub(super) async fn drop_derived_official_routes(state: &Arc<AppState>) -> Resul
     Ok(())
 }
 
-async fn official_account_client(state: &Arc<AppState>, account_id: &str) -> Result<crate::network_proxy::egress::PreparedClient, String> {
+async fn official_account_client(
+    state: &Arc<AppState>,
+    account_id: &str,
+) -> Result<crate::network_proxy::egress::PreparedClient, String> {
     let proxy = super::official_account_usage_proxy(state, account_id).await?;
     let client = crate::official_accounts::official_http_client(
-        &state.http_client, Some(&state.official_proxied_clients), proxy.as_deref(),
-    ).map_err(|_| "无法创建官方账号代理客户端".to_string())?;
+        &state.http_client,
+        Some(&state.official_proxied_clients),
+        proxy.as_deref(),
+    )
+    .map_err(|_| "无法创建官方账号代理客户端".to_string())?;
     Ok(proxy.bind(client))
 }
 
-async fn revoke_account_siwc(state: &Arc<AppState>, account_id: &str, credential: &crate::official_accounts::SiwcCredential) -> Result<(), String> {
+async fn revoke_account_siwc(
+    state: &Arc<AppState>,
+    account_id: &str,
+    credential: &crate::official_accounts::SiwcCredential,
+) -> Result<(), String> {
     let client = official_account_client(state, account_id).await?;
-    revoke_siwc_session(&client, credential).await.map_err(|error| format!("{error:#}"))
+    revoke_siwc_session(&client, credential)
+        .await
+        .map_err(|error| format!("{error:#}"))
 }
 
 /// Saves the route name, short name, gateway and upstream proxy of one

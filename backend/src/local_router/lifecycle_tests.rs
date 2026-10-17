@@ -112,7 +112,10 @@ fn test_server(config: &CodeyConfig) -> RouterServer {
             .build()
             .unwrap(),
         proxied_clients: Mutex::default(),
-        egress: Arc::new(crate::network_proxy::egress::EgressPool::for_config(Path::new("unused-test-config.json"), config.network_proxy.clone())),
+        egress: Arc::new(crate::network_proxy::egress::EgressPool::for_config(
+            Path::new("unused-test-config.json"),
+            config.network_proxy.clone(),
+        )),
         official_auth_path: PathBuf::from("/nonexistent/codey-lifecycle-test-auth"),
         account_usage_cache: Arc::default(),
         official_auth_cache: Arc::default(),

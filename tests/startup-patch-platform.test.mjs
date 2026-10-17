@@ -200,16 +200,18 @@ test("Store environment uses supervised native activation with scoped cleanup", 
   const prepare = source.indexOf("session.journal.arm(&package_full_name)?");
   const enable = source.indexOf("enable_windows_packaged_environment(", prepare);
   assert.ok(prepare >= 0 && enable > prepare);
-  const setup = launcherPlatform.indexOf("WindowsPackageDebugSession::start(");
+  const setup = launcherPlatform.indexOf("WindowsPackageDebugSession::start_with_capture(");
   const supervision = launcherPlatform.indexOf("tokio::spawn(async move", setup);
   const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app(", supervision);
   const verification = launcherPlatform.indexOf("let package_check", activation);
-  const resumed = launcherPlatform.indexOf("wait_for_resume(feedback.as_deref(), process_id).await?", verification);
+  const resumed = launcherPlatform.indexOf("wait_for_resume_with_binding(feedback.as_deref(), process_id,", verification);
   const spawned = launcherPlatform.indexOf("SpawnedCodex {", verification);
   const cleanup = launcherPlatform.indexOf("package_debug_session.finish()", verification);
   assert.ok(setup >= 0 && supervision > setup && activation > supervision && verification > activation && resumed > verification && spawned > resumed && cleanup > spawned);
   assert.match(source, /if self\.activation_pending/);
-  assert.match(launcherPlatform, /wait_for_resume_failure\(feedback\.clone\(\)\)/);
+  assert.match(launcherPlatform, /watch_resume_with_binding\(feedback\.clone\(\),/);
+  assert.match(launcherPlatform, /wait_for_resume_with_binding\([\s\S]*?process_capture::bind_suspended_pid\(scope, pid\)[\s\S]*?\.await\?/);
+  assert.match(launcherPlatform, /watch_resume_with_binding\([\s\S]*?bind_capture_target\(&binding_app_dir, pid, scope\)/);
   assert.match(launcherPlatform, /cancel_resume_feedback\(feedback\.as_deref\(\)\)/);
   assert.match(supervisor, /timeout\(self\.timeout, &mut activation\)/);
   assert.match(supervisor, /timeout\(self\.settle_timeout, &mut activation\)/);
@@ -355,7 +357,7 @@ test("NODE_OPTIONS require path follows platform and fuse availability", async (
   );
   assert.match(
     windowsSpawn,
-    /if inspector_port\.is_none\(\) && wrapper_handshake\.is_none\(\)\s*&& require_marker\.is_none\(\)/,
+    /if inspector_port\.is_none\(\)\s*&& wrapper_handshake\.is_none\(\)\s*&& require_marker\.is_none\(\)/,
   );
   assert.match(macosSpawn, /detect_electron_fuses\(app_dir\.to_path_buf\(\)\)\.await/);
   assert.match(

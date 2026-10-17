@@ -52,7 +52,8 @@ pub(super) async fn after_integration_failure(
     }
     if !allow_native_recovery {
         return restore_runtime_config_after_error(home, local_router_enabled, error)
-            .await.context("已配置代理，已阻止可能绕过代理的原生启动回退；请修复启动问题后重试");
+            .await
+            .context("已配置代理，已阻止可能绕过代理的原生启动回退；请修复启动问题后重试");
     }
     let result = restore_then_launch(
         restore_runtime_config_for_router_mode(home, local_router_enabled),
@@ -283,10 +284,17 @@ mod tests {
         config.profiles[0].upstream_proxy = "socks5h://proxy.invalid:1080".into();
         assert!(config.requires_proxy_aware_launch());
         config.profiles[0].upstream_proxy.clear();
-        config.network_proxy.process_proxy = crate::network_proxy::model::ProxySelection::Node { id: "exit".into() };
+        config.network_proxy.process_proxy =
+            crate::network_proxy::model::ProxySelection::Node { id: "exit".into() };
         assert!(config.requires_proxy_aware_launch());
-        let error = after_integration_failure(directory.path(), Path::new("nonexistent-codex"), false,
-            !config.requires_proxy_aware_launch(), recoverable("fixture startup failure")).await;
+        let error = after_integration_failure(
+            directory.path(),
+            Path::new("nonexistent-codex"),
+            false,
+            !config.requires_proxy_aware_launch(),
+            recoverable("fixture startup failure"),
+        )
+        .await;
         let detail = format!("{error:#}");
         assert!(detail.contains("已阻止可能绕过代理"), "{detail}");
         assert!(detail.contains("fixture startup failure"), "{detail}");

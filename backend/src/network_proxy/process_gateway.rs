@@ -138,14 +138,20 @@ impl ProcessGateway {
     #[cfg(windows)]
     pub(crate) async fn enable_capture(&self) -> anyhow::Result<()> {
         let capture = super::process_capture::CaptureSession::start(self.auth()).await?;
-        *self.capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(capture);
+        *self
+            .capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(capture);
         Ok(())
     }
 
     #[cfg(windows)]
     pub(crate) fn capture_scope(&self) -> Option<codey_traffic_service::client::ProcessScope> {
-        self.capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
-            .as_ref().map(super::process_capture::CaptureSession::scope)
+        self.capture
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref()
+            .map(super::process_capture::CaptureSession::scope)
     }
 
     pub(crate) fn proxy_url(&self) -> String {
@@ -162,7 +168,11 @@ impl ProcessGateway {
     pub(crate) async fn stop(&self) {
         #[cfg(windows)]
         {
-            let capture = self.capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            let capture = self
+                .capture
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
             if let Some(mut capture) = capture {
                 // Runtime cleanup has already confirmed that its Codex processes
                 // stopped. The session's drop guard also stops its owned Job.

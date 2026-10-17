@@ -95,7 +95,11 @@ impl ResumeFeedback {
         let path = resume_feedback_path(directory, id);
         crate::fs_util::atomic_write_private(
             &path,
-            &serde_json::to_vec(&if capture { ResumeFeedbackState::PendingCapture } else { ResumeFeedbackState::Pending })?,
+            &serde_json::to_vec(&if capture {
+                ResumeFeedbackState::PendingCapture
+            } else {
+                ResumeFeedbackState::Pending
+            })?,
         )?;
         Ok(Self { id, path })
     }
@@ -118,7 +122,10 @@ fn read_resume_feedback(path: &Path) -> Result<ResumeFeedbackState> {
 
 fn require_pending_resume(path: &Path) -> Result<()> {
     anyhow::ensure!(
-        matches!(read_resume_feedback(path)?, ResumeFeedbackState::Pending | ResumeFeedbackState::PendingCapture),
+        matches!(
+            read_resume_feedback(path)?,
+            ResumeFeedbackState::Pending | ResumeFeedbackState::PendingCapture
+        ),
         "本次 Windows Store 启动已停止，拒绝恢复线程"
     );
     Ok(())
@@ -136,11 +143,16 @@ pub(super) fn cancel_resume_feedback(path: Option<&Path>) -> Result<()> {
 
 #[cfg(test)]
 pub(super) async fn wait_for_resume(path: Option<&Path>, process_id: u32) -> Result<()> {
-    wait_for_resume_with_binding(path, process_id, |_| anyhow::bail!("本次启动没有流量接管绑定器")).await
+    wait_for_resume_with_binding(path, process_id, |_| {
+        anyhow::bail!("本次启动没有流量接管绑定器")
+    })
+    .await
 }
 
 pub(super) async fn wait_for_resume_with_binding(
-    path: Option<&Path>, process_id: u32, mut bind: impl FnMut(u32) -> Result<()>,
+    path: Option<&Path>,
+    process_id: u32,
+    mut bind: impl FnMut(u32) -> Result<()>,
 ) -> Result<()> {
     let Some(path) = path else {
         return Ok(());
@@ -148,7 +160,9 @@ pub(super) async fn wait_for_resume_with_binding(
     loop {
         match read_resume_feedback(path)? {
             ResumeFeedbackState::Pending | ResumeFeedbackState::PendingCapture => {}
-            ResumeFeedbackState::AwaitingCapture { process_id: awaiting } => {
+            ResumeFeedbackState::AwaitingCapture {
+                process_id: awaiting,
+            } => {
                 anyhow::ensure!(awaiting == process_id, "流量接管绑定请求不属于本次激活进程");
                 acknowledge_capture(path, process_id, &mut bind)?;
             }
@@ -180,18 +194,26 @@ pub(super) async fn wait_for_resume_failure(path: Option<PathBuf>) -> anyhow::Er
     watch_resume_with_binding(path, |_| anyhow::bail!("本次启动没有流量接管绑定器")).await
 }
 
-pub(super) async fn watch_resume_with_binding(path: Option<PathBuf>, mut bind: impl FnMut(u32) -> Result<()>) -> anyhow::Error {
+pub(super) async fn watch_resume_with_binding(
+    path: Option<PathBuf>,
+    mut bind: impl FnMut(u32) -> Result<()>,
+) -> anyhow::Error {
     let Some(path) = path else {
         return std::future::pending().await;
     };
     loop {
         match read_resume_feedback(&path) {
             Ok(ResumeFeedbackState::AwaitingCapture { process_id }) => {
-                if let Err(error) = acknowledge_capture(&path, process_id, &mut bind) { return error; }
+                if let Err(error) = acknowledge_capture(&path, process_id, &mut bind) {
+                    return error;
+                }
             }
-            Ok(ResumeFeedbackState::Pending | ResumeFeedbackState::PendingCapture
+            Ok(
+                ResumeFeedbackState::Pending
+                | ResumeFeedbackState::PendingCapture
                 | ResumeFeedbackState::CaptureBound { .. }
-                | ResumeFeedbackState::Resumed { .. }) => {}
+                | ResumeFeedbackState::Resumed { .. },
+            ) => {}
             Ok(ResumeFeedbackState::Failed(detail)) => {
                 return anyhow::anyhow!("Windows Store 线程恢复失败：{detail}");
             }
@@ -205,31 +227,68 @@ pub(super) async fn watch_resume_with_binding(path: Option<PathBuf>, mut bind: i
 }
 
 #[cfg(windows)]
-pub(super) fn bind_capture_target(app_dir: &Path, process_id: u32, scope: &codey_traffic_service::client::ProcessScope) -> Result<()> {
+pub(super) fn bind_capture_target(
+    app_dir: &Path,
+    process_id: u32,
+    scope: &codey_traffic_service::client::ProcessScope,
+) -> Result<()> {
     use std::os::windows::{ffi::OsStringExt, io::AsRawHandle};
-    use windows::{Win32::{Foundation::HANDLE, System::Threading::{QueryFullProcessImageNameW, PROCESS_NAME_WIN32}}, core::PWSTR};
+    use windows::{
+        Win32::{
+            Foundation::HANDLE,
+            System::Threading::{PROCESS_NAME_WIN32, QueryFullProcessImageNameW},
+        },
+        core::PWSTR,
+    };
     let process = super::platform::WindowsStartupProcess::open(process_id)?;
     let package = process.package_full_name()?;
-    anyhow::ensure!(windows_package_full_name(app_dir).as_deref() == Some(package.as_str()), "接管绑定请求不属于所选 Codex 安装");
+    anyhow::ensure!(
+        windows_package_full_name(app_dir).as_deref() == Some(package.as_str()),
+        "接管绑定请求不属于所选 Codex 安装"
+    );
     let mut image = vec![0u16; 32768];
     let mut size = image.len() as u32;
-    unsafe { QueryFullProcessImageNameW(HANDLE(process.0.as_raw_handle()), PROCESS_NAME_WIN32, PWSTR(image.as_mut_ptr()), &mut size) }?;
-    let actual = std::fs::canonicalize(PathBuf::from(std::ffi::OsString::from_wide(&image[..size as usize])))?;
-    let expected = std::fs::canonicalize(codey_runtime_core::app_paths::build_codex_executable(app_dir))?;
-    anyhow::ensure!(super::platform::normalized_windows_path(&actual) == super::platform::normalized_windows_path(&expected), "接管绑定目标与本次 Codex 启动程序不一致");
+    unsafe {
+        QueryFullProcessImageNameW(
+            HANDLE(process.0.as_raw_handle()),
+            PROCESS_NAME_WIN32,
+            PWSTR(image.as_mut_ptr()),
+            &mut size,
+        )
+    }?;
+    let actual = std::fs::canonicalize(PathBuf::from(std::ffi::OsString::from_wide(
+        &image[..size as usize],
+    )))?;
+    let expected = std::fs::canonicalize(codey_runtime_core::app_paths::build_codex_executable(
+        app_dir,
+    ))?;
+    anyhow::ensure!(
+        super::platform::normalized_windows_path(&actual)
+            == super::platform::normalized_windows_path(&expected),
+        "接管绑定目标与本次 Codex 启动程序不一致"
+    );
     crate::network_proxy::process_capture::bind_suspended_pid(scope, process_id)
 }
 
-fn acknowledge_capture(path: &Path, process_id: u32, bind: &mut impl FnMut(u32) -> Result<()>) -> Result<()> {
+fn acknowledge_capture(
+    path: &Path,
+    process_id: u32,
+    bind: &mut impl FnMut(u32) -> Result<()>,
+) -> Result<()> {
     let pending = || -> Result<()> {
-        anyhow::ensure!(matches!(read_resume_feedback(path)?, ResumeFeedbackState::AwaitingCapture { process_id: pid } if pid == process_id),
-            "本次流量接管绑定已取消或进程不匹配");
+        anyhow::ensure!(
+            matches!(read_resume_feedback(path)?, ResumeFeedbackState::AwaitingCapture { process_id: pid } if pid == process_id),
+            "本次流量接管绑定已取消或进程不匹配"
+        );
         Ok(())
     };
     pending()?;
     bind(process_id)?;
     pending()?;
-    crate::fs_util::atomic_write_private(path, &serde_json::to_vec(&ResumeFeedbackState::CaptureBound { process_id })?)
+    crate::fs_util::atomic_write_private(
+        path,
+        &serde_json::to_vec(&ResumeFeedbackState::CaptureBound { process_id })?,
+    )
 }
 
 fn require_resume_permission(path: &Path, process_id: u32, capture: bool) -> Result<()> {
@@ -331,19 +390,31 @@ fn resume_windows_packaged_thread_inner(
             == super::platform::normalized_windows_path(&executable),
         "Windows Store Codex 实际启动程序与已验证安装不一致"
     );
-    let capture = matches!(read_resume_feedback(feedback)?, ResumeFeedbackState::PendingCapture);
+    let capture = matches!(
+        read_resume_feedback(feedback)?,
+        ResumeFeedbackState::PendingCapture
+    );
     require_pending_resume(feedback)?;
     if capture {
-        crate::fs_util::atomic_write_private(feedback,
-            &serde_json::to_vec(&ResumeFeedbackState::AwaitingCapture { process_id })?)?;
+        crate::fs_util::atomic_write_private(
+            feedback,
+            &serde_json::to_vec(&ResumeFeedbackState::AwaitingCapture { process_id })?,
+        )?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
             match read_resume_feedback(feedback)? {
-                ResumeFeedbackState::CaptureBound { process_id: bound } if bound == process_id => break,
-                ResumeFeedbackState::AwaitingCapture { process_id: awaiting } if awaiting == process_id => {}
+                ResumeFeedbackState::CaptureBound { process_id: bound } if bound == process_id => {
+                    break;
+                }
+                ResumeFeedbackState::AwaitingCapture {
+                    process_id: awaiting,
+                } if awaiting == process_id => {}
                 _ => anyhow::bail!("流量接管绑定已取消，Codex 未恢复运行"),
             }
-            anyhow::ensure!(std::time::Instant::now() < deadline, "等待流量接管绑定超时，Codex 未恢复运行");
+            anyhow::ensure!(
+                std::time::Instant::now() < deadline,
+                "等待流量接管绑定超时，Codex 未恢复运行"
+            );
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
     }
@@ -410,11 +481,18 @@ pub(super) struct WindowsPackageDebugSession {
 
 #[cfg(windows)]
 impl WindowsPackageDebugSession {
-    pub(super) fn start_with_capture(app_dir: &Path, environment: &[(String, String)], capture: bool) -> Result<Self> {
+    pub(super) fn start_with_capture(
+        app_dir: &Path,
+        environment: &[(String, String)],
+        capture: bool,
+    ) -> Result<Self> {
         let package_full_name =
             windows_package_full_name(app_dir).context("无法识别 Windows Store Codex 包全名")?;
         let mut session = Self::clean()?;
-        session.feedback = Some(ResumeFeedback::new_with_capture(session.journal.path.parent().unwrap(), capture)?);
+        session.feedback = Some(ResumeFeedback::new_with_capture(
+            session.journal.path.parent().unwrap(),
+            capture,
+        )?);
         session.journal.arm(&package_full_name)?;
         if let Err(error) = enable_windows_packaged_environment(
             &package_full_name,
@@ -704,20 +782,31 @@ mod tests {
         assert!(require_resume_permission(&feedback.path, 42, true).is_err());
         let (bound, done) = tokio::sync::oneshot::channel();
         let mut bound = Some(bound);
-        let monitor = tokio::spawn(watch_resume_with_binding(Some(feedback.path.clone()), move |pid| {
-            assert_eq!(pid, 42);
-            bound.take().unwrap().send(()).unwrap();
-            Ok(())
-        }));
+        let monitor = tokio::spawn(watch_resume_with_binding(
+            Some(feedback.path.clone()),
+            move |pid| {
+                assert_eq!(pid, 42);
+                bound.take().unwrap().send(()).unwrap();
+                Ok(())
+            },
+        ));
         // The helper can request binding while ActivateApplication still waits.
-        crate::fs_util::atomic_write_private(&feedback.path,
-            &serde_json::to_vec(&ResumeFeedbackState::AwaitingCapture { process_id: 42 }).unwrap()).unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(3), done).await.unwrap().unwrap();
+        crate::fs_util::atomic_write_private(
+            &feedback.path,
+            &serde_json::to_vec(&ResumeFeedbackState::AwaitingCapture { process_id: 42 }).unwrap(),
+        )
+        .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(3), done)
+            .await
+            .unwrap()
+            .unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
             while require_resume_permission(&feedback.path, 42, true).is_err() {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         require_resume_permission(&feedback.path, 42, true).unwrap();
         assert!(require_resume_permission(&feedback.path, 43, true).is_err());
         assert!(require_resume_permission(&feedback.path, 42, false).is_err());
@@ -731,12 +820,25 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let feedback = ResumeFeedback::new_with_capture(directory.path(), true).unwrap();
         assert!(acknowledge_capture(&feedback.path, 42, &mut |_| panic!("not requested")).is_err());
-        crate::fs_util::atomic_write_private(&feedback.path,
-            &serde_json::to_vec(&ResumeFeedbackState::AwaitingCapture { process_id: 42 }).unwrap()).unwrap();
+        crate::fs_util::atomic_write_private(
+            &feedback.path,
+            &serde_json::to_vec(&ResumeFeedbackState::AwaitingCapture { process_id: 42 }).unwrap(),
+        )
+        .unwrap();
         assert!(acknowledge_capture(&feedback.path, 43, &mut |_| panic!("wrong process")).is_err());
-        assert!(acknowledge_capture(&feedback.path, 42, &mut |_| anyhow::bail!("capture stopped")).is_err());
+        assert!(
+            acknowledge_capture(&feedback.path, 42, &mut |_| anyhow::bail!(
+                "capture stopped"
+            ))
+            .is_err()
+        );
         assert!(require_resume_permission(&feedback.path, 42, true).is_err());
-        assert!(acknowledge_capture(&feedback.path, 42, &mut |_| cancel_resume_feedback(Some(&feedback.path))).is_err());
+        assert!(
+            acknowledge_capture(&feedback.path, 42, &mut |_| cancel_resume_feedback(Some(
+                &feedback.path
+            )))
+            .is_err()
+        );
         assert!(require_resume_permission(&feedback.path, 42, true).is_err());
     }
 

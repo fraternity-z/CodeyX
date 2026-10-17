@@ -186,7 +186,16 @@ impl LocalRouter {
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
     ) -> Result<Self> {
-        Self::start_with_logger_and_usage(config, request_log, Arc::default(), Arc::new(crate::network_proxy::egress::EgressPool::for_config(&crate::config::default_config_path(), config.network_proxy.clone()))).await
+        Self::start_with_logger_and_usage(
+            config,
+            request_log,
+            Arc::default(),
+            Arc::new(crate::network_proxy::egress::EgressPool::for_config(
+                &crate::config::default_config_path(),
+                config.network_proxy.clone(),
+            )),
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -194,7 +203,15 @@ impl LocalRouter {
         config: &CodeyConfig,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
     ) -> Result<Self> {
-        Self::start_with_egress(config, account_usage_cache, Arc::new(crate::network_proxy::egress::EgressPool::for_config(&crate::config::default_config_path(), config.network_proxy.clone()))).await
+        Self::start_with_egress(
+            config,
+            account_usage_cache,
+            Arc::new(crate::network_proxy::egress::EgressPool::for_config(
+                &crate::config::default_config_path(),
+                config.network_proxy.clone(),
+            )),
+        )
+        .await
     }
 
     pub(crate) async fn start_with_egress(
@@ -655,7 +672,14 @@ impl RouterServer {
         &self,
         route: &RouteTarget,
     ) -> std::result::Result<crate::network_proxy::egress::PreparedClient, String> {
-        let prepared = self.egress.proxy_for_profile(&route.profile_id, route.upstream_proxy.as_deref(), route.plugin_transport.is_some()).await?;
+        let prepared = self
+            .egress
+            .proxy_for_profile(
+                &route.profile_id,
+                route.upstream_proxy.as_deref(),
+                route.plugin_transport.is_some(),
+            )
+            .await?;
         let Some(proxy) = prepared.as_deref() else {
             return Ok(prepared.bind(self.client.clone()));
         };

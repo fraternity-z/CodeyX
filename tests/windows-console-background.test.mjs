@@ -70,7 +70,7 @@ test("Windows source contract: background helpers request no-window execution", 
 
   assert.match(
     launcherPlatform,
-    /Command::new\(executable\)[\s\S]*creation_flags\(codey_runtime_core::windows_create_no_window\(\)\)[\s\S]*\.spawn\(\)/,
+    /Command::new\(executable\)[\s\S]*let flags = codey_runtime_core::windows_create_no_window\(\)\s*\|\s*if capture\.is_some\(\)[\s\S]*?CREATE_SUSPENDED\.0[\s\S]*?else\s*\{\s*0\s*\};\s*child_command\.creation_flags\(flags\)[\s\S]*\.spawn\(\)/,
   );
   assert.doesNotMatch(processCleanup, /Command::new\("taskkill"\)/);
   assert.match(

@@ -98,9 +98,9 @@ async fn invoke(route: &Route, method: &str, params: &Value) -> Result<Reply, St
     let mut guard = SHARED.lock().await;
     let launch = crate::launch_proxy::shared_app_server_launch()?;
     let key = route_key(route);
-    let reusable = guard
-        .as_mut()
-        .is_some_and(|client| client.route_key == key && client.launch_generation == launch.generation && !client.exited());
+    let reusable = guard.as_mut().is_some_and(|client| {
+        client.route_key == key && client.launch_generation == launch.generation && !client.exited()
+    });
     if !reusable {
         *guard = None;
         *guard = Some(SharedClient::start(route, launch).await?);
@@ -116,7 +116,10 @@ async fn invoke(route: &Route, method: &str, params: &Value) -> Result<Reply, St
 }
 
 impl SharedClient {
-    async fn start(route: &Route, launch: crate::launch_proxy::SharedAppServerLaunch) -> Result<Self, String> {
+    async fn start(
+        route: &Route,
+        launch: crate::launch_proxy::SharedAppServerLaunch,
+    ) -> Result<Self, String> {
         let executable = codex_cli().ok_or("未找到 Codex app-server")?;
         let mut command = Command::new(executable);
         command.arg("app-server").arg("--listen").arg("stdio://");
@@ -136,14 +139,17 @@ impl SharedClient {
         let capture = launch.capture;
         #[cfg(windows)]
         if capture.is_some() {
-            command.creation_flags(windows::Win32::System::Threading::CREATE_SUSPENDED.0
-                | windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+            command.creation_flags(
+                windows::Win32::System::Threading::CREATE_SUSPENDED.0
+                    | windows::Win32::System::Threading::CREATE_NO_WINDOW.0,
+            );
         }
         let mut child = command.spawn().map_err(|_| "app-server 启动失败")?;
         #[cfg(windows)]
         if let Some(scope) = &capture {
             crate::network_proxy::process_capture::bind_and_resume(scope, &mut child)
-                .await.map_err(|_| "app-server 未能绑定到流量接管会话，已停止启动")?;
+                .await
+                .map_err(|_| "app-server 未能绑定到流量接管会话，已停止启动")?;
         }
         let stdin = child.stdin.take().ok_or("app-server 缺少输入")?;
         let stdout = child.stdout.take().ok_or("app-server 缺少输出")?;

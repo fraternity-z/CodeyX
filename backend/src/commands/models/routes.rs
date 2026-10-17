@@ -348,7 +348,8 @@ pub(crate) async fn fetch_official_route_models(
     };
     let proxy = state.proxy_for_profile(profile).await?;
     let client = if let Some(proxy_url) = proxy.as_deref() {
-        reqwest::Client::builder().no_proxy()
+        reqwest::Client::builder()
+            .no_proxy()
             .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(5))
             .proxy(

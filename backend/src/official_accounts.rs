@@ -2731,8 +2731,11 @@ pub(crate) async fn refresh_siwc_if_stale_with_proxy(
             detail: None,
         }));
     }
-    let request_client =
-        official_http_client(client, proxied_clients, proxy_override.or(record.upstream_proxy.as_deref()))?;
+    let request_client = official_http_client(
+        client,
+        proxied_clients,
+        proxy_override.or(record.upstream_proxy.as_deref()),
+    )?;
     let response = request_client
         .post(SIWC_TOKEN_URL)
         .timeout(Duration::from_secs(20))

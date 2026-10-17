@@ -2098,20 +2098,33 @@ impl CodeyRuntime {
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
         egress: Arc<crate::network_proxy::egress::EgressPool>,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
-        config.validate_network_proxy().map_err(anyhow::Error::msg)?;
+        config
+            .validate_network_proxy()
+            .map_err(anyhow::Error::msg)?;
         if !crate::codex_config::runtime_router_platform_supported() {
             return Err(anyhow::anyhow!(
                 crate::codex_config::unsupported_runtime_platform_message()
             ));
         }
         let process_proxy = if config.network_proxy.has_process_proxy() {
-            Some(crate::network_proxy::process_gateway::ProcessGateway::start(
-                egress.clone(), config.network_proxy.process_proxy.clone(),
-            ).await.map_err(anyhow::Error::msg)?)
-        } else { None };
+            Some(
+                crate::network_proxy::process_gateway::ProcessGateway::start(
+                    egress.clone(),
+                    config.network_proxy.process_proxy.clone(),
+                )
+                .await
+                .map_err(anyhow::Error::msg)?,
+            )
+        } else {
+            None
+        };
         if config.network_proxy.process_capture {
             #[cfg(windows)]
-            process_proxy.as_ref().context("流量接管缺少代理池出口")?.enable_capture().await?;
+            process_proxy
+                .as_ref()
+                .context("流量接管缺少代理池出口")?
+                .enable_capture()
+                .await?;
             #[cfg(not(windows))]
             anyhow::bail!("当前平台尚不支持流量接管，请明确关闭接管后再启动");
         }

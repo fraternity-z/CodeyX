@@ -89,8 +89,14 @@ async fn snapshot(state: &Arc<AppState>, config: &crate::config::CodeyConfig) ->
 }
 
 fn capture_available() -> bool {
-    #[cfg(windows)] { crate::network_proxy::process_capture::available() }
-    #[cfg(not(windows))] { false }
+    #[cfg(windows)]
+    {
+        crate::network_proxy::process_capture::available()
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 async fn save(state: &Arc<AppState>, input: SaveInput) -> Result<Value, String> {
@@ -116,8 +122,10 @@ async fn save(state: &Arc<AppState>, input: SaveInput) -> Result<Value, String> 
             .config
             .validate_active_selection(&input.config.process_proxy)?;
     }
-    if input.config.process_capture && !previous.network_proxy.process_capture
-        && !cfg!(all(windows, target_arch = "x86_64")) {
+    if input.config.process_capture
+        && !previous.network_proxy.process_capture
+        && !cfg!(all(windows, target_arch = "x86_64"))
+    {
         return Err("当前宿主暂不支持流量接管".into());
     }
     for (profile_id, selection) in &input.config.upstream_by_profile {

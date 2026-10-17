@@ -987,13 +987,22 @@ fn request_log_only_config_changes_do_not_require_restart() {
 #[test]
 fn subagent_concurrency_requires_restart_even_after_role_hot_reload() {
     for enabled in [false, true] {
-        let applied = CodeyConfig { subagent_optimization: enabled, ..CodeyConfig::default() };
+        let applied = CodeyConfig {
+            subagent_optimization: enabled,
+            ..CodeyConfig::default()
+        };
         let mut current = applied.clone();
         current.subagent_max_threads = 4;
-        assert_eq!(config_requires_restart_with_route_status(
-            false, &applied, &RuntimeModelConfig::from_config(&current),
-            &RuntimeSubagentConfig::from_config(&current), &current,
-        ), enabled);
+        assert_eq!(
+            config_requires_restart_with_route_status(
+                false,
+                &applied,
+                &RuntimeModelConfig::from_config(&current),
+                &RuntimeSubagentConfig::from_config(&current),
+                &current,
+            ),
+            enabled
+        );
     }
 }
 
@@ -1344,15 +1353,30 @@ fn network_proxy_startup_selection_requires_restart_but_node_edits_do_not() {
     let applied = CodeyConfig::default();
     let mut current = applied.clone();
     current.network_proxy.process_proxy = ProxySelection::Node { id: "exit".into() };
-    assert!(config_requires_restart_with_route_status(false, &applied,
-        &RuntimeModelConfig::from_config(&applied), &RuntimeSubagentConfig::from_config(&applied), &current));
+    assert!(config_requires_restart_with_route_status(
+        false,
+        &applied,
+        &RuntimeModelConfig::from_config(&applied),
+        &RuntimeSubagentConfig::from_config(&applied),
+        &current
+    ));
     let applied = current.clone();
     current.network_proxy.nodes = serde_json::from_value(serde_json::json!([{
         "id":"exit","name":"Exit","endpoint":{"protocol":"socks5","host":"proxy.invalid","port":1080},"enabled":false
     }])).unwrap();
-    assert!(!config_requires_restart_with_route_status(false, &applied,
-        &RuntimeModelConfig::from_config(&applied), &RuntimeSubagentConfig::from_config(&applied), &current));
+    assert!(!config_requires_restart_with_route_status(
+        false,
+        &applied,
+        &RuntimeModelConfig::from_config(&applied),
+        &RuntimeSubagentConfig::from_config(&applied),
+        &current
+    ));
     current.network_proxy.process_capture = true;
-    assert!(config_requires_restart_with_route_status(false, &applied,
-        &RuntimeModelConfig::from_config(&applied), &RuntimeSubagentConfig::from_config(&applied), &current));
+    assert!(config_requires_restart_with_route_status(
+        false,
+        &applied,
+        &RuntimeModelConfig::from_config(&applied),
+        &RuntimeSubagentConfig::from_config(&applied),
+        &current
+    ));
 }

@@ -211,34 +211,103 @@ fn custom_read_only_role_cannot_write_through_commands_unknown_or_visual_tools()
     role.developer_instructions = "报告证据".into();
     let mut roles = crate::config::default_subagent_roles();
     roles.insert("reviewer".into(), role);
-    crate::subagent_gate::commit_runtime_subagent_policy(temp.path(), &roles, &Default::default(), 4).unwrap();
+    crate::subagent_gate::commit_runtime_subagent_policy(
+        temp.path(),
+        &roles,
+        &Default::default(),
+        4,
+    )
+    .unwrap();
     spawn(&root, "session", "review", "reviewer", "/repo");
-    for name in ["read_file", "mcp__codey_fastctx__grep", "mcp__codey_fastctx__glob", "functions.view_image", "web.run"] {
-        assert_eq!(tool(&root, "session", "review", name).unwrap(), None, "{name}");
+    for name in [
+        "read_file",
+        "mcp__codey_fastctx__grep",
+        "mcp__codey_fastctx__glob",
+        "functions.view_image",
+        "web.run",
+    ] {
+        assert_eq!(
+            tool(&root, "session", "review", name).unwrap(),
+            None,
+            "{name}"
+        );
     }
-    for name in ["apply_patch", "mcp__codey_fastctx__replace", "functions.exec", "functions.exec_command",
-        "functions.write_stdin", "mcp__unknown__read", "mcp__cua_repl__js", "mcp__codex_app__open_in_codex"] {
-        assert!(tool(&root, "session", "review", name).unwrap().is_some(), "{name}");
+    for name in [
+        "apply_patch",
+        "mcp__codey_fastctx__replace",
+        "functions.exec",
+        "functions.exec_command",
+        "functions.write_stdin",
+        "mcp__unknown__read",
+        "mcp__cua_repl__js",
+        "mcp__codex_app__open_in_codex",
+    ] {
+        assert!(
+            tool(&root, "session", "review", name).unwrap().is_some(),
+            "{name}"
+        );
     }
     // Saving a broader role does not elevate an already-running attempt.
     roles.get_mut("reviewer").unwrap().access = crate::config::SubagentAccess::ReadWrite;
-    crate::subagent_gate::commit_runtime_subagent_policy(temp.path(), &roles, &Default::default(), 4).unwrap();
-    assert!(tool(&root, "session", "review", "apply_patch").unwrap().is_some());
+    crate::subagent_gate::commit_runtime_subagent_policy(
+        temp.path(),
+        &roles,
+        &Default::default(),
+        4,
+    )
+    .unwrap();
+    assert!(
+        tool(&root, "session", "review", "apply_patch")
+            .unwrap()
+            .is_some()
+    );
     spawn(&root, "session", "writer", "reviewer", "/repo");
-    assert_eq!(tool(&root, "session", "writer", "apply_patch").unwrap(), None);
+    assert_eq!(
+        tool(&root, "session", "writer", "apply_patch").unwrap(),
+        None
+    );
     roles.remove("reviewer");
-    crate::subagent_gate::commit_runtime_subagent_policy(temp.path(), &roles, &Default::default(), 4).unwrap();
-    assert_eq!(tool(&root, "session", "writer", "apply_patch").unwrap(), None);
-    assert!(tool(&root, "session", "review", "apply_patch").unwrap().is_some());
+    crate::subagent_gate::commit_runtime_subagent_policy(
+        temp.path(),
+        &roles,
+        &Default::default(),
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        tool(&root, "session", "writer", "apply_patch").unwrap(),
+        None
+    );
+    assert!(
+        tool(&root, "session", "review", "apply_patch")
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]
 fn configured_concurrency_replaces_the_old_two_agent_limit() {
     let temp = tempdir().unwrap();
     let root = temp.path().join(crate::subagent_gate::STATE_DIRECTORY);
-    crate::subagent_gate::commit_runtime_subagent_policy(temp.path(), &crate::config::default_subagent_roles(), &Default::default(), 4).unwrap();
-    for index in 0..4 { spawn(&root, "session", &format!("worker_{index}"), "codey_worker", "/repo"); }
+    crate::subagent_gate::commit_runtime_subagent_policy(
+        temp.path(),
+        &crate::config::default_subagent_roles(),
+        &Default::default(),
+        4,
+    )
+    .unwrap();
+    for index in 0..4 {
+        spawn(
+            &root,
+            "session",
+            &format!("worker_{index}"),
+            "codey_worker",
+            "/repo",
+        );
+    }
     let next = json!({"task_name":"overflow", "agent_type":"codey_worker", "message":"Work"});
-    let reason = pre_spawn(&root, "runtime", "session", Some(&next), 0, 20).unwrap().unwrap();
+    let reason = pre_spawn(&root, "runtime", "session", Some(&next), 0, 20)
+        .unwrap()
+        .unwrap();
     assert!(reason.contains("并发上限 4"));
 }

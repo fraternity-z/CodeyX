@@ -247,7 +247,9 @@ pub(super) async fn spawn_codex(
         disable_pet: disable_codex_pet,
         subagent_gate_active,
         misc_model,
-        proxy_auth: options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::authentication),
+        proxy_auth: options
+            .launch_proxy
+            .and_then(crate::launch_proxy::CodexLaunchProxy::authentication),
     };
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (
@@ -387,7 +389,9 @@ pub(super) async fn spawn_codex(
                 &launch_arguments,
                 &launch_environment,
                 wrapper_environment_required || options.launch_proxy.is_some(),
-                options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
+                options
+                    .launch_proxy
+                    .and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
             )
             .await;
             let (mut spawned, wrapper_environment_applied) = match launch {
@@ -453,7 +457,9 @@ pub(super) async fn spawn_codex(
                 .then_some(require_patch)
                 .flatten()
                 .map(|prepared| prepared.marker_path);
-            if inspector_port.is_none() && wrapper_handshake.is_none() && require_marker.is_none()
+            if inspector_port.is_none()
+                && wrapper_handshake.is_none()
+                && require_marker.is_none()
                 && patch_options.proxy_auth.is_none()
             {
                 // The process is already running without any compatibility
@@ -593,7 +599,9 @@ pub(super) async fn spawn_codex(
                         &runtime_arguments,
                         launch_proxy_environment.as_deref().unwrap_or(&[]),
                         options.launch_proxy.is_some(),
-                        options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
+                        options
+                            .launch_proxy
+                            .and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
                     )
                     .await
                     {
@@ -1985,8 +1993,15 @@ async fn install_startup_patch_with_cli_fallback(
     } = context;
     // The CLI wrapper cannot answer Chromium proxy challenges. With a selected
     // pool exit we must wait for the main-process hook itself to be confirmed.
-    let wrapper_handshake = if patch_options.proxy_auth.is_some() { None } else { wrapper_handshake };
-    require_proxy_authentication_entry(&patch_options, inspector_port.is_some() || require_marker.is_some())?;
+    let wrapper_handshake = if patch_options.proxy_auth.is_some() {
+        None
+    } else {
+        wrapper_handshake
+    };
+    require_proxy_authentication_entry(
+        &patch_options,
+        inspector_port.is_some() || require_marker.is_some(),
+    )?;
     let exited = startup_process_exited(spawned);
     let compatibility = wait_for_startup_compatibility(
         inspector_port,
@@ -2616,13 +2631,22 @@ mod cli_wrapper_tests {
         let mut options = test_patch_options();
         assert!(require_proxy_authentication_entry(&options, false).is_ok());
         options.proxy_auth = Some(crate::network_proxy::process_gateway::ProcessProxyAuth {
-            host: "127.0.0.1".into(), port: 49152, username: "codeyx".into(),
-            password: "fixture-private-value".into(), realm: "fixture".into(),
+            host: "127.0.0.1".into(),
+            port: 49152,
+            username: "codeyx".into(),
+            password: "fixture-private-value".into(),
+            realm: "fixture".into(),
         });
         assert!(require_proxy_authentication_entry(&options, true).is_ok());
-        let error = install_startup_patch_with_cli_fallback(None, options, &[], None,
-            test_context(tokio::time::Instant::now() + Duration::from_secs(1)))
-            .await.unwrap_err();
+        let error = install_startup_patch_with_cli_fallback(
+            None,
+            options,
+            &[],
+            None,
+            test_context(tokio::time::Instant::now() + Duration::from_secs(1)),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("认证入口不可用"));
         assert!(!error.to_string().contains("fixture-private-value"));
     }

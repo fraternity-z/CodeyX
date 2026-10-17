@@ -110,11 +110,17 @@ impl RuleSet {
     /// Only callers with a trusted runtime role or an already-bound attempt may
     /// extend the built-in role set. Existing live-rule restrictions still win.
     pub(crate) fn register_runtime_role(&mut self, role: &str, access: &str) {
-        self.roles.insert(role.to_string(), RolePolicy {
-            access: access.into(),
-            visual: true,
-        });
-        if let Some(rule) = self.rules.iter_mut().find(|rule| rule.id == "allow-role-capabilities")
+        self.roles.insert(
+            role.to_string(),
+            RolePolicy {
+                access: access.into(),
+                visual: true,
+            },
+        );
+        if let Some(rule) = self
+            .rules
+            .iter_mut()
+            .find(|rule| rule.id == "allow-role-capabilities")
             && !rule.roles.iter().any(|candidate| candidate == role)
         {
             rule.roles.push(role.to_string());

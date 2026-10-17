@@ -1828,9 +1828,18 @@ async fn custom_subagent_save_edit_delete_and_legacy_save_preserve_settings() {
     assert_eq!(result["status"], "ok", "{result}");
     let saved = state.config.read().await.clone();
     assert_eq!(saved.subagent_max_threads, 7);
-    assert_eq!(saved.subagent_roles["reviewer"].access, crate::config::SubagentAccess::ReadOnly);
-    assert_eq!(saved.subagent_roles["reviewer"].developer_instructions, "核验并给出证据");
-    assert_eq!(saved.subagent_roles["reviewer"].model, "custom-review-model");
+    assert_eq!(
+        saved.subagent_roles["reviewer"].access,
+        crate::config::SubagentAccess::ReadOnly
+    );
+    assert_eq!(
+        saved.subagent_roles["reviewer"].developer_instructions,
+        "核验并给出证据"
+    );
+    assert_eq!(
+        saved.subagent_roles["reviewer"].model,
+        "custom-review-model"
+    );
 
     // Older settings payloads do not erase new fields they cannot represent.
     let mut legacy = serde_json::to_value(&saved).unwrap();
@@ -1843,19 +1852,30 @@ async fn custom_subagent_save_edit_delete_and_legacy_save_preserve_settings() {
     assert_eq!(preserved.subagent_max_threads, 7);
 
     let mut updated = preserved;
-    updated.subagent_roles.get_mut("reviewer").unwrap().access = crate::config::SubagentAccess::ReadWrite;
-    updated.subagent_roles.get_mut("reviewer").unwrap().reasoning_effort = "low".into();
+    updated.subagent_roles.get_mut("reviewer").unwrap().access =
+        crate::config::SubagentAccess::ReadWrite;
+    updated
+        .subagent_roles
+        .get_mut("reviewer")
+        .unwrap()
+        .reasoning_effort = "low".into();
     let result = invoke_api(&state, "save_codey_config", json!({ "config": updated })).await;
     assert_eq!(result["status"], "ok", "{result}");
     let mut updated = state.config.read().await.clone();
-    assert_eq!(updated.subagent_roles["reviewer"].access, crate::config::SubagentAccess::ReadWrite);
+    assert_eq!(
+        updated.subagent_roles["reviewer"].access,
+        crate::config::SubagentAccess::ReadWrite
+    );
     assert_eq!(updated.subagent_roles["reviewer"].reasoning_effort, "low");
     updated.subagent_roles.remove("reviewer");
     let result = invoke_api(&state, "save_codey_config", json!({ "config": updated })).await;
     assert_eq!(result["status"], "ok", "{result}");
     let final_config = state.config.read().await;
     assert!(!final_config.subagent_roles.contains_key("reviewer"));
-    assert_eq!(final_config.subagent_roles["codey_worker"], saved.subagent_roles["codey_worker"]);
+    assert_eq!(
+        final_config.subagent_roles["codey_worker"],
+        saved.subagent_roles["codey_worker"]
+    );
 }
 
 #[tokio::test]
@@ -1874,7 +1894,10 @@ async fn invalid_custom_subagent_save_does_not_change_memory_or_disk() {
         json!({"subagentRoles": {"reviewer": {"model": "test", "reasoningEffort": "high", "name": "审查员"}}}),
     ] {
         let mut payload = serde_json::to_value(&initial).unwrap();
-        payload.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
+        payload
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
         let result = invoke_api(&state, "save_codey_config", json!({"config": payload})).await;
         assert_eq!(result["status"], "failed", "{result}");
         assert_eq!(*state.config.read().await, initial);

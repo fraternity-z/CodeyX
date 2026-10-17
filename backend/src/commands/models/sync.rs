@@ -507,12 +507,21 @@ pub(crate) async fn fetch_provider_models(profile: ProviderProfile) -> anyhow::R
     fetch_provider_models_with_proxy(profile, None).await
 }
 
-pub(crate) async fn fetch_provider_models_with_state(state: &Arc<AppState>, profile: ProviderProfile) -> anyhow::Result<Vec<String>> {
-    let proxy = state.proxy_for_profile(&profile).await.map_err(anyhow::Error::msg)?;
+pub(crate) async fn fetch_provider_models_with_state(
+    state: &Arc<AppState>,
+    profile: ProviderProfile,
+) -> anyhow::Result<Vec<String>> {
+    let proxy = state
+        .proxy_for_profile(&profile)
+        .await
+        .map_err(anyhow::Error::msg)?;
     fetch_provider_models_with_proxy(profile, proxy.as_deref()).await
 }
 
-async fn fetch_provider_models_with_proxy(profile: ProviderProfile, proxy: Option<&str>) -> anyhow::Result<Vec<String>> {
+async fn fetch_provider_models_with_proxy(
+    profile: ProviderProfile,
+    proxy: Option<&str>,
+) -> anyhow::Result<Vec<String>> {
     // 原生传输插件的模型由配置声明，上游不一定提供标准 /models。
     if profile.plugin_owner_id.is_some()
         && let Some(spec) = profile

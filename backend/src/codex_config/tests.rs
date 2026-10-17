@@ -1104,17 +1104,40 @@ fn custom_subagents_render_official_fields_and_refresh_permissions_without_chang
         access: crate::config::SubagentAccess::ReadOnly,
         ..SubagentRoleConfig::new("review-route/review-model", "high")
     };
-    config.subagent_roles.insert("reviewer".into(), custom.clone());
+    config
+        .subagent_roles
+        .insert("reviewer".into(), custom.clone());
     let applied = dynamic_role_runtime_fixture(&home, &marker, &config);
-    assert!(applied.runtime_config_overrides.iter().any(|entry| entry == "agents.max_concurrent_threads_per_session=4"));
-    assert!(applied.runtime_config_overrides.iter().any(|entry| entry.starts_with("agents.reviewer.config_file=")));
-    assert!(applied.runtime_config_overrides.iter().all(|entry| !entry.starts_with("agents.default")));
-    assert_eq!(fs::read_to_string(home.join("config.toml")).unwrap(), user_config);
+    assert!(
+        applied
+            .runtime_config_overrides
+            .iter()
+            .any(|entry| entry == "agents.max_concurrent_threads_per_session=4")
+    );
+    assert!(
+        applied
+            .runtime_config_overrides
+            .iter()
+            .any(|entry| entry.starts_with("agents.reviewer.config_file="))
+    );
+    assert!(
+        applied
+            .runtime_config_overrides
+            .iter()
+            .all(|entry| !entry.starts_with("agents.default"))
+    );
+    assert_eq!(
+        fs::read_to_string(home.join("config.toml")).unwrap(),
+        user_config
+    );
     let constraints = marker.with_file_name(CODEY_CONSTRAINTS_DIR);
     let path = runtime_agent_path(&constraints, "reviewer");
     let document = parse_document(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(document["name"].as_str(), Some("reviewer"));
-    assert_eq!(document["description"].as_str(), Some("审查员：检查边界行为"));
+    assert_eq!(
+        document["description"].as_str(),
+        Some("审查员：检查边界行为")
+    );
     assert_eq!(document["model"].as_str(), Some(custom.model.as_str()));
     assert_eq!(document["model_reasoning_effort"].as_str(), Some("high"));
     let instructions = document["developer_instructions"].as_str().unwrap();
@@ -1123,9 +1146,14 @@ fn custom_subagents_render_official_fields_and_refresh_permissions_without_chang
     for feature in ["shell_tool", "apps", "plugins", "request_permissions_tool"] {
         assert_eq!(document["features"][feature].as_bool(), Some(false));
     }
-    assert!(document.get("sandbox_mode").is_none(), "permissions inherit from the parent");
+    assert!(
+        document.get("sandbox_mode").is_none(),
+        "permissions inherit from the parent"
+    );
     let state_root = home.join(crate::subagent_gate::STATE_DIRECTORY);
-    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root).unwrap().unwrap();
+    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root)
+        .unwrap()
+        .unwrap();
     assert_eq!(policy.roles["reviewer"], custom);
     assert_eq!(policy.max_threads, 4);
     assert!(!policy.roles.contains_key(SUBAGENT_ROLE_DEFAULT));
@@ -1134,22 +1162,48 @@ fn custom_subagents_render_official_fields_and_refresh_permissions_without_chang
     let selection = config.subagent_roles.get_mut("reviewer").unwrap();
     selection.access = crate::config::SubagentAccess::ReadWrite;
     selection.reasoning_effort = "low".into();
-    assert!(reconcile_runtime_subagent_roles_at(&config, &marker).unwrap().repaired);
+    assert!(
+        reconcile_runtime_subagent_roles_at(&config, &marker)
+            .unwrap()
+            .repaired
+    );
     let document = parse_document(&fs::read_to_string(&path).unwrap()).unwrap();
     assert_eq!(document["model_reasoning_effort"].as_str(), Some("low"));
-    assert!(!document["developer_instructions"].as_str().unwrap().contains(READ_ONLY_AGENT_WRITE_GUARD));
-    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root).unwrap().unwrap();
-    assert_eq!(policy.max_threads, 4, "a changed concurrency setting requires a restart");
-    assert_eq!(policy.roles["reviewer"].access, crate::config::SubagentAccess::ReadWrite);
+    assert!(
+        !document["developer_instructions"]
+            .as_str()
+            .unwrap()
+            .contains(READ_ONLY_AGENT_WRITE_GUARD)
+    );
+    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        policy.max_threads, 4,
+        "a changed concurrency setting requires a restart"
+    );
+    assert_eq!(
+        policy.roles["reviewer"].access,
+        crate::config::SubagentAccess::ReadWrite
+    );
 
     config.subagent_roles.remove("reviewer");
-    assert!(reconcile_runtime_subagent_roles_at(&config, &marker).unwrap().repaired);
-    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root).unwrap().unwrap();
+    assert!(
+        reconcile_runtime_subagent_roles_at(&config, &marker)
+            .unwrap()
+            .repaired
+    );
+    let policy = crate::subagent_gate::load_runtime_subagent_policy(&state_root)
+        .unwrap()
+        .unwrap();
     assert!(!policy.roles.contains_key("reviewer"));
     assert!(fs::read_to_string(&path).unwrap().contains("角色已停用"));
     restore_runtime_config_at(&home, &marker, true).unwrap();
     dynamic_role_runtime_fixture(&home, &marker, &config);
-    assert!(!path.exists(), "restarting removes stale generated custom-role files");
+    assert!(
+        !path.exists(),
+        "restarting removes stale generated custom-role files"
+    );
     assert!(!constraints.join(CODEY_RUNTIME_DEFAULT_AGENT_FILE).exists());
 }
 
@@ -1159,17 +1213,28 @@ fn added_custom_subagent_and_legacy_default_registration_require_restart_without
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().join("home");
         let marker = temp.path().join("state/lease.json");
-        let mut config = CodeyConfig { subagent_optimization: true, ..CodeyConfig::default() };
+        let mut config = CodeyConfig {
+            subagent_optimization: true,
+            ..CodeyConfig::default()
+        };
         dynamic_role_runtime_fixture(&home, &marker, &config);
         if legacy_default {
-            let mut lease: RuntimeConfigLease = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
-            lease.registered_subagent_roles.push(SUBAGENT_ROLE_DEFAULT.into());
+            let mut lease: RuntimeConfigLease =
+                serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
+            lease
+                .registered_subagent_roles
+                .push(SUBAGENT_ROLE_DEFAULT.into());
             write_lease(&marker, &lease).unwrap();
         } else {
-            config.subagent_roles.insert("reviewer".into(), SubagentRoleConfig {
-                name: "审查".into(), description: "审查变更".into(), developer_instructions: "核验".into(),
-                ..SubagentRoleConfig::new("review-model", "high")
-            });
+            config.subagent_roles.insert(
+                "reviewer".into(),
+                SubagentRoleConfig {
+                    name: "审查".into(),
+                    description: "审查变更".into(),
+                    developer_instructions: "核验".into(),
+                    ..SubagentRoleConfig::new("review-model", "high")
+                },
+            );
         }
         let original = fs::read(&marker).unwrap();
         let (policy_path, _) = crate::subagent_gate::runtime_subagent_policy_paths(&home);
@@ -1227,7 +1292,10 @@ fn dynamic_roles_can_be_enabled_disabled_and_reenabled_without_changing_registra
             current.registered_subagent_roles,
             initial.registered_subagent_roles
         );
-        assert_eq!(current.runtime_agent_hashes.len(), SUBAGENT_ROLE_IDS.len() - 1);
+        assert_eq!(
+            current.runtime_agent_hashes.len(),
+            SUBAGENT_ROLE_IDS.len() - 1
+        );
         assert_eq!(current.subagent_roles.contains_key(role), enabled);
         let (policy_path, pending) = crate::subagent_gate::runtime_subagent_policy_paths(&home);
         let policy: serde_json::Value =
@@ -3944,8 +4012,16 @@ wire_api = "responses"
         == &format!(
             "agents.max_concurrent_threads_per_session={DEFAULT_SUBAGENT_MAX_CONCURRENCY}"
         )));
-    assert!(applied.runtime_config_overrides.iter().all(|entry| !entry.starts_with("agents.default")));
-    for role in SUBAGENT_ROLE_IDS.into_iter().filter(|role| *role != SUBAGENT_ROLE_DEFAULT) {
+    assert!(
+        applied
+            .runtime_config_overrides
+            .iter()
+            .all(|entry| !entry.starts_with("agents.default"))
+    );
+    for role in SUBAGENT_ROLE_IDS
+        .into_iter()
+        .filter(|role| *role != SUBAGENT_ROLE_DEFAULT)
+    {
         for field in ["config_file", "description"] {
             let key = format!("agents.{role}.{field}");
             assert!(
@@ -4109,12 +4185,15 @@ wire_api = "responses"
             .join(CODEY_RUNTIME_DEFAULT_AGENT_FILE)
             .exists()
     );
-    for role in SUBAGENT_ROLE_IDS.into_iter().filter(|role| *role != SUBAGENT_ROLE_DEFAULT) {
+    for role in SUBAGENT_ROLE_IDS
+        .into_iter()
+        .filter(|role| *role != SUBAGENT_ROLE_DEFAULT)
+    {
         assert!(
-        constraints_dir
-            .join(CODEY_SUBAGENT_SOURCES_DIR)
-            .join(format!("{role}.toml"))
-            .exists(),
+            constraints_dir
+                .join(CODEY_SUBAGENT_SOURCES_DIR)
+                .join(format!("{role}.toml"))
+                .exists(),
             "missing editable source for {role}"
         );
         let runtime_path = runtime_agent_path(&constraints_dir, role);
@@ -4155,7 +4234,9 @@ wire_api = "responses"
     )
     .unwrap();
     fs::write(
-        constraints_dir.join(CODEY_SUBAGENT_SOURCES_DIR).join("codey_worker.toml"),
+        constraints_dir
+            .join(CODEY_SUBAGENT_SOURCES_DIR)
+            .join("codey_worker.toml"),
         r#"name = "codey_worker"
 description = "Custom editable subagent"
 developer_instructions = "CUSTOM SUBAGENT CONSTRAINT"
@@ -4200,8 +4281,11 @@ developer_instructions = "CUSTOM SUBAGENT CONSTRAINT"
         collaboration_override["features"]["multi_agent_v2"]["root_agent_usage_hint_text"].as_str(),
         Some("CUSTOM COLLABORATION HINT")
     );
-    let runtime_agent =
-        fs::read_to_string(runtime_agent_path(&constraints_dir, crate::config::SUBAGENT_ROLE_WORKER)).unwrap();
+    let runtime_agent = fs::read_to_string(runtime_agent_path(
+        &constraints_dir,
+        crate::config::SUBAGENT_ROLE_WORKER,
+    ))
+    .unwrap();
     assert!(runtime_agent.contains("CUSTOM SUBAGENT CONSTRAINT"));
     assert!(runtime_agent.contains("CUSTOM FASTCTX CONSTRAINT"));
     assert!(restore_runtime_config_at(&home, &marker, true).unwrap());

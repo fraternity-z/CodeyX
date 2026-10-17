@@ -248,15 +248,27 @@ impl RouterServer {
                             .as_ref()
                             .map(|auth| auth.path.clone())
                             .unwrap_or_else(|| self.official_auth_path.clone());
-                        match self.egress.proxy_for_profile(&route.profile_id, route.upstream_proxy.as_deref(), route.plugin_transport.is_some()).await {
-                        Ok(proxy) => crate::account_usage::query_shared_snapshot_at(
-                            &self.account_usage_cache,
-                            &auth_path,
-                            args.force_refresh.unwrap_or(false),
-                            proxy.as_deref(),
-                        )
-                        .await,
-                        Err(message) => json!({"status":"error", "reason":"proxy_unavailable", "message":message}),
+                        match self
+                            .egress
+                            .proxy_for_profile(
+                                &route.profile_id,
+                                route.upstream_proxy.as_deref(),
+                                route.plugin_transport.is_some(),
+                            )
+                            .await
+                        {
+                            Ok(proxy) => {
+                                crate::account_usage::query_shared_snapshot_at(
+                                    &self.account_usage_cache,
+                                    &auth_path,
+                                    args.force_refresh.unwrap_or(false),
+                                    proxy.as_deref(),
+                                )
+                                .await
+                            }
+                            Err(message) => {
+                                json!({"status":"error", "reason":"proxy_unavailable", "message":message})
+                            }
                         }
                     }
                 };
@@ -852,10 +864,15 @@ impl RouterServer {
         &self,
         request: &HttpRequest,
         route: &RouteTarget,
-    ) -> std::result::Result<(HeaderMap, crate::network_proxy::egress::PreparedClient), (u16, &'static str, String)> {
+    ) -> std::result::Result<
+        (HeaderMap, crate::network_proxy::egress::PreparedClient),
+        (u16, &'static str, String),
+    > {
         // Pin one egress lease before auth refresh or any plugin network work.
         // The caller retains it through the whole response, including SSE.
-        let client = self.upstream_client(route).await
+        let client = self
+            .upstream_client(route)
+            .await
             .map_err(|message| (502, "proxy_unavailable", message))?;
         let prepared_headers = route
             .upstream_headers
@@ -903,7 +920,11 @@ impl RouterServer {
                     &self.siwc_auth_cache,
                     &self.client,
                     &self.proxied_clients,
-                    client.proxy.uses_pool().then(|| client.proxy.as_deref()).flatten(),
+                    client
+                        .proxy
+                        .uses_pool()
+                        .then(|| client.proxy.as_deref())
+                        .flatten(),
                 )
                 .await
                 .map_err(|error| (401, "siwc_auth_unavailable", format!("{error:#}")))?;
