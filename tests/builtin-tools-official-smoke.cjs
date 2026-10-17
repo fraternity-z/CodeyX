@@ -7,11 +7,12 @@ const { setTimeout: delay } = require("node:timers/promises");
 const root = process.argv[2];
 const project = path.join(path.dirname(root), "中文 automatic project");
 const other = path.join(path.dirname(root), "second project");
+const codexHome = path.join(path.dirname(root), "codex-home");
 const clients = [];
 
 function connect(cwd) {
   const child = spawn(process.execPath, ["--liftoff-only", "--disable-warning=ExperimentalWarning", path.join(root, "auto-mcp-v1.cjs"), path.join(root, "v1.6.2/lib/dist/bin/codegraph.js")], {
-    cwd, windowsHide: true, env: { ...process.env, CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: "300" }, stdio: ["pipe", "pipe", "pipe"],
+    cwd, windowsHide: true, env: { ...process.env, CODEX_HOME: codexHome, CODEGRAPH_DAEMON_IDLE_TIMEOUT_MS: "300" }, stdio: ["pipe", "pipe", "pipe"],
   });
   clients.push(child);
   child.stderr.resume();
@@ -60,6 +61,8 @@ async function ready(project) {
 (async () => {
   try {
     for (const directory of [project, other]) fs.mkdirSync(directory);
+    fs.mkdirSync(codexHome);
+    fs.writeFileSync(path.join(codexHome, ".codex-global-state.json"), JSON.stringify({ "local-projects": { p: { rootPaths: [project] }, q: { rootPaths: [other] } } }));
     fs.writeFileSync(path.join(project, "main.ts"), "export function greet(name: string) { return name; }\nexport function main() { return greet('world'); }\n");
     fs.writeFileSync(path.join(other, "other.ts"), "export function otherProjectOnly() { return 42; }\n");
     const first = connect(project);

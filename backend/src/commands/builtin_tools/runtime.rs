@@ -32,7 +32,7 @@ pub(super) fn mcp_config(root: &Path) -> Value {
     json!({
         "command": executable(root),
         "args": ["--liftoff-only", "--disable-warning=ExperimentalWarning", root.join("auto-mcp-v1.cjs"), entry(root)],
-        "env": {"CODEGRAPH_TELEMETRY":"0", "DO_NOT_TRACK":"1", "NODE_OPTIONS":"", "NODE_PATH":""},
+        "env": {"CODEX_HOME":crate::codex_config::codex_home(), "CODEGRAPH_TELEMETRY":"0", "DO_NOT_TRACK":"1", "NODE_OPTIONS":"", "NODE_PATH":""},
         "startup_timeout_sec": 60, "tool_timeout_sec": 120, "enabled": true
     })
 }
@@ -510,7 +510,9 @@ mod tests {
         let inventory = service
             .inventory(&codey_codex_extensions::Scope::User)
             .unwrap();
-        let saved = service.dispatch(json!({"action":"save_mcp", "id":"codey_codegraph", "configJson":mcp_config(&root), "createOnly":true, "confirmed":true, "revision":inventory["revision"]})).unwrap();
+        let mut config = mcp_config(&root);
+        config["env"]["CODEX_HOME"] = json!(home);
+        let saved = service.dispatch(json!({"action":"save_mcp", "id":"codey_codegraph", "configJson":config, "createOnly":true, "confirmed":true, "revision":inventory["revision"]})).unwrap();
         let probe = crate::codex_extensions::dispatch(home, data, temp.path().to_path_buf(), json!({"action":"test_mcp", "id":"codey_codegraph", "confirmed":true, "revision":saved["inventory"]["revision"]})).await.unwrap();
         assert_eq!(probe["ok"], true, "{probe}");
         let child = project.join("child");

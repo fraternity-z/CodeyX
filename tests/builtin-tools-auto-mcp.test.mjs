@@ -22,7 +22,13 @@ function fixture(t) {
   const project = path.join(root, "中文 project with spaces");
   fs.mkdirSync(project);
   fs.writeFileSync(path.join(project, "source.ts"), "export function original() {}\n");
-  return { root, project };
+  const home = path.join(root, "home");
+  const codexHome = path.join(home, ".codex");
+  fs.mkdirSync(codexHome, { recursive: true });
+  const statePath = path.join(codexHome, ".codex-global-state.json");
+  const saveProjects = roots => fs.writeFileSync(statePath, JSON.stringify({ "local-projects": { saved: { rootPaths: roots } } }));
+  saveProjects([project]);
+  return { root, project, home, codexHome, statePath, saveProjects };
 }
 
 async function until(check) {
@@ -48,7 +54,8 @@ function session(t, root, project) {
     }
   });
   const server = launcher.start({ entry: fileURLToPath(new URL("./fixtures/codegraph-runtime.cjs", import.meta.url)),
-    root, cwd: project, input, output, tools: [{ name: "codegraph_explore", inputSchema: { type: "object" } }] });
+    root, cwd: project, home: path.join(root, "home"), codexHome: path.join(root, "home", ".codex"),
+    input, output, tools: [{ name: "codegraph_explore", inputSchema: { type: "object" } }] });
   sessions.get(root).push(() => { server.stop(); input.destroy(); output.destroy(); });
   const send = (id, method, params = {}) => input.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
   const response = id => until(() => messages.find(message => message.id === id));
@@ -60,11 +67,91 @@ function records(root) {
   return fs.existsSync(directory) ? fs.readdirSync(directory).filter(file => file.endsWith(".json")).map(file => JSON.parse(fs.readFileSync(path.join(directory, file)))) : [];
 }
 
-test("project selection rejects roots, home, relative and missing paths", t => {
-  const { root, project } = fixture(t);
-  assert.equal(launcher.projectPath(project), fs.realpathSync(project));
-  for (const candidate of ["relative", path.parse(root).root, os.homedir(), path.join(root, "missing")]) assert.throws(() => launcher.projectPath(candidate));
-  assert.throws(() => launcher.projectPath(root, os.homedir(), root));
+test("project selection only accepts saved workspace roots and resolves nested directories", t => {
+  const { root, project, home, codexHome, saveProjects } = fixture(t);
+  const nested = path.join(project, "nested");
+  const sibling = `${project}-other`;
+  fs.mkdirSync(nested);
+  fs.mkdirSync(sibling);
+  const select = candidate => launcher.projectPath(candidate, home, codexHome);
+  assert.equal(select(project), fs.realpathSync(project));
+  assert.equal(select(nested), fs.realpathSync(project));
+  assert.equal(select(sibling), null);
+  for (const candidate of ["relative", path.join(root, "missing"), path.join(project, "source.ts")]) assert.throws(() => select(candidate), /目录无效/);
+  saveProjects([path.parse(root).root, home, codexHome, project, nested, null, "relative", path.join(root, "missing")]);
+  for (const candidate of [path.parse(root).root, home, codexHome]) assert.equal(select(candidate), null);
+  assert.equal(select(nested), fs.realpathSync(nested));
+  if (process.platform === "win32") assert.equal(select(project.toUpperCase()), fs.realpathSync(project));
+});
+
+test("custom Codex home and directory aliases use the same saved project scope", t => {
+  const { root, project, home, codexHome, statePath } = fixture(t);
+  const customHome = path.join(root, "custom codex");
+  const alias = path.join(root, "project alias");
+  fs.mkdirSync(customHome);
+  fs.symlinkSync(project, alias, process.platform === "win32" ? "junction" : "dir");
+  fs.writeFileSync(path.join(customHome, ".codex-global-state.json"), JSON.stringify({ "local-projects": { p: { rootPaths: [alias, customHome, codexHome] } } }));
+  fs.unlinkSync(statePath);
+  assert.equal(launcher.projectPath(project, home, codexHome), null);
+  assert.equal(launcher.projectPath(alias, home, customHome), fs.realpathSync(project));
+  assert.equal(launcher.projectPath(customHome, home, customHome), null);
+  assert.equal(launcher.projectPath(codexHome, home, customHome), null);
+});
+
+test("legacy workspace roots are used only when the current project list is absent", t => {
+  const { project, home, codexHome, statePath } = fixture(t);
+  fs.writeFileSync(statePath, JSON.stringify({ "electron-saved-workspace-roots": [project] }));
+  assert.equal(launcher.projectPath(project, home, codexHome), fs.realpathSync(project));
+  fs.writeFileSync(statePath, JSON.stringify({ "local-projects": {}, "electron-saved-workspace-roots": [project] }));
+  assert.equal(launcher.projectPath(project, home, codexHome), null);
+});
+
+test("missing, malformed and oversized workspace state cannot authorize indexing", t => {
+  const { project, home, codexHome, statePath } = fixture(t);
+  fs.unlinkSync(statePath);
+  assert.equal(launcher.projectPath(project, home, codexHome), null);
+  for (const state of ["{private-state", "null", "[]", '{"local-projects":null}', '{"local-projects":[]}', '{"electron-saved-workspace-roots":{}}', '{"electron-saved-workspace-roots":null}', " ".repeat(16 * 1024 * 1024 + 1)]) {
+    fs.writeFileSync(statePath, state);
+    assert.throws(() => launcher.projectPath(project, home, codexHome), error => /工作区项目清单/.test(error.message) && !error.message.includes("private-state"));
+  }
+});
+
+test("ordinary chats and Codex directories expose no tools, preserve old indexes and create no failure record", async t => {
+  const { root, home, codexHome } = fixture(t);
+  const documents = path.join(home, "Documents", "Codex", "2026-10-17", "chat");
+  const installation = path.join(home, "AppData", "Local", "Programs", "Codex");
+  for (const candidate of [documents, installation, codexHome]) {
+    fs.mkdirSync(candidate, { recursive: true });
+    if (candidate === documents) {
+      fs.mkdirSync(path.join(candidate, ".codegraph"));
+      fs.writeFileSync(path.join(candidate, ".codegraph", "codegraph.db"), "existing index");
+    }
+    const client = session(t, root, candidate);
+    client.send(1, "initialize");
+    client.send(2, "tools/list");
+    client.send(3, "tools/call", { name: "codegraph_explore" });
+    assert.deepEqual((await client.response(2)).result.tools, []);
+    assert.match((await client.response(3)).result.content[0].text, /仅在工作区已添加/);
+    assert.equal(fs.existsSync(path.join(candidate, ".codegraph")), candidate === documents);
+    assert.equal(fs.existsSync(path.join(candidate, "calls.jsonl")), false);
+  }
+  assert.equal(fs.readFileSync(path.join(documents, ".codegraph", "codegraph.db"), "utf8"), "existing index");
+  assert.deepEqual(records(root), []);
+});
+
+test("an unreadable workspace state keeps MCP responsive without starting a runtime", async t => {
+  const { root, project, statePath } = fixture(t);
+  fs.writeFileSync(statePath, "{private-state");
+  const client = session(t, root, project);
+  client.send(1, "initialize");
+  client.send(2, "tools/list");
+  client.send(3, "tools/call", { name: "codegraph_explore" });
+  assert.deepEqual((await client.response(2)).result.tools, []);
+  const result = (await client.response(3)).result;
+  assert.match(result.content[0].text, /已暂停自动索引/);
+  assert.doesNotMatch(JSON.stringify(result), /private-state/);
+  assert.equal(fs.existsSync(path.join(project, ".codegraph")), false);
+  assert.deepEqual(records(root), []);
 });
 
 test("managed environment does not inherit routing or watcher overrides", () => {
@@ -115,6 +202,20 @@ test("existing project launches retain the index and use the official watcher", 
   assert.equal(fs.readFileSync(path.join(project, ".codegraph", "codegraph.db"), "utf8"), "existing");
 });
 
+test("explicit tool paths cannot escape saved projects", async t => {
+  const { root, project } = fixture(t);
+  const nested = path.join(project, "nested");
+  fs.mkdirSync(nested);
+  const client = session(t, root, nested);
+  client.send(1, "initialize");
+  await until(() => records(root).some(record => record.phase === "watching"));
+  client.send(2, "tools/call", { name: "codegraph_explore", arguments: { projectPath: root } });
+  assert.equal((await client.response(2)).result.isError, true);
+  client.send(3, "tools/call", { name: "codegraph_explore", arguments: { projectPath: nested } });
+  assert.equal((await client.response(3)).result.project, fs.realpathSync(project));
+  assert.equal(fs.existsSync(path.join(nested, ".codegraph")), false);
+});
+
 test("two new chats initialize a project only once", async t => {
   const { root, project } = fixture(t);
   const first = session(t, root, project);
@@ -163,10 +264,11 @@ test("linked index directories are preserved instead of indexing outside the cha
 });
 
 test("separate project chats remain isolated when one initialization fails", async t => {
-  const { root, project } = fixture(t);
+  const { root, project, saveProjects } = fixture(t);
   const other = path.join(root, "another project");
   fs.mkdirSync(other);
   fs.writeFileSync(path.join(other, "source.ts"), "export const separateProject = true;");
+  saveProjects([project, other]);
   fs.writeFileSync(path.join(project, "fail"), "");
   const first = session(t, root, project);
   const second = session(t, root, other);

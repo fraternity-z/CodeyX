@@ -52,7 +52,7 @@ export function BuiltinToolsPage({ active, config, fastContextToolsStatus, isBus
               aria-label="启用 CodeGraph 自动索引" onCheckedChange={enabled => void setEnabled(enabled)} />
           </div>
           <div className="feature-card-body flex flex-col gap-3">
-            <p className="m-0 text-xs leading-relaxed">理解符号、调用链与模块依赖。启用后，在项目中聊天时自动后台建立索引，并持续同步代码变化。</p>
+            <p className="m-0 text-xs leading-relaxed">理解符号、调用链与模块依赖。启用后，仅在工作区已添加的本地项目中聊天时自动建立索引，并持续同步代码变化。</p>
             {status?.mcp.id && <small>{status.mcp.managed ? "CodeyX 管理的 MCP" : `已配置的 MCP：${status.mcp.id}`} · {status.mcp.enabled ? "已启用" : "已停用"}</small>}
             {userManaged && <small>已检测到你配置的 CodeGraph。请在 MCP 管理中使用或调整，内置版本不会重复接入。</small>}
             {status?.mcp.managed && !status.mcp.automatic && <small>开启自动索引后，已有接入将升级为随聊天项目自动运行。</small>}

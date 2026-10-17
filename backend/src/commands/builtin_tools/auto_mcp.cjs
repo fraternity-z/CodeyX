@@ -1,4 +1,4 @@
-// MCP 启动钩子：cwd 由 Codex 的会话启动器提供，配置中不固定项目路径。
+// MCP 启动钩子：仅接入 Codex 工作区已添加的本地项目，cwd 只用于匹配项目根目录。
 // 握手与建库分离；查询就绪后转发到官方 MCP，持续同步由其共享 daemon 负责。
 const fs = require("node:fs");
 const path = require("node:path");
@@ -11,14 +11,47 @@ const MAX_LINE = 8 * 1024 * 1024;
 const FLAGS = ["--liftoff-only", "--disable-warning=ExperimentalWarning"];
 class SetupError extends Error {}
 
-function projectPath(cwd, home = os.homedir(), codexHome = process.env.CODEX_HOME) {
-  if (!path.isAbsolute(cwd)) throw new SetupError("聊天项目目录无效");
-  const project = fs.realpathSync(cwd);
-  const same = candidate => candidate && fs.existsSync(candidate) && fs.realpathSync(candidate) === project;
-  if (!fs.statSync(project).isDirectory() || project === path.parse(project).root || same(home) || same(codexHome)) {
-    throw new SetupError("等待在具体项目中开始聊天；不会索引磁盘根目录或用户目录");
+function directory(candidate) {
+  if (typeof candidate !== "string" || !path.isAbsolute(candidate)) return null;
+  try { return fs.statSync(candidate).isDirectory() ? fs.realpathSync(candidate) : null; } catch { return null; }
+}
+
+function workspaceRoots(home, codexHome) {
+  let state;
+  try {
+    const location = path.join(codexHome, ".codex-global-state.json");
+    const metadata = fs.lstatSync(location);
+    if (!metadata.isFile() || metadata.size > 16 * 1024 * 1024) throw new Error();
+    const bytes = fs.readFileSync(location);
+    if (bytes.length > 16 * 1024 * 1024) throw new Error();
+    state = JSON.parse(bytes.toString("utf8"));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw new SetupError("无法读取 Codex 工作区项目清单，已暂停自动索引");
   }
-  return project;
+  if (!state || typeof state !== "object" || Array.isArray(state)) throw new SetupError("Codex 工作区项目清单格式无效，已暂停自动索引");
+  let candidates;
+  // 新版项目清单优先，不能用旧缓存重新纳入已移除的项目。
+  if (Object.hasOwn(state, "local-projects")) {
+    const projects = state["local-projects"];
+    if (!projects || typeof projects !== "object" || Array.isArray(projects)) throw new SetupError("Codex 工作区项目清单格式无效，已暂停自动索引");
+    candidates = Object.values(projects).flatMap(project => Array.isArray(project?.rootPaths) ? project.rootPaths : []);
+  } else {
+    candidates = Object.hasOwn(state, "electron-saved-workspace-roots") ? state["electron-saved-workspace-roots"] : [];
+    if (!Array.isArray(candidates)) throw new SetupError("Codex 工作区项目清单格式无效，已暂停自动索引");
+  }
+  const excluded = [home, path.join(home, ".codex"), codexHome].map(directory).filter(Boolean);
+  return [...new Set(candidates.map(directory).filter(candidate => candidate
+    && candidate !== path.parse(candidate).root && !excluded.some(root => path.relative(root, candidate) === "")))];
+}
+
+function projectPath(cwd, home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, ".codex")) {
+  const current = directory(cwd);
+  if (!current) throw new SetupError("聊天项目目录无效");
+  return workspaceRoots(home, codexHome).filter(root => {
+    const relative = path.relative(root, current);
+    return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  }).sort((a, b) => b.length - a.length)[0] ?? null;
 }
 
 function needsIndex(status) {
@@ -149,7 +182,7 @@ function lines(stream, consume, fail) {
   });
 }
 
-function start({ entry, root, cwd = process.cwd(), input = process.stdin, output = process.stdout, tools, protocolVersion = "2024-11-05" }) {
+function start({ entry, root, cwd = process.cwd(), home = os.homedir(), codexHome = process.env.CODEX_HOME || path.join(home, ".codex"), input = process.stdin, output = process.stdout, tools, protocolVersion = "2024-11-05" }) {
   const controller = new AbortController();
   const children = new Set();
   const pending = new Set();
@@ -214,7 +247,11 @@ function start({ entry, root, cwd = process.cwd(), input = process.stdin, output
   });
   async function activate(params) {
     try {
-      project = projectPath(cwd);
+      project = projectPath(cwd, home, codexHome);
+      if (!project) {
+        message = "CodeGraph 仅在工作区已添加的本地项目中启用；当前聊天目录未接入自动索引。";
+        return;
+      }
       await prepareProject({ project, run, signal: controller.signal, record });
       if (stopped) return;
       backend = launch(["serve", "--mcp", "--path", project]);
@@ -249,9 +286,9 @@ function start({ entry, root, cwd = process.cwd(), input = process.stdin, output
     if (method === "initialize") {
       clearTimeout(initialTimeout);
       result(id, { protocolVersion, serverInfo: { name: "codey-codegraph", version: "1" }, capabilities: { tools: {} },
-        instructions: "CodeGraph 自动管理当前聊天项目的本地索引。首次建库在后台进行；若工具提示索引准备中，先使用其他文件工具，稍后重试，不要要求用户输入目录或运行命令。" });
+        instructions: "CodeGraph 仅自动管理工作区已添加的本地项目索引，普通聊天目录不启用。首次建库在后台进行；若工具提示索引准备中，先使用其他文件工具，稍后重试，不要要求用户输入目录或运行命令。" });
       if (!initialized) { initialized = true; void activate(params); }
-    } else if (method === "tools/list") result(id, { tools });
+    } else if (method === "tools/list") result(id, { tools: project ? tools : [] });
     else if (method === "ping") result(id, {});
     else if (method === "resources/list") result(id, { resources: [] });
     else if (method === "resources/templates/list") result(id, { resourceTemplates: [] });
@@ -259,7 +296,16 @@ function start({ entry, root, cwd = process.cwd(), input = process.stdin, output
     else if (method === "tools/call") {
       if (!ready) failure(id, message);
       else if (pending.size >= 32) failure(id, "CodeGraph 查询较多，请稍后重试。");
-      else { pending.add(id); backend.stdin.write(`${JSON.stringify(request)}\n`); }
+      else {
+        if (params?.arguments?.projectPath !== undefined) {
+          try {
+            const target = projectPath(params.arguments.projectPath, home, codexHome);
+            if (!target) throw new SetupError("CodeGraph 仅支持工作区已添加的本地项目");
+            params.arguments.projectPath = target;
+          } catch (error) { failure(id, error.message); return; }
+        }
+        pending.add(id); backend.stdin.write(`${JSON.stringify(request)}\n`);
+      }
     } else if (method === "notifications/cancelled") {
       pending.delete(params?.requestId);
       if (ready) backend.stdin.write(`${JSON.stringify(request)}\n`);

@@ -5,6 +5,7 @@ use super::{AppState, argument, string_argument};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use std::{
+    collections::BTreeMap,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -35,13 +36,75 @@ fn root(state: &AppState) -> Result<PathBuf> {
         .join("builtin-tools/codegraph"))
 }
 
-// 每个项目单独原子写入，多个聊天不会互相覆盖最近项目记录。
-fn projects(root: &Path) -> Result<Vec<Value>> {
+fn canonical_directory(path: &Path) -> Option<PathBuf> {
+    (path.is_absolute() && path.is_dir())
+        .then(|| path.canonicalize().ok())
+        .flatten()
+}
+
+fn workspace_roots(home: &Path, codex_home: &Path) -> Result<Vec<PathBuf>> {
+    let location = codex_home.join(".codex-global-state.json");
+    if !location
+        .try_exists()
+        .context("无法读取 Codex 工作区项目清单")?
+    {
+        return Ok(Vec::new());
+    }
+    let bytes = crate::fs_util::read_bounded(&location, 16 * 1024 * 1024)
+        .context("无法读取 Codex 工作区项目清单")?;
+    // 忽略无关状态中的孤立 UTF-16 代理字符，与 Codex 全局状态读取约定一致。
+    let state: BTreeMap<String, Box<serde_json::value::RawValue>> = serde_json::from_slice(&bytes)
+        .map_err(|_| anyhow::anyhow!("Codex 工作区项目清单格式无效"))?;
+    let mut candidates = Vec::new();
+    if let Some(projects) = state.get("local-projects") {
+        let projects: Value =
+            serde_json::from_str(projects.get()).context("Codex 工作区项目清单格式无效")?;
+        for project in projects
+            .as_object()
+            .context("Codex 工作区项目清单格式无效")?
+            .values()
+        {
+            if let Some(roots) = project["rootPaths"].as_array() {
+                candidates.extend(roots.iter().filter_map(Value::as_str).map(PathBuf::from));
+            }
+        }
+    } else if let Some(roots) = state.get("electron-saved-workspace-roots") {
+        let roots: Value =
+            serde_json::from_str(roots.get()).context("Codex 工作区项目清单格式无效")?;
+        candidates.extend(
+            roots
+                .as_array()
+                .context("Codex 工作区项目清单格式无效")?
+                .iter()
+                .filter_map(Value::as_str)
+                .map(PathBuf::from),
+        );
+    }
+    let default_home = home.join(".codex");
+    let excluded: Vec<_> = [home, codex_home, default_home.as_path()]
+        .into_iter()
+        .filter_map(canonical_directory)
+        .collect();
+    let mut roots = Vec::new();
+    for path in candidates
+        .iter()
+        .filter_map(|path| canonical_directory(path))
+    {
+        if path.parent().is_some() && !excluded.contains(&path) && !roots.contains(&path) {
+            roots.push(path);
+        }
+    }
+    Ok(roots)
+}
+
+// 每个项目单独原子写入；展示时核对当前工作区，保留磁盘上的历史记录和索引。
+fn projects(root: &Path, home: &Path, codex_home: &Path) -> Result<Vec<Value>> {
     let entries = match std::fs::read_dir(root.join("projects")) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => return Err(error).context("无法读取 CodeGraph 项目状态"),
     };
+    let allowed = workspace_roots(home, codex_home)?;
     let mut records = Vec::new();
     for entry in entries.take(1000) {
         let entry = entry?;
@@ -56,7 +119,10 @@ fn projects(root: &Path) -> Result<Vec<Value>> {
         let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
             continue;
         };
-        if record["projectPath"].is_string()
+        if record["projectPath"]
+            .as_str()
+            .and_then(|path| canonical_directory(Path::new(path)))
+            .is_some_and(|path| allowed.contains(&path))
             && record["updatedAt"].is_u64()
             && matches!(
                 record["phase"].as_str(),
@@ -126,7 +192,11 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     let root = root(state)?;
     let (mcp, _) = mcp_status(state).await?;
     let installed = runtime::installed(&root);
-    let projects = tokio::task::spawn_blocking(move || projects(&root)).await??;
+    let projects = tokio::task::spawn_blocking(move || {
+        let user = directories::BaseDirs::new().context("无法确定当前用户目录")?;
+        projects(&root, user.home_dir(), crate::codex_config::codex_home())
+    })
+    .await??;
     Ok(
         json!({"installed":installed,"version":runtime::VERSION,"projects":projects,"mcp":mcp,
         "job":state.builtin_tools.job.lock().await.clone()}),
@@ -152,6 +222,14 @@ async fn enable(state: &Arc<AppState>) -> Result<String> {
             "CodeGraph 配置已被修改，请刷新后重试"
         );
         config["args"] = runtime::mcp_config(&root)["args"].clone();
+        if config["env"].is_null() {
+            config["env"] = json!({});
+        }
+        config["env"]
+            .as_object_mut()
+            .context("CodeGraph 环境配置无效，请检查 MCP 配置")?
+            .entry("CODEX_HOME")
+            .or_insert_with(|| json!(crate::codex_config::codex_home()));
         config["enabled"] = json!(true);
         config
     } else {
@@ -249,6 +327,10 @@ mod tests {
         let mut config = runtime::mcp_config(dir.path());
         assert!(is_managed(SERVER_ID, &config, dir.path()));
         assert!(config.get("cwd").is_none());
+        assert_eq!(
+            config["env"]["CODEX_HOME"],
+            json!(crate::codex_config::codex_home())
+        );
         config["args"] = runtime::legacy_mcp_args(dir.path());
         assert!(is_managed(SERVER_ID, &config, dir.path()));
         assert!(!is_managed("user", &config, dir.path()));
@@ -263,23 +345,129 @@ mod tests {
     #[test]
     fn project_records_are_sorted_bounded_and_tolerate_one_damaged_record() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(projects(dir.path()).unwrap().is_empty());
+        let home = dir.path().join("home");
+        let codex_home = home.join(".codex");
+        std::fs::create_dir_all(&codex_home).unwrap();
+        assert!(projects(dir.path(), &home, &codex_home).unwrap().is_empty());
         let records = dir.path().join("projects");
         std::fs::create_dir(&records).unwrap();
+        let mut roots = Vec::new();
         for index in 0..12 {
+            let project = dir.path().join(format!("project-{index}"));
+            std::fs::create_dir(&project).unwrap();
             std::fs::write(
                 records.join(format!("{index}.json")),
                 serde_json::to_vec(&json!({
-                    "projectPath":format!("project-{index}"),"updatedAt":index,"phase":"watching"
+                    "projectPath":project,"updatedAt":index,"phase":"watching"
                 }))
                 .unwrap(),
             )
             .unwrap();
+            roots.push(project);
         }
+        let state_path = codex_home.join(".codex-global-state.json");
+        std::fs::write(
+            &state_path,
+            json!({"local-projects":{"p":{"rootPaths":roots}}}).to_string(),
+        )
+        .unwrap();
         std::fs::write(records.join("broken.json"), b"{").unwrap();
-        let list = projects(dir.path()).unwrap();
+        // 旧版误收录的聊天目录不能占用最近项目名额，即使已有索引。
+        for (index, path) in [
+            codex_home.clone(),
+            home.join("Documents/Codex/chat"),
+            home.join("AppData/Local/Programs/Codex"),
+        ]
+        .iter()
+        .enumerate()
+        {
+            std::fs::create_dir_all(path.join(".codegraph")).unwrap();
+            std::fs::write(
+                records.join(format!("unlisted-{index}.json")),
+                json!({"projectPath":path,"updatedAt":100 + index,"phase":"failed"}).to_string(),
+            )
+            .unwrap();
+        }
+        let list = projects(dir.path(), &home, &codex_home).unwrap();
         assert_eq!(list.len(), 10);
-        assert_eq!(list[0]["projectPath"], "project-11");
+        assert_eq!(list[0]["projectPath"], json!(roots[11]));
+        roots.pop();
+        std::fs::write(
+            &state_path,
+            json!({"local-projects":{"p":{"rootPaths":roots}}}).to_string(),
+        )
+        .unwrap();
+        let list = projects(dir.path(), &home, &codex_home).unwrap();
+        assert_eq!(list[0]["projectPath"], json!(roots[10]));
+        assert!(records.join("11.json").is_file());
+        assert!(codex_home.join(".codegraph").is_dir());
+    }
+
+    #[test]
+    fn workspace_roots_use_saved_projects_and_exclude_special_directories() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("home");
+        let default_home = home.join(".codex");
+        let codex_home = dir.path().join("custom-codex");
+        let project = dir.path().join("中文 project");
+        let other = dir.path().join("other");
+        for path in [&default_home, &codex_home, &project, &other] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        let disk = dir.path().ancestors().last().unwrap();
+        let state = json!({"local-projects":{
+            "p":{"rootPaths":[project,other,project,home,codex_home,default_home,disk,"relative",null,dir.path().join("missing")]},
+            "invalid":{"rootPaths":"relative"}
+        },"electron-saved-workspace-roots":[dir.path()]});
+        let state_path = codex_home.join(".codex-global-state.json");
+        std::fs::write(&state_path, state.to_string()).unwrap();
+        assert_eq!(
+            workspace_roots(&home, &codex_home).unwrap(),
+            vec![
+                project.canonicalize().unwrap(),
+                other.canonicalize().unwrap()
+            ]
+        );
+        std::fs::write(
+            &state_path,
+            json!({"electron-saved-workspace-roots":[project]}).to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            workspace_roots(&home, &codex_home).unwrap(),
+            vec![project.canonicalize().unwrap()]
+        );
+        std::fs::write(
+            &state_path,
+            json!({"local-projects":{},"electron-saved-workspace-roots":[project]}).to_string(),
+        )
+        .unwrap();
+        assert!(workspace_roots(&home, &codex_home).unwrap().is_empty());
+        std::fs::write(&state_path, r#"{"local-projects":{},"unrelated":"\ud800"}"#).unwrap();
+        assert!(workspace_roots(&home, &codex_home).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_or_invalid_workspace_state_never_authorizes_projects() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(workspace_roots(dir.path(), dir.path()).unwrap().is_empty());
+        let location = dir.path().join(".codex-global-state.json");
+        for contents in [
+            "{",
+            "null",
+            "[]",
+            r#""private-state""#,
+            r#"{"local-projects":null}"#,
+            r#"{"local-projects":[]}"#,
+            r#"{"electron-saved-workspace-roots":{}}"#,
+            r#"{"electron-saved-workspace-roots":null}"#,
+        ] {
+            std::fs::write(&location, contents).unwrap();
+            let error = workspace_roots(dir.path(), dir.path()).unwrap_err();
+            assert!(!format!("{error:#}").contains("private-state"));
+        }
+        std::fs::write(&location, vec![b' '; 16 * 1024 * 1024 + 1]).unwrap();
+        assert!(workspace_roots(dir.path(), dir.path()).is_err());
     }
 
     #[tokio::test]
