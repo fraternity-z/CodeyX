@@ -18,11 +18,7 @@ test("route editor offers the native Gemini protocol and its connection hints", 
 
 test("third-party native Web Search is an explicit Responses-only capability", () => {
   assert.match(typeSource, /supportsNativeWebSearch\?: boolean/);
-  assert.match(modelSectionSource, /supportsNativeWebSearch: false/);
-  assert.match(
-    modelSectionSource,
-    /upstreamProtocol === "openaiResponses"[\s\S]*?supportsNativeWebSearch:[\s\S]*?: false/,
-  );
+  assert.match(modelSectionSource, /routeProtocolPatch\(routeDraft, value\)/);
   assert.match(
     modelSectionSource,
     /checked=\{Boolean\(routeDraft\.supportsNativeWebSearch\)\}/,
@@ -92,6 +88,6 @@ test("official account panel is only mounted while the local router is on", () =
   );
   assert.match(
     modelSectionSource,
-    /if \(!routeConfigReadOnly\) return;\s*void refreshOfficialAccounts\(\);/,
+    /useRoutePanelController\(\{\s*active, readOnly: routeConfigReadOnly/,
   );
 });

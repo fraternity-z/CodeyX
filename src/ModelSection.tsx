@@ -61,11 +61,8 @@ import {
   MAX_ROUTE_SHORT_NAME_CHARACTERS,
   fallbackRouteShortName,
   prefixedRouteName,
-  validateThirdPartyRouteShortName,
 } from "./routeShortNames";
-import { validateOutboundApiUrl, validateOutboundProxyUrl } from "./urlValidation";
-import { invoke } from "./api";
-import { listOfficialAccounts, rememberOfficialAccounts } from "./officialAccountsRequests";
+import { createRouteDraft, routeProtocolPatch, useRoutePanelController, validateRouteDraft } from "./features/routes";
 import { readHostTheme } from "./overlayTheme";
 import { getRouteCompactionStatus } from "./remoteCompactionStatus";
 
@@ -124,37 +121,6 @@ type RouteModelGroup = {
   official: boolean;
 };
 
-function createRoute(): Profile {
-  const id = `route-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-  return {
-    id,
-    enabled: true,
-    name: "",
-    shortName: "",
-    baseUrl: "",
-    apiKey: "",
-    upstreamProtocol: "openaiResponses",
-    authMode: "apiKey",
-    apiKeyConfigured: false,
-    modelRequestHeaders: {},
-    upstreamProxy: "",
-    clearApiKey: false,
-    officialAccount: false,
-    supportsRemoteCompaction: false,
-    remoteCompactionProtocol: "responses",
-    supportsWebsockets: false,
-    supportsNativeWebSearch: false,
-  };
-}
-
-type RouteDraftErrors = {
-  name: string;
-  shortName: string;
-  baseUrl: string;
-  apiKey: string;
-  upstreamProxy: string;
-};
-
 // 官方线路的编辑入口只改线路名、短名称、网关和代理，模型列举交给同步入口。
 type OfficialRouteDialogScope = "settings" | "models";
 
@@ -180,30 +146,6 @@ const UPSTREAM_PROXY_TOOLTIP_CONTENT = (
     </div>
   </div>
 );
-
-function validateRouteDraft(route: Profile, profiles: readonly Profile[]): RouteDraftErrors {
-  if (route.authMode === "officialAccount") {
-    return {
-      name: "",
-      shortName: "",
-      baseUrl: "",
-      apiKey: "",
-      upstreamProxy: validateOutboundProxyUrl(route.upstreamProxy || ""),
-    };
-  }
-  const errors: RouteDraftErrors = {
-    name: Array.from(route.name.trim()).length > MAX_ROUTE_NAME_CHARACTERS
-        ? `线路名最多 ${MAX_ROUTE_NAME_CHARACTERS} 个字符`
-        : "",
-    shortName: validateThirdPartyRouteShortName(route.shortName, profiles, route.id),
-    baseUrl: "",
-    apiKey: "",
-    upstreamProxy: validateOutboundProxyUrl(route.upstreamProxy || ""),
-  };
-  errors.baseUrl = validateOutboundApiUrl(route.baseUrl);
-  if (route.apiKey.trim() === "" && !route.apiKeyConfigured) errors.apiKey = "请输入 API Key";
-  return errors;
-}
 
 const routeProtocolOptions: Array<{
   label: string;
@@ -266,7 +208,6 @@ function ModelSectionComponent({
   const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
   const [officialModelContextDraft, setOfficialModelContextDraft] =
     useState<Record<string, ModelContextConfig>>({});
-  const [officialAccounts, setOfficialAccounts] = useState<OfficialAccount[] | null>(null);
   // 脱敏只作用于当前页面显示，每次进入页面默认关闭。
   const [maskSensitive, setMaskSensitive] = useState(false);
   const [officialRouteDraft, setOfficialRouteDraft] =
@@ -284,32 +225,10 @@ function ModelSectionComponent({
     setRouteApiKeyVisible(false);
   }, [routeConfigReadOnly]);
 
-  // 官方线路的线路名、短名称、网关和代理保存在所属账号记录里，保存入口在线路卡片上。
-  const refreshOfficialAccounts = useCallback(async () => {
-    try {
-      const result = await listOfficialAccounts();
-      setOfficialAccounts(result.accounts ?? []);
-    } catch {
-      setOfficialAccounts(null);
-    }
-  }, []);
-
-  const handleOfficialAccountsChanged = useCallback(
-    (result: OfficialAccountsResult) => {
-      if (Array.isArray(result.accounts)) {
-        rememberOfficialAccounts(result);
-        setOfficialAccounts(result.accounts);
-      }
-      onOfficialAccountsChanged(result);
-    },
-    [onOfficialAccountsChanged],
-  );
-
-  // 账号面板只在开启本地路由时挂载，只读模式下线路卡片仍要显示所属账号邮箱。
-  useEffect(() => {
-    if (!routeConfigReadOnly) return;
-    void refreshOfficialAccounts();
-  }, [refreshOfficialAccounts, routeConfigReadOnly]);
+  const { officialAccounts, refreshOfficialAccounts, adoptOfficialAccounts,
+    handleOfficialAccountsChanged, openRequestLogs } = useRoutePanelController({
+      active, readOnly: routeConfigReadOnly, onAccountsChanged: onOfficialAccountsChanged, onNotice,
+    });
 
   const defaultOfficialAccount = useMemo(
     () => officialAccounts?.find((account) => account.isDefault) ?? null,
@@ -487,7 +406,7 @@ function ModelSectionComponent({
   );
 
   const openNewRouteDialog = () => {
-    setRouteDraft(createRoute());
+    setRouteDraft(createRouteDraft(`route-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`));
     setRouteValidationAttempted(false);
     setRouteApiKeyVisible(false);
     setRouteHeadersText(JSON.stringify({}, null, 2));
@@ -771,7 +690,7 @@ function ModelSectionComponent({
                     color="primary"
                     variant="filled"
                     size="sm"
-                    onClick={() => void invoke("open_route_request_logs", { theme: readHostTheme() })}
+                    onClick={() => void openRequestLogs(readHostTheme())}
                   >
                     <IconFileText size={14} aria-hidden="true" />
                     <span>查看请求日志</span>
@@ -793,7 +712,7 @@ function ModelSectionComponent({
                 active={active}
                 maskSensitive={maskSensitive}
                 popupContainer={popupContainer}
-                onAccountsLoaded={setOfficialAccounts}
+                onAccountsLoaded={adoptOfficialAccounts}
                 onAccountsChanged={handleOfficialAccountsChanged}
                 onNotice={onNotice}
                 onRequestConfirmation={onRequestConfirmation}
@@ -1615,23 +1534,8 @@ function ModelSectionComponent({
                     value={routeDraft.upstreamProtocol}
                     disabled={isBusy}
                     onChange={(value) => {
-                      if (value == null) return;
-                      const upstreamProtocol = value as Profile["upstreamProtocol"];
-                      updateRouteDraft({
-                        upstreamProtocol,
-                        supportsRemoteCompaction:
-                          upstreamProtocol === "openaiResponses"
-                            ? Boolean(routeDraft.supportsRemoteCompaction)
-                            : false,
-                        supportsWebsockets:
-                          upstreamProtocol === "openaiResponses"
-                            ? Boolean(routeDraft.supportsWebsockets)
-                            : false,
-                        supportsNativeWebSearch:
-                          upstreamProtocol === "openaiResponses"
-                            ? Boolean(routeDraft.supportsNativeWebSearch)
-                            : false,
-                      });
+                      const patch = routeProtocolPatch(routeDraft, value);
+                      if (patch) updateRouteDraft(patch);
                     }}
                     optionList={routeProtocolOptions}
                   />

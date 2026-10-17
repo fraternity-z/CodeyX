@@ -84,7 +84,7 @@ test("the third-party route editor exposes the route-name and short-name fields 
   assert.match(source, /maxLength=\{MAX_ROUTE_SHORT_NAME_CHARACTERS\}/);
   assert.doesNotMatch(source, /最多 2 个字符且不可重复，模型名称前会显示为 \[短名称\]/);
   assert.match(
-    source,
+    await readFile(new URL("../src/features/routes/draft.ts", import.meta.url), "utf8"),
     /validateThirdPartyRouteShortName\(route\.shortName, profiles, route\.id\)/,
   );
 });

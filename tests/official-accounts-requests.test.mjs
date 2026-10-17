@@ -9,6 +9,7 @@ const source = {
   controller: await readFile(new URL("../src/features/official-accounts/useOfficialAccountsController.ts", import.meta.url), "utf8"),
   requests: await readFile(new URL("../src/features/official-accounts/requests.ts", import.meta.url), "utf8"),
   models: await readFile(new URL("../src/ModelSection.tsx", import.meta.url), "utf8"),
+  routes: await readFile(new URL("../src/features/routes/requests.ts", import.meta.url), "utf8"),
   logs: await readFile(new URL("../src/features/request-logs/requests.ts", import.meta.url), "utf8"),
   app: await readFile(new URL("../src/features/routes/useRoutesController.ts", import.meta.url), "utf8"),
 };
@@ -25,7 +26,8 @@ test("控制台各入口走共享读取，不再各自直接 invoke 列表", () 
   assert.match(source.requests, /remember: rememberOfficialAccounts/);
   assert.match(source.controller, /officialAccountsRequests\.list\(\{ force \}\)/);
   assert.match(source.controller, /officialAccountsRequests\.remember\(result\)/);
-  assert.match(source.models, /await listOfficialAccounts\(\)/);
+  assert.match(source.routes, /accounts: listOfficialAccounts/);
+  assert.doesNotMatch(source.models, /from "\.\/(?:api|officialAccountsRequests)"/);
   assert.match(source.logs, /accounts: listOfficialAccounts/);
   assert.match(source.app, /rememberOfficialAccounts\(result\)/);
   assert.doesNotMatch(source.models, /invoke<OfficialAccountsResult>\("list_official_accounts"\)/);
