@@ -1264,6 +1264,29 @@ async fn settings_bridge_matches_the_redacted_config_contract() {
 }
 
 #[tokio::test]
+async fn removed_message_deletion_bridge_route_is_rejected() {
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(CodeyConfig::default()),
+        ..AppState::default()
+    });
+    for payload in [
+        json!({}),
+        json!({"sessionId": "removed-feature-fixture", "messageIds": ["turn-1"]}),
+        json!({"sessionId": null, "messageIds": "turn-1"}),
+    ] {
+        let result = state
+            .bridge_request("/session/delete-messages".to_string(), payload)
+            .await;
+        assert_eq!(
+            result,
+            json!({"status": "failed", "message": "未知 Codey 路由：/session/delete-messages"})
+        );
+    }
+}
+
+#[tokio::test]
 async fn backend_health_bridge_avoids_runtime_status_collection() {
     let state = Arc::new(AppState::default());
 

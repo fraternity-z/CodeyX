@@ -102,7 +102,6 @@ use crate::error_log;
 #[cfg(windows)]
 use crate::launcher::{CODEX_APP_NOT_FOUND_ERROR, CODEX_APP_PATH_INVALID_ERROR};
 use crate::launcher::{CodeyRuntime, RuntimeModelConfig, RuntimeSubagentConfig};
-use crate::message_delete::delete_messages_persistently;
 use crate::model_catalog;
 use crate::model_id;
 use crate::notifications::NotificationChannelConfig;
@@ -523,23 +522,6 @@ impl AppState {
                     Ok(json!({"status": "ok"}))
                 })
                 .await
-            }
-            "/session/delete-messages" => {
-                let session_id = bridge_string(&payload, "sessionId");
-                let message_ids = payload
-                    .get("messageIds")
-                    .and_then(Value::as_array)
-                    .map(|items| {
-                        items
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .map(ToString::to_string)
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default();
-                delete_selected_messages(session_id, message_ids)
-                    .await
-                    .unwrap_or_else(api_error_message)
             }
             "/plugins/list" => {
                 let home = codex_home();
@@ -3124,20 +3106,6 @@ async fn cache_session_titles(state: &Arc<AppState>, payload: &Value) -> Value {
         cached.insert(session_id.to_string(), session_name.to_string());
     }
     json!({"status":"ok"})
-}
-
-pub async fn delete_selected_messages(
-    session_id: String,
-    message_ids: Vec<String>,
-) -> Result<Value, String> {
-    let home = codex_home();
-    let result = tokio::task::spawn_blocking(move || {
-        delete_messages_persistently(home, &session_id, &message_ids)
-    })
-    .await
-    .map_err(|error| format!("消息删除任务异常退出：{error}"))?
-    .map_err(|error| error.to_string())?;
-    serde_json::to_value(result).map_err(|error| error.to_string())
 }
 
 fn argument<T: DeserializeOwned>(args: &Value, name: &str) -> Result<T, String> {

@@ -24,7 +24,6 @@ mod launch_proxy;
 mod launcher;
 mod local_router;
 mod maintenance_lock;
-mod message_delete;
 mod model_catalog;
 mod model_id;
 mod model_list;

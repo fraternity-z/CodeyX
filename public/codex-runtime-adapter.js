@@ -296,76 +296,10 @@
     return matches.size === 1 ? [...matches][0] : null;
   };
 
-  const messageDeletionMethods = {
-    async prepare(conversationId) {
-      const conversation = this.getConversation(conversationId);
-      const history = conversation?.turnHistory;
-      if (
-        !Array.isArray(conversation?.turns)
-        || (history != null && (history.kind !== "canonical"
-          || !Array.isArray(history.history?.islands)
-          || !history.history.islands.every((island) => Array.isArray(island.entries))
-          || !Number.isInteger(history.history.generation)
-          || !history.history.entitiesByKey
-          || typeof history.history.entitiesByKey !== "object"))
-      ) throw new Error("当前会话不支持局部删除");
-      const turns = [...conversation.turns, ...Object.values(history?.history?.entitiesByKey || {})];
-      if (
-        conversation.threadRuntimeStatus?.type === "active"
-        || conversation.requests?.length
-        || turns.some((turn) => turn?.status === "inProgress")
-      ) throw new Error("当前任务仍在运行，请等待任务结束后再删除");
-      if (this.getStreamRole(conversationId)?.role === "follower") {
-        throw new Error("请在拥有当前会话的窗口中删除消息");
-      }
-      await this.sendRequest("thread/unsubscribe", { threadId: conversationId });
-    },
-    finish(conversationId, messageIds) {
-      const selected = new Set(messageIds);
-      this.updateConversationState(conversationId, (conversation) => {
-        if (selected.size) {
-          const deletedTurns = new Set();
-          const history = conversation.turnHistory?.kind === "canonical"
-            ? conversation.turnHistory.history : null;
-          if (history) {
-            history.generation += 1;
-            const deletedKeys = new Set(Object.keys(history.entitiesByKey).filter((key) => (
-              selected.has(history.entitiesByKey[key]?.turnId)
-              || selected.has(key)
-              || selected.has(`history-content:${key}`)
-            )));
-            for (const island of history.islands) {
-              island.entries = island.entries.filter((entry) => !deletedKeys.has(entry.value));
-            }
-            for (const key of deletedKeys) {
-              deletedTurns.add(history.entitiesByKey[key]);
-              delete history.entitiesByKey[key];
-            }
-          }
-          conversation.turns = conversation.turns.filter((turn) => (
-            !selected.has(turn.turnId) && !deletedTurns.has(turn)
-          ));
-        }
-        conversation.resumeState = "needs_resume";
-      });
-      this.inactiveThreadUnsubscriber.clearConversationStreamOwnership(conversationId);
-    },
-  };
-  const isLocalMessageDeletionManager = (manager) => {
-    if (!["getHostId", "getConversation", "getStreamRole", "sendRequest", "updateConversationState"]
-      .every((name) => declaredMethod(manager, name))) return false;
-    const unsubscriber = Object.getOwnPropertyDescriptor(manager, "inactiveThreadUnsubscriber")?.value;
-    return Boolean(declaredMethod(unsubscriber, "clearConversationStreamOwnership"))
-      && manager.getHostId() === "local";
-  };
-
   const managerSessionController = (manager) => {
-    const canDeleteMessages = isLocalMessageDeletionManager(manager);
     return {
       kind: "manager",
       manager,
-      prepareMessageDeletion: canDeleteMessages ? messageDeletionMethods.prepare.bind(manager) : null,
-      finishMessageDeletion: canDeleteMessages ? messageDeletionMethods.finish.bind(manager) : null,
       refreshRecentConversations: typeof manager.refreshRecentConversations === "function"
         ? () => manager.refreshRecentConversations() : null,
       reconcileCompletedConversation: typeof manager.codeyReconcileCompletedConversation === "function"
@@ -384,15 +318,13 @@
     if (feature === "usage" || feature === "mcpReload") return typeof controller.manager?.sendRequest === "function";
     if (feature === "remote") return typeof controller.manager?.resumeConversation === "function";
     if (feature === "reconcile") return sessionControllerCanReconcileCompletedConversation(controller);
-    const methods = feature === "deleteMessages"
-      ? ["prepareMessageDeletion", "finishMessageDeletion"]
-      : feature === "refresh" ? ["refreshRecentConversations"] : [];
+    const methods = feature === "refresh" ? ["refreshRecentConversations"] : [];
     return methods.length ? methods.every((method) => typeof controller[method] === "function")
       : controller.kind === "manager" || controller.kind === "signals";
   };
 
   const capabilityProbes = new Map();
-  const capabilityLabels = { usage: "官方额度读取", mcpReload: "MCP 配置刷新", reconcile: "完成状态同步", deleteMessages: "消息删除", modelRouting: "模型请求校验", refresh: "会话列表刷新", session: "会话管理" };
+  const capabilityLabels = { usage: "官方额度读取", mcpReload: "MCP 配置刷新", reconcile: "完成状态同步", modelRouting: "模型请求校验", refresh: "会话列表刷新", session: "会话管理" };
   const capabilityMessage = (feature) => `当前 Codex 暂不支持${capabilityLabels[feature] || "此功能"}，请稍后重试`;
   const pageCapabilities = Object.create(null);
   const publishCapability = (feature, available) => {
@@ -424,7 +356,7 @@
     if (sessionControllerLooksUsable(window.__codeyCodexSessionController, feature)) {
       return window.__codeyCodexSessionController;
     }
-    const requiresNativeManager = feature === "deleteMessages" || feature === "modelRouting";
+    const requiresNativeManager = feature === "modelRouting";
     if (requiresNativeManager) {
       const manager = appServerManagerFromReact(nativeAppServerManagerFromScope);
       const controller = manager ? managerSessionController(manager) : null;
@@ -476,7 +408,7 @@
         continue;
       }
     }
-    if (fallbackDispatcher && !requireCompletionReconcile && feature !== "usage" && feature !== "mcpReload" && feature !== "deleteMessages" && feature !== "remote" && feature !== "modelRouting") {
+    if (fallbackDispatcher && !requireCompletionReconcile && feature !== "usage" && feature !== "mcpReload" && feature !== "remote" && feature !== "modelRouting") {
       window.__codeyCodexSignalDispatcher = fallbackDispatcher;
       const controller = legacySessionController(fallbackDispatcher);
       window.__codeyCodexSessionController = controller;

@@ -34,6 +34,39 @@ async fn startup_finishes_confirmed_session_cleanup_before_rebuilding_indexes() 
 }
 
 #[tokio::test]
+async fn startup_leaves_legacy_message_deletions_inactive() {
+    let temp = tempfile::tempdir().unwrap();
+    let id = "11111111-1111-4111-8111-111111111111";
+    let folder = temp.path().join("sessions");
+    std::fs::create_dir(&folder).unwrap();
+    let rollout = folder.join(format!("rollout-test-{id}.jsonl"));
+    let contents = format!(
+        "{}\n{}\n{}\n",
+        serde_json::json!({"type": "session_meta", "payload": {"id": id}}),
+        serde_json::json!({"type": "turn_context", "payload": {"turn_id": "turn-1"}}),
+        serde_json::json!({"type": "turn_context", "payload": {"turn_id": "turn-2"}}),
+    );
+    std::fs::write(&rollout, &contents).unwrap();
+    let directory = temp.path().join(".codey-message-delete-tombstones-v1");
+    std::fs::create_dir(&directory).unwrap();
+    let record = directory.join("legacy.json");
+    let deletion =
+        serde_json::json!({"version": 1, "sessionId": id, "messageId": "turn-1"}).to_string();
+    std::fs::write(&record, &deletion).unwrap();
+
+    run_startup_session_maintenance(temp.path()).await.unwrap();
+
+    assert_eq!(std::fs::read_to_string(&rollout).unwrap(), contents);
+    assert_eq!(std::fs::read_to_string(&record).unwrap(), deletion);
+    assert!(
+        !temp
+            .path()
+            .join(".codey-message-delete-tombstones-v1.lock")
+            .exists()
+    );
+}
+
+#[tokio::test]
 async fn startup_does_not_claim_success_when_session_cleanup_is_incomplete() {
     let temp = tempfile::tempdir().unwrap();
     let pending = temp.path().join(".codey-session-cleanup-v1.json");

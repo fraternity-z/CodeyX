@@ -571,28 +571,3 @@ test("plugin mutations queue one trailing list refresh while a refresh is in fli
   listResolvers.shift()({ plugins: [] });
   await Promise.resolve();
 });
-
-test("adjacent selected turns render as one continuous outline", async () => {
-  const source = await readSource("public/codey-inject.js");
-  assert.match(
-    source,
-    /\.\$\{selectedClass\}::before \{[^}]*border: 3px solid #7c8cff;/s,
-  );
-  assert.match(
-    source,
-    /data-codey-selected-previous="true"[^}]*border-top: 0;/s,
-  );
-  assert.match(
-    source,
-    /data-codey-selected-next="true"[^}]*border-bottom: 0;/s,
-  );
-  assert.doesNotMatch(source, /outline-offset:\s*12px/);
-});
-
-test("selection changes resynchronize adjacent-turn grouping", async () => {
-  const source = await readSource("public/codey-inject.js");
-  assert.match(source, /const syncSelectionGroups = \(\) => \{/);
-  assert.match(source, /lastSelectedRow = anchor;\s*syncSelectionGroups\(\);/s);
-  assert.match(source, /row\.dataset\.codeySelectedPrevious = "true"/);
-  assert.match(source, /row\.dataset\.codeySelectedNext = "true"/);
-});

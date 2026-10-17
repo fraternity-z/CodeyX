@@ -296,7 +296,7 @@ pub(super) fn clean(home: &Path, ids: &BTreeSet<String>, stopped: bool) -> Resul
             filter_jsonl(home, &path, ids)?;
         }
     }
-    // 清除已删除消息的重试记录，避免已不存在的会话在启动时再次被处理。
+    // 兼容旧版单轮删除留下的记录，整段会话清理时一并移除。
     for path in walk(home, &home.join(".codey-message-delete-tombstones-v1"))? {
         if path.extension().and_then(|v| v.to_str()) != Some("json") {
             continue;

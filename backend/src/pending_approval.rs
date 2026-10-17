@@ -177,9 +177,8 @@ struct RolloutParseState {
     /// `session_meta` header in place, which leaves the tail untouched.
     head_fingerprint: RolloutFingerprint,
     /// Trailing bytes of the region already consumed. Re-reading just these
-    /// detects an in-place rewrite (Codey itself rewrites rollouts when
-    /// deleting turns or normalising providers), which must force a full
-    /// re-parse instead of appending to stale state.
+    /// detects an in-place rewrite, which must force a full re-parse instead
+    /// of appending to stale state.
     tail_fingerprint: RolloutFingerprint,
     is_subagent: bool,
     forked_session_id: Option<String>,
@@ -1649,8 +1648,8 @@ mod tests {
         let first = cache.refresh_rollouts(rollouts());
         assert_eq!(first.started_turns.len(), 2);
 
-        // Codey rewrites rollouts in place when deleting turns; the cached
-        // prefix is then stale. Make the rewrite longer than the original so
+        // An in-place rollout rewrite leaves the cached prefix stale.
+        // Make the rewrite longer than the original so
         // only the fingerprint check — not the shrink check — can catch it.
         let rewritten = format!(
             "{}\n{}\n{}\n",

@@ -142,7 +142,7 @@ function loadInjection({
       return new FakeElement(tagName);
     },
     getElementById(id) {
-      if (["codey-injected-style", "codey-settings-button", "codey-message-toolbar"].includes(id)) {
+      if (["codey-injected-style", "codey-settings-button"].includes(id)) {
         return placeholder;
       }
       return [...body.querySelectorAll("[id]"), ...documentElement.querySelectorAll("[id]")]

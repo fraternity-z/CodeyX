@@ -47,7 +47,7 @@ function fixture({ idle = true, bridge, controller, pathname = "/" } = {}) {
   document.createElement = (tag) => new FakeElement(tag);
   const placeholder = new FakeElement();
   document.getElementById = (id) => {
-    if (["codey-injected-style", "codey-settings-button", "codey-message-toolbar"].includes(id)) {
+    if (["codey-injected-style", "codey-settings-button"].includes(id)) {
       return placeholder;
     }
     return document.querySelector(`#${id}`);

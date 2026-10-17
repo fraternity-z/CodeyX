@@ -13,10 +13,8 @@
   delete window.__codeySessionToolsInstall;
   let disposed = false;
   const rendererSettingsButtonSelector = "#codey-settings-button";
-  const toolbarId = "codey-message-toolbar";
   const toastId = "codey-runtime-toast";
   const styleId = "codey-injected-style";
-  const selectedClass = "codey-message-selected";
   const sessionExportAttribute = "data-codey-session-export";
   const tasksImportAttribute = "data-codey-tasks-import";
   const projectImportAttribute = "data-codey-project-import";
@@ -48,8 +46,6 @@
       <line x1="14" x2="14" y1="11" y2="17"></line>
     </svg>
   `;
-  let lastSelectedRow = null;
-  let messageDeleteInFlight = false;
   let scanTimer = 0;
   let initialScanHandle = 0;
   let initialScanUsesIdleCallback = false;
@@ -75,19 +71,6 @@
   const threadUpdatedAtRequestedAt = new Map();
   const pendingThreadUpdatedAtRefs = new Map();
   const threadUpdatedAtRows = new Set();
-  const hardDeletedMessageKeys = new Set();
-  const messageSelectButtons = new WeakMap();
-  const messageLogicalAnchorByRow = new WeakMap();
-  const messageLogicalRowsByAnchor = new WeakMap();
-  const messageLogicalGroupIdsByKey = new Map();
-  const selectedLogicalMessageIdsByKey = new Map();
-  const conversationTurnSelector = [
-    "[data-turn-key]",
-    "[data-message-author-role]",
-    "[data-testid=conversation-turn]",
-    "[data-message-id]",
-  ].join(", ");
-  const canonicalConversationTurnSelector = "[data-turn-key]";
   const sidebarScanRootSelector = [
     "header",
     "nav",
@@ -110,23 +93,13 @@
   const maxPendingThreadTimestampRefs = 200;
   const fallbackSessionExportMaxBytes = 64 * 1024 * 1024;
   const maxSessionCacheEntries = 2_048;
-  const maxHardDeletedMessageKeys = 10_000;
   const maxPendingScanRoots = 64;
-  const maxMessageLogicalGroupKeys = 4_096;
-  const maxSelectedLogicalMessageKeys = 2_048;
   const projectRunningRecoveryClickCooldownMs = 1_000;
   const rememberBoundedMapValue = (cache, key, value, limit = maxSessionCacheEntries) => {
     cache.delete(key);
     cache.set(key, value);
     while (cache.size > limit) {
       cache.delete(cache.keys().next().value);
-    }
-  };
-  const rememberBoundedSetValue = (set, value, limit) => {
-    set.delete(value);
-    set.add(value);
-    while (set.size > limit) {
-      set.delete(set.values().next().value);
     }
   };
   const queryWithin = (root, selector) => {
@@ -239,460 +212,15 @@
     if (event.key === "Enter" && !event.isComposing) wakeSessionWatcher();
   };
 
-  const normalizeMessageId = (value) => {
-    const normalized = String(value || "").trim();
-    const turnMarker = ":turn:";
-    const markerIndex = normalized.lastIndexOf(turnMarker);
-    return markerIndex >= 0
-      ? normalized.slice(markerIndex + turnMarker.length).trim()
-      : normalized;
-  };
-
-  const usableMessageId = (value) => {
-    const normalized = normalizeMessageId(value);
-    if (!normalized || normalized === "conversation-turn") return "";
-    return normalized;
-  };
-
-  const isHistoryTailMessageId = (value) => (
-    /(?:^|:)tail(?::|$)/i.test(String(value || ""))
-  );
-
-  const reactStateKeys = (element) => Object.keys(element).filter((key) => (
-    key.startsWith("__reactFiber")
-    || key.startsWith("__reactInternalInstance")
-    || key.startsWith("__reactProps")
-  ));
-
-  const messageIdFromReactState = (element, stableTurnOnly = false) => {
-    const visited = new WeakSet();
-    const stack = reactStateKeys(element).map((key) => ({
-      value: element[key],
-      depth: 0,
-      path: key.toLowerCase(),
-    }));
-    const candidates = [];
-    const addCandidate = (value, score, turnCandidate = false) => {
-      const messageId = usableMessageId(value);
-      if (
-        stableTurnOnly
-        && (!turnCandidate || isHistoryTailMessageId(messageId))
-      ) return;
-      if (messageId) candidates.push({ messageId, score });
-    };
-    let scanned = 0;
-    while (stack.length && candidates.length < 32 && scanned < 240) {
-      const { value, depth, path } = stack.pop();
-      if (!value || typeof value !== "object" || visited.has(value) || depth > 7) continue;
-      if (value instanceof HTMLElement || value === window || value === document) continue;
-      visited.add(value);
-      scanned += 1;
-      for (const key of Object.keys(value).slice(0, 80)) {
-        let child;
-        try {
-          child = value[key];
-        } catch {
-          continue;
-        }
-        const loweredKey = key.toLowerCase();
-        const nextPath = `${path}.${loweredKey}`;
-        const keyLooksLikeTurnId = /^(turnkey|turn_key|turnid|turn_id)$/.test(loweredKey);
-        const keyLooksLikeMessageId = /^(messageid|message_id|itemid|item_id)$/.test(loweredKey);
-        const genericIdScore = path.includes("turn")
-          ? 4
-          : /(message|item)/.test(path)
-            ? 2
-            : /(response|entry)/.test(path)
-              ? 1
-              : 0;
-        if (typeof child === "string" || typeof child === "number") {
-          if (keyLooksLikeTurnId) addCandidate(child, 5, true);
-          else if (keyLooksLikeMessageId) addCandidate(child, 3);
-          else if (loweredKey === "id" && genericIdScore) {
-            addCandidate(child, genericIdScore, path.includes("turn"));
-          } else if (loweredKey === "key" && genericIdScore) {
-            addCandidate(child, genericIdScore, path.includes("turn"));
-          }
-          continue;
-        }
-        if (child && typeof child === "object") {
-          stack.push({ value: child, depth: depth + 1, path: nextPath });
-        }
-      }
-    }
-    candidates.sort((left, right) => right.score - left.score);
-    return candidates[0]?.messageId || "";
-  };
-
-  const normalizedTurnStatus = (value) => String(value || "")
-    .trim()
-    .replace(/[_\s-]+/g, "")
-    .toLowerCase();
-
-  const continuationReferenceFromReactTurn = (entry, turn) => {
-    const fields = [
-      "resumedFromTurnId",
-      "resumed_from_turn_id",
-      "continuedFromTurnId",
-      "continued_from_turn_id",
-      "continuationOfTurnId",
-      "continuation_of_turn_id",
-    ];
-    for (const source of [turn, entry]) {
-      if (!source || typeof source !== "object") continue;
-      for (const field of fields) {
-        if (!Object.prototype.hasOwnProperty.call(source, field)) continue;
-        return {
-          continuationFromMessageId: usableMessageId(source[field]),
-          hasContinuationReference: true,
-        };
-      }
-    }
-    return {
-      continuationFromMessageId: "",
-      hasContinuationReference: false,
-    };
-  };
-
-  const metadataFromReactTurnEntry = (entry, expectedMessageId) => {
-    if (!entry || typeof entry !== "object") return null;
-    const turn = entry.turn;
-    if (!turn || typeof turn !== "object") return null;
-    const candidateMessageId = usableMessageId(
-      entry.turnId
-      || entry.turnKey
-      || turn.turnId
-      || turn.turnKey
-      || turn.id
-      || "",
-    );
-    if (candidateMessageId !== expectedMessageId) return null;
-    const items = Array.isArray(turn.items) ? turn.items : null;
-    const status = normalizedTurnStatus(turn.status || entry.status);
-    if (!items && !status) return null;
-    const continuation = continuationReferenceFromReactTurn(entry, turn);
-    return {
-      ...continuation,
-      hasUserMessage: items?.length
-        ? items.some((item) => item?.type === "userMessage")
-        : null,
-      status,
-    };
-  };
-
-  const messageTurnMetadataFromReactState = (element, messageId) => {
-    const expectedMessageId = usableMessageId(messageId);
-    if (!expectedMessageId) {
-      return {
-        continuationFromMessageId: "",
-        hasContinuationReference: false,
-        hasUserMessage: null,
-        status: "",
-      };
-    }
-    for (const key of reactStateKeys(element)) {
-      const reactState = element[key];
-      const directEntries = [
-        reactState?.pendingProps?.children?.props?.entry,
-        reactState?.memoizedProps?.children?.props?.entry,
-        reactState?.children?.props?.entry,
-        reactState?.pendingProps?.entry,
-        reactState?.memoizedProps?.entry,
-        reactState?.entry,
-      ];
-      for (const entry of directEntries) {
-        const metadata = metadataFromReactTurnEntry(entry, expectedMessageId);
-        if (metadata) return metadata;
-      }
-    }
-    const visited = new WeakSet();
-    const stack = reactStateKeys(element).map((key) => ({
-      value: element[key],
-      depth: 0,
-      path: key.toLowerCase(),
-    }));
-    const candidates = [];
-    let scanned = 0;
-    while (stack.length && candidates.length < 16 && scanned < 240) {
-      const { value, depth, path } = stack.pop();
-      if (!value || typeof value !== "object" || visited.has(value) || depth > 7) continue;
-      if (value instanceof HTMLElement || value === window || value === document) continue;
-      visited.add(value);
-      scanned += 1;
-      const metadata = metadataFromReactTurnEntry(value, expectedMessageId);
-      if (metadata) {
-        const score = path.includes("pendingprops")
-          ? 3
-          : path.includes("__reactprops")
-            ? 2
-            : path.includes("memoizedprops")
-              ? 1
-              : 0;
-        candidates.push({ ...metadata, score });
-      }
-      for (const key of Object.keys(value).slice(0, 80)) {
-        let child;
-        try {
-          child = value[key];
-        } catch {
-          continue;
-        }
-        if (child && typeof child === "object") {
-          stack.push({
-            value: child,
-            depth: depth + 1,
-            path: `${path}.${key.toLowerCase()}`,
-          });
-        }
-      }
-    }
-    candidates.sort((left, right) => right.score - left.score);
-    return candidates[0] || {
-      continuationFromMessageId: "",
-      hasContinuationReference: false,
-      hasUserMessage: null,
-      status: "",
-    };
-  };
-
-  const messageTurnMetadata = (row, messageId) => {
-    const metadata = messageTurnMetadataFromReactState(row, messageId);
-    if (metadata.hasUserMessage !== null) return metadata;
-    const hasUserMessage = row.matches?.('[data-message-author-role="user"]')
-      || Boolean(row.querySelector?.('[data-message-author-role="user"]'));
-    return hasUserMessage ? { ...metadata, hasUserMessage: true } : metadata;
-  };
-
-  const preferStableReactTurnId = (row, messageId) => (
-    isHistoryTailMessageId(messageId)
-      ? messageIdFromReactState(row, true) || messageId
-      : messageId
-  );
-
-  const getMessageId = (row) => {
-    const direct = ["data-turn-key", "data-message-id", "data-messageid", "data-item-id", "data-id"]
-      .map((key) => row.getAttribute(key)).find(Boolean);
-    if (direct) return preferStableReactTurnId(row, usableMessageId(direct));
-    const child = row.querySelector("[data-turn-key], [data-message-id], [data-item-id], [data-id]");
-    const childMessageId = usableMessageId(
-      child?.getAttribute("data-turn-key")
-      || child?.getAttribute("data-message-id")
-      || child?.getAttribute("data-item-id")
-      || child?.getAttribute("data-id")
-      || "",
-    );
-    return childMessageId
-      ? preferStableReactTurnId(row, childMessageId)
-      : messageIdFromReactState(row);
-  };
-
-  const hardDeletedMessageKey = (sessionId, messageId) => {
-    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
-    const normalizedMessageId = normalizeMessageId(messageId);
-    return normalizedSessionId && normalizedMessageId
-      ? `${normalizedSessionId}\u0000${normalizedMessageId}`
-      : "";
-  };
-
-  const cachedLogicalMessageIds = (sessionId, messageId) => {
-    const key = hardDeletedMessageKey(sessionId, messageId);
-    const cached = key ? messageLogicalGroupIdsByKey.get(key) : null;
-    if (!Array.isArray(cached) || !cached.includes(normalizeMessageId(messageId))) return [];
-    return [...cached];
-  };
-
-  const forgetLogicalMessageIds = (sessionId, messageIds) => {
-    const pending = [...new Set(messageIds.map(normalizeMessageId).filter(Boolean))];
-    const visited = new Set();
-    while (pending.length) {
-      const messageId = pending.pop();
-      if (!messageId || visited.has(messageId)) continue;
-      visited.add(messageId);
-      const key = hardDeletedMessageKey(sessionId, messageId);
-      const cached = key ? messageLogicalGroupIdsByKey.get(key) : null;
-      if (key) messageLogicalGroupIdsByKey.delete(key);
-      if (Array.isArray(cached)) {
-        cached.forEach((cachedMessageId) => {
-          const normalizedMessageId = normalizeMessageId(cachedMessageId);
-          if (normalizedMessageId && !visited.has(normalizedMessageId)) {
-            pending.push(normalizedMessageId);
-          }
-        });
-      }
-    }
-  };
-
-  const rememberLogicalMessageIds = (sessionId, messageIds) => {
-    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
-    const normalizedMessageIds = [...new Set(messageIds.map(normalizeMessageId).filter(Boolean))];
-    if (!normalizedSessionId || normalizedMessageIds.length < 2) return normalizedMessageIds;
-    forgetLogicalMessageIds(normalizedSessionId, normalizedMessageIds);
-    const cachedGroup = Object.freeze([...normalizedMessageIds]);
-    normalizedMessageIds.forEach((messageId) => {
-      const key = hardDeletedMessageKey(normalizedSessionId, messageId);
-      if (!key) return;
-      messageLogicalGroupIdsByKey.delete(key);
-      messageLogicalGroupIdsByKey.set(key, cachedGroup);
-    });
-    while (messageLogicalGroupIdsByKey.size > maxMessageLogicalGroupKeys) {
-      const oldestKey = messageLogicalGroupIdsByKey.keys().next().value;
-      const oldestGroup = messageLogicalGroupIdsByKey.get(oldestKey);
-      const separatorIndex = String(oldestKey || "").indexOf("\u0000");
-      const oldestSessionId = separatorIndex > 0 ? oldestKey.slice(0, separatorIndex) : "";
-      if (oldestSessionId && Array.isArray(oldestGroup)) {
-        oldestGroup.forEach((messageId) => {
-          messageLogicalGroupIdsByKey.delete(hardDeletedMessageKey(oldestSessionId, messageId));
-        });
-      } else {
-        messageLogicalGroupIdsByKey.delete(oldestKey);
-      }
-    }
-    return normalizedMessageIds;
-  };
-
-  const logicalMessageSelectionGroups = (sessionId) => {
-    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
-    if (!normalizedSessionId) return [];
-    const prefix = `${normalizedSessionId}\u0000`;
-    return [...selectedLogicalMessageIdsByKey.entries()]
-      .filter(([key]) => key.startsWith(prefix))
-      .map(([, messageIds]) => [...messageIds]);
-  };
-
-  const intersectingLogicalMessageSelections = (sessionId, messageIds) => {
-    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
-    const memberIds = new Set(messageIds.map(normalizeMessageId).filter(Boolean));
-    if (!normalizedSessionId || !memberIds.size) return [];
-    const prefix = `${normalizedSessionId}\u0000`;
-    return [...selectedLogicalMessageIdsByKey.entries()].filter(([key, selectedIds]) => (
-      key.startsWith(prefix)
-      && selectedIds.some((messageId) => memberIds.has(messageId))
-    ));
-  };
-
-  const selectedLogicalMessageIdsForMember = (sessionId, messageId) => {
-    const selections = intersectingLogicalMessageSelections(sessionId, [messageId]);
-    if (!selections.length) return [];
-    selections.sort((left, right) => right[1].length - left[1].length);
-    return [...selections[0][1]];
-  };
-
-  const knownLogicalMessageIds = (sessionId, messageId) => {
-    const cachedIds = cachedLogicalMessageIds(sessionId, messageId);
-    if (cachedIds.length > 1) return cachedIds;
-    const selectedIds = selectedLogicalMessageIdsForMember(sessionId, messageId);
-    return selectedIds.length > 1 ? selectedIds : [];
-  };
-
-  const logicalMessageGroupIsSelected = (sessionId, messageIds) => (
-    intersectingLogicalMessageSelections(sessionId, messageIds).length > 0
-  );
-
-  const rememberLogicalMessageSelection = (sessionId, messageIds, selected) => {
-    const normalizedMessageIds = [...new Set(messageIds.map(normalizeMessageId).filter(Boolean))];
-    const key = hardDeletedMessageKey(sessionId, normalizedMessageIds[0]);
-    if (!key) return;
-    intersectingLogicalMessageSelections(sessionId, normalizedMessageIds)
-      .forEach(([selectedKey]) => selectedLogicalMessageIdsByKey.delete(selectedKey));
-    if (!selected) {
-      return;
-    }
-    rememberBoundedMapValue(
-      selectedLogicalMessageIdsByKey,
-      key,
-      Object.freeze([...normalizedMessageIds]),
-      maxSelectedLogicalMessageKeys,
-    );
-  };
-
-  const forgetLogicalMessageSelections = (sessionId, messageIds) => {
-    intersectingLogicalMessageSelections(sessionId, messageIds)
-      .forEach(([key]) => selectedLogicalMessageIdsByKey.delete(key));
-  };
-
-  const clearLogicalMessageSelections = (sessionId) => {
-    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
-    if (!normalizedSessionId) return;
-    const prefix = `${normalizedSessionId}\u0000`;
-    for (const key of selectedLogicalMessageIdsByKey.keys()) {
-      if (key.startsWith(prefix)) selectedLogicalMessageIdsByKey.delete(key);
-    }
-  };
-
-  const replaceLogicalMessageId = (sessionId, previousMessageId, messageId) => {
-    const previousId = normalizeMessageId(previousMessageId);
-    const nextId = normalizeMessageId(messageId);
-    if (!previousId || !nextId || previousId === nextId) return;
-    const cachedIds = cachedLogicalMessageIds(sessionId, previousId);
-    if (cachedIds.length > 1) {
-      const replacedIds = [...new Set(cachedIds.map((candidate) => (
-        candidate === previousId ? nextId : candidate
-      )))];
-      forgetLogicalMessageIds(sessionId, cachedIds);
-      rememberLogicalMessageIds(sessionId, replacedIds);
-    }
-    const normalizedSessionId = String(sessionId || "").replace(/^local:/, "").trim();
-    const prefix = normalizedSessionId ? `${normalizedSessionId}\u0000` : "";
-    if (!prefix) return;
-    for (const [key, selectedIds] of [...selectedLogicalMessageIdsByKey.entries()]) {
-      if (!key.startsWith(prefix) || !selectedIds.includes(previousId)) continue;
-      selectedLogicalMessageIdsByKey.delete(key);
-      const replacedIds = [...new Set(selectedIds.map((candidate) => (
-        candidate === previousId ? nextId : candidate
-      )))];
-      rememberLogicalMessageSelection(sessionId, replacedIds, true);
-    }
-  };
-
-  const invalidateLogicalMessageGroup = (sessionId, messageIds) => {
-    const normalizedMessageIds = [...new Set(messageIds.map(normalizeMessageId).filter(Boolean))];
-    if (logicalMessageGroupIsSelected(sessionId, normalizedMessageIds)) {
-      rememberLogicalMessageSelection(sessionId, normalizedMessageIds.slice(0, 1), true);
-    }
-    forgetLogicalMessageIds(sessionId, normalizedMessageIds);
-  };
-
-  const rememberHardDeletedMessages = (sessionId, messageIds) => {
-    messageIds.forEach((messageId) => {
-      const key = hardDeletedMessageKey(sessionId, messageId);
-      if (key) {
-        rememberBoundedSetValue(
-          hardDeletedMessageKeys,
-          key,
-          maxHardDeletedMessageKeys,
-        );
-      }
-    });
-  };
-
-  const isHardDeletedMessage = (sessionId, messageId) => (
-    hardDeletedMessageKeys.has(hardDeletedMessageKey(sessionId, messageId))
-  );
-
   const addStyle = () => {
     if (document.getElementById(styleId)) return;
     const style = document.createElement("style");
     style.id = styleId;
     style.textContent = `
-      #${toolbarId} { -webkit-app-region: no-drag !important; position: fixed; right: 18px; top: 60px; z-index: 2147483644; display: flex; align-items: center; gap: 7px; padding: 6px 8px; border: 1px solid rgba(124, 140, 255, .44); border-radius: 999px; background: rgba(20, 24, 36, .68); color: rgba(238, 242, 255, .94); box-shadow: 0 8px 24px rgba(0,0,0,.18); backdrop-filter: blur(10px); font: 12px/1 system-ui, sans-serif; }
-      #${toolbarId}[hidden] { display: none; }
-      #${toolbarId} button { border: 1px solid rgba(120, 140, 180, .34); border-radius: 999px; padding: 4px 8px; background: rgba(40, 50, 70, .48); color: inherit; cursor: pointer; font: 12px/1 system-ui, sans-serif; }
-      #${toolbarId} button[data-danger] { border-color: rgba(248, 113, 113, .68); background: rgba(185, 28, 28, .42); color: #fff1f2; font-weight: 650; }
-      .${selectedClass} { border-radius: 18px; box-sizing: border-box !important; outline: none !important; }
-      .${selectedClass}::before { content: ""; position: absolute; inset: -12px; z-index: 29; box-sizing: border-box; border: 3px solid #7c8cff; border-radius: 18px; pointer-events: none; }
-      .${selectedClass}[data-codey-selected-previous="true"]::before { border-top: 0; border-top-left-radius: 0; border-top-right-radius: 0; }
-      .${selectedClass}[data-codey-selected-next="true"]::before { border-bottom: 0; border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
-      [data-codey-message-id] { overflow: visible !important; }
-      [data-codey-message-select] { -webkit-app-region: no-drag !important; position: absolute; left: -48px; top: 8px; z-index: 30; display: grid; place-items: center; width: 24px; height: 24px; border: 1px solid rgba(139, 151, 255, .42); border-radius: 999px; padding: 0; background: rgba(22, 26, 39, .66); color: #dce2ff; cursor: pointer; font: 700 13px/1 system-ui, sans-serif; opacity: .24; pointer-events: auto !important; transition: opacity .15s ease, background .15s ease, transform .15s ease; }
-      [data-codey-message-row]:hover > [data-codey-message-select], [data-codey-message-select]:focus-visible, [data-codey-message-select][aria-pressed="true"] { opacity: 1; }
-      [data-codey-message-select]:hover { transform: scale(1.06); }
-      [data-codey-message-select][aria-pressed="true"] { background: #5968de; border-color: #a5aeff; color: white; }
-      @media (max-width: 760px) { [data-codey-message-select] { left: 4px; top: -34px; } }
       #${toastId} { -webkit-app-region: no-drag !important; position: fixed; right: 20px; bottom: 22px; z-index: 2147483645; max-width: 360px; border: 1px solid rgba(124, 140, 255, .4); border-radius: 11px; padding: 10px 13px; background: rgba(20, 24, 36, .97); color: #eef2ff; box-shadow: 0 12px 36px rgba(0,0,0,.4); font: 12px/1.45 system-ui, sans-serif; }
       #${toastId}[data-tone="error"] { border-color: rgba(248, 113, 113, .6); color: #fecaca; }
       [data-app-action-sidebar-thread-id][data-app-action-sidebar-thread-title],
       [data-app-action-sidebar-project-row][data-app-action-sidebar-project-id] { position: relative; }
-      :where([data-codey-message-row]) { position: relative; }
       [data-app-action-sidebar-thread-row] [${threadUpdatedAtAttribute}] { display: block; flex: 0 0 auto; min-width: 26px; margin-inline-start: auto; color: inherit; font: 400 12px/16px system-ui, sans-serif; font-variant-numeric: tabular-nums; letter-spacing: 0; text-align: end; opacity: .52; pointer-events: none; white-space: nowrap; }
       [data-app-action-sidebar-thread-row]:hover [${threadUpdatedAtAttribute}],
       [data-app-action-sidebar-thread-row]:has(:focus-visible) [${threadUpdatedAtAttribute}] { opacity: 0; }
@@ -710,36 +238,6 @@
     `;
     document.documentElement.appendChild(style);
   };
-
-  const logicalAnchorForMessageRow = (row) => messageLogicalAnchorByRow.get(row) || row;
-
-  const logicalRowsForMessageRow = (row) => {
-    const anchor = logicalAnchorForMessageRow(row);
-    const groupedRows = messageLogicalRowsByAnchor.get(anchor);
-    return Array.isArray(groupedRows) && groupedRows.length ? groupedRows : [anchor];
-  };
-
-  const logicalMessageIdsForRow = (row) => {
-    const anchor = logicalAnchorForMessageRow(row);
-    let storedIds = [];
-    try {
-      const parsed = JSON.parse(anchor.dataset.codeyMessageIds || "[]");
-      if (Array.isArray(parsed)) storedIds = parsed;
-    } catch {
-      storedIds = [];
-    }
-    const candidateIds = storedIds.length
-      ? storedIds
-      : logicalRowsForMessageRow(anchor).map((item) => item.dataset.codeyMessageId);
-    return [...new Set(candidateIds.map(normalizeMessageId).filter(Boolean))];
-  };
-
-  const logicalSelectionRows = () => [...document.querySelectorAll("[data-codey-message-id]")]
-    .filter(isRenderedSessionElement)
-    .filter((row) => row.dataset.codeyLogicalTurn !== "continuation");
-
-  const selectedRows = () => logicalSelectionRows()
-    .filter((row) => row.classList.contains(selectedClass));
 
   const showRuntimeToast = (message, tone = "success") => {
     const sharedToast = window.__codeyShowRuntimeToast;
@@ -2101,27 +1599,6 @@
     });
   };
 
-  const nativeTaskControlSelector = "button[aria-label], button[title], button[data-testid]";
-  const nativeTaskControlIsRunning = (button) => {
-    if (!(button instanceof HTMLElement) || button.disabled) return false;
-    const label = [
-      button.getAttribute("aria-label"),
-      button.getAttribute("title"),
-    ].filter(Boolean).join(" ").trim().toLowerCase();
-    const testId = String(button.getAttribute("data-testid") || "").trim().toLowerCase();
-    const runningLabel = label === "停止"
-      || label.includes("停止生成")
-      || label.includes("停止回答")
-      || label === "stop"
-      || label.includes("stop generating")
-      || label.includes("stop response");
-    const runningTestId = /(?:^|[-_])(?:stop|cancel)(?:[-_](?:generating|generation|response|task|turn))?(?:[-_]button)?$/.test(testId)
-      || /(?:^|[-_])(?:generating|generation|response|task|turn)[-_](?:stop|cancel)(?:[-_]button)?$/.test(testId);
-    return (runningLabel || runningTestId) && button.getClientRects().length > 0;
-  };
-  const isTaskRunning = () => [...document.querySelectorAll(nativeTaskControlSelector)]
-    .some(nativeTaskControlIsRunning);
-
   // Codex owns permanent deletion: the row menu knows the conversation and the
   // host, so the injected icon reuses that action instead of deleting through
   // the backend on its own.
@@ -2253,564 +1730,13 @@
     });
   };
 
-  const updateToolbar = () => {
-    const toolbar = document.getElementById(toolbarId);
-    if (!toolbar) return;
-    const sessionId = selectedLogicalMessageIdsByKey.size ? getSessionId() : "";
-    const persistedCount = sessionId ? logicalMessageSelectionGroups(sessionId).length : 0;
-    const count = persistedCount || selectedRows().length;
-    toolbar.hidden = count === 0;
-    const label = toolbar.querySelector("[data-codey-count]");
-    if (label) label.textContent = `已选 ${count} 轮`;
-  };
-
-  const updateSelectionButton = (row) => {
-    const anchor = logicalAnchorForMessageRow(row);
-    const selected = anchor.classList.contains(selectedClass);
-    const button = messageSelectButtons.get(anchor)
-      || anchor.querySelector("[data-codey-message-select]");
-    if (!button) return;
-    button.setAttribute("aria-pressed", selected ? "true" : "false");
-    button.textContent = selected ? "✓" : "○";
-  };
-
-  const setLogicalRowSelected = (row, selected) => {
-    const anchor = logicalAnchorForMessageRow(row);
-    rememberLogicalMessageSelection(
-      getSessionId(),
-      logicalMessageIdsForRow(anchor),
-      selected,
-    );
-    logicalRowsForMessageRow(anchor).forEach((item) => {
-      if (selected) item.classList.add(selectedClass);
-      else item.classList.remove(selectedClass);
-    });
-    updateSelectionButton(anchor);
-  };
-
-  const syncSelectionGroups = () => {
-    const rows = [...document.querySelectorAll("[data-codey-message-id]")]
-      .filter(isRenderedSessionElement);
-    rows.forEach((row, index) => {
-      delete row.dataset.codeySelectedPrevious;
-      delete row.dataset.codeySelectedNext;
-      if (!row.classList?.contains(selectedClass)) return;
-      if (rows[index - 1]?.classList?.contains(selectedClass)) {
-        row.dataset.codeySelectedPrevious = "true";
-      }
-      if (rows[index + 1]?.classList?.contains(selectedClass)) {
-        row.dataset.codeySelectedNext = "true";
-      }
-    });
-  };
-
-  const selectRow = (row, event) => {
-    const anchor = logicalAnchorForMessageRow(row);
-    const rows = logicalSelectionRows();
-    if (event?.shiftKey && lastSelectedRow && rows.includes(lastSelectedRow)) {
-      const start = rows.indexOf(lastSelectedRow);
-      const end = rows.indexOf(anchor);
-      rows.slice(Math.min(start, end), Math.max(start, end) + 1).forEach((item) => {
-        setLogicalRowSelected(item, true);
-      });
-    } else {
-      setLogicalRowSelected(anchor, !anchor.classList.contains(selectedClass));
-    }
-    lastSelectedRow = anchor;
-    syncSelectionGroups();
-    updateToolbar();
-  };
-
-  const deleteSelected = async () => {
-    if (messageDeleteInFlight) return;
-    const rows = selectedRows();
-    const sessionId = String(getSessionId() || "").replace(/^local:/, "").trim();
-    const selectedGroupsByAnchor = new Map();
-    logicalMessageSelectionGroups(sessionId).forEach((messageIds) => {
-      if (messageIds[0]) selectedGroupsByAnchor.set(messageIds[0], messageIds);
-    });
-    rows.forEach((row) => {
-      const messageIds = logicalMessageIdsForRow(row);
-      if (messageIds[0]) selectedGroupsByAnchor.set(messageIds[0], messageIds);
-    });
-    const selectedGroups = [...selectedGroupsByAnchor.values()];
-    const logicalCount = selectedGroups.length;
-    const messageIds = [...new Set(selectedGroups.flat())];
-    const physicalRows = [...new Set(rows.flatMap(logicalRowsForMessageRow))];
-    if (!sessionId || !messageIds.length) {
-      window.alert("无法识别当前会话或尚未选择任何一轮对话");
-      return;
-    }
-    if (isTaskRunning()) {
-      window.alert("当前任务仍在运行，请等待任务结束后再删除会话记录");
-      return;
-    }
-    if (!window.confirm(`删除 ${logicalCount} 轮对话？\n无法撤销。`)) return;
-    messageDeleteInFlight = true;
-    const deleteButton = document.getElementById(toolbarId)?.querySelector?.("[data-codey-delete]");
-    if (deleteButton) deleteButton.disabled = true;
-    let controller;
-    let prepared = false;
-    try {
-      showRuntimeToast(`正在永久删除 ${logicalCount} 轮对话…`);
-      let result;
-      try {
-        controller = await getCodexSessionController("deleteMessages");
-        await controller.prepareMessageDeletion(sessionId);
-        prepared = true;
-        result = await callBridge("/session/delete-messages", { sessionId, messageIds });
-      } catch (error) {
-        const message = typeof error?.message === "string" ? error.message : String(error);
-        if (error?.code === "codey_capability_unavailable") {
-          showRuntimeToast(message, "error");
-          return;
-        }
-        window.alert(`删除失败：${message}`);
-        return;
-      }
-      if (result?.status === "failed") {
-        window.alert(`删除失败：${result.message || "未知错误"}`);
-        return;
-      }
-      if (Array.isArray(result?.unsupportedDatabases) && result.unsupportedDatabases.length) {
-        window.alert(
-          `会话文件已处理，但索引数据库未完成清理：${result.unsupportedDatabases.join("、")}。请退出 Codex 后重试。`,
-        );
-        return;
-      }
-      const deleted = Number(result?.deleted || 0);
-      if (deleted !== messageIds.length) {
-        const partialMessage = logicalCount === messageIds.length
-          ? `只永久删除了 ${deleted}/${messageIds.length} 轮对话。`
-          : `所选 ${logicalCount} 轮对话包含 ${messageIds.length} 个连续记录片段，只永久删除了 ${deleted} 个。`;
-        window.alert(
-          deleted
-            ? `${partialMessage}页面不会隐藏未确认删除的轮次，请重启 Codex 刷新会话后重试。`
-            : "未在会话文件中找到所选轮次，页面不会再假装删除。请更新或重启 CodeyX 后重试。",
-        );
-        return;
-      }
-      const resolvedMessageIds = Array.isArray(result?.resolvedMessageIds)
-        && result.resolvedMessageIds.length === messageIds.length
-        ? result.resolvedMessageIds.map(normalizeMessageId).filter(Boolean)
-        : messageIds;
-      const deletedIds = [...new Set([...messageIds, ...resolvedMessageIds])];
-      try {
-        prepared = false;
-        await controller.finishMessageDeletion(sessionId, deletedIds);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        window.alert(`消息已永久删除，但页面状态更新失败，请重新打开当前对话。\n\n${message}`);
-        return;
-      }
-      forgetLogicalMessageSelections(sessionId, deletedIds);
-      forgetLogicalMessageIds(sessionId, deletedIds);
-      rememberHardDeletedMessages(sessionId, deletedIds);
-      physicalRows.forEach((row) => row.classList.remove(selectedClass));
-      lastSelectedRow = null;
-      syncSelectionGroups();
-      updateToolbar();
-      showRuntimeToast(`已永久删除 ${logicalCount} 轮对话`);
-    } finally {
-      if (prepared) {
-        try {
-          await controller.finishMessageDeletion(sessionId, []);
-        } catch {
-          showRuntimeToast("会话状态更新失败，请重新打开当前对话", "error");
-        }
-      }
-      messageDeleteInFlight = false;
-      if (deleteButton) deleteButton.disabled = false;
-    }
-  };
-
-  const mountToolbar = () => {
-    if (document.getElementById(toolbarId)) return;
-    const toolbar = document.createElement("div");
-    toolbar.id = toolbarId;
-    toolbar.hidden = true;
-    toolbar.innerHTML = '<span data-codey-count>已选 0 轮</span><button type="button" data-codey-delete data-danger>删除</button><button type="button" data-codey-clear>取消</button>';
-    toolbar.querySelector("[data-codey-delete]")?.addEventListener("click", () => void deleteSelected());
-    toolbar.querySelector("[data-codey-clear]")?.addEventListener("click", () => {
-      clearLogicalMessageSelections(getSessionId());
-      selectedRows().forEach((row) => {
-        setLogicalRowSelected(row, false);
-      });
-      lastSelectedRow = null;
-      syncSelectionGroups();
-      updateToolbar();
-    });
-    document.body.appendChild(toolbar);
-  };
-
-  const hasCanonicalTurnAncestor = (row) => {
-    let parent = row.parentElement;
-    while (parent) {
-      if (parent.matches?.(canonicalConversationTurnSelector)) return true;
-      parent = parent.parentElement;
-    }
-    return false;
-  };
-
-  const messageSelectionRowsWithin = (root) => {
-    // A direct canonical boundary is the common streaming path. Keep this fast
-    // path, but never let a generic message wrapper stand in for multiple
-    // sibling turns contained inside it.
-    if (
-      root instanceof HTMLElement
-      && root.matches?.(canonicalConversationTurnSelector)
-    ) {
-      return hasCanonicalTurnAncestor(root) || !isRenderedSessionElement(root) ? [] : [root];
-    }
-    const candidates = queryWithin(root, conversationTurnSelector);
-    const canonicalRows = new Set(candidates.filter((row) => (
-      row.matches?.(canonicalConversationTurnSelector)
-      && !hasCanonicalTurnAncestor(row)
-    )));
-    // Older Codex renderers can expose only message/test-id wrappers. Keep
-    // those independent fallbacks, but never allow one to absorb a canonical
-    // turn above or below it.
-    const eligibleFallbackRows = candidates.filter((row) => (
-      !row.matches?.(canonicalConversationTurnSelector)
-      && !hasCanonicalTurnAncestor(row)
-      && !row.querySelector?.(canonicalConversationTurnSelector)
-    ));
-    const eligibleFallbackSet = new Set(eligibleFallbackRows);
-    const fallbackRows = new Set(eligibleFallbackRows.filter((row) => {
-      let parent = row.parentElement;
-      while (parent) {
-        if (eligibleFallbackSet.has(parent)) return false;
-        parent = parent.parentElement;
-      }
-      return true;
-    }));
-    return candidates.filter((row) => (
-      isRenderedSessionElement(row) && (canonicalRows.has(row) || fallbackRows.has(row))
-    ));
-  };
-
-  const messageSelectionRecord = (row) => {
-    if (!(row instanceof HTMLElement)) return null;
-    const messageId = getMessageId(row);
-    if (!messageId) return null;
-    const metadata = messageTurnMetadata(row, messageId);
-    return {
-      messageId,
-      metadata,
-      row,
-      signature: JSON.stringify([
-        messageId,
-        metadata.status,
-        metadata.hasUserMessage,
-        metadata.hasContinuationReference,
-        metadata.continuationFromMessageId,
-      ]),
-    };
-  };
-
-  const groupMessageSelectionRecords = (records, sessionId) => {
-    const mergeMessageIds = (...groups) => [...new Set(
-      groups.flat().map(normalizeMessageId).filter(Boolean),
-    )];
-    const cachedGroupObservations = new Map();
-    records.forEach((record, recordIndex) => {
-      if (!record) return;
-      const cachedIds = knownLogicalMessageIds(sessionId, record.messageId);
-      if (cachedIds.length < 2) return;
-      const cacheKey = hardDeletedMessageKey(sessionId, cachedIds[0]);
-      const observation = cachedGroupObservations.get(cacheKey) || {
-        cachedIds,
-        members: [],
-      };
-      observation.members.push({
-        cachedIndex: cachedIds.indexOf(record.messageId),
-        recordIndex,
-      });
-      cachedGroupObservations.set(cacheKey, observation);
-    });
-    cachedGroupObservations.forEach(({ cachedIds, members }) => {
-      const topologyChanged = members.some((member, index) => {
-        const next = members[index + 1];
-        return next && (
-          next.recordIndex !== member.recordIndex + 1
-          || next.cachedIndex <= member.cachedIndex
-        );
-      });
-      if (topologyChanged) invalidateLogicalMessageGroup(sessionId, cachedIds);
-    });
-
-    records.filter(Boolean).forEach((record) => {
-      const cachedIds = knownLogicalMessageIds(sessionId, record.messageId);
-      const cachedIndex = cachedIds.indexOf(record.messageId);
-      if (cachedIndex < 0) return;
-      const expectedPredecessorId = cachedIndex > 0 ? cachedIds[cachedIndex - 1] : "";
-      const continuationReferenceContradictsCache = (
-        record.metadata.hasContinuationReference
-        && record.metadata.continuationFromMessageId !== expectedPredecessorId
-      );
-      const newlyConfirmedUserTurn = (
-        !record.metadata.hasContinuationReference
-        && record.metadata.hasUserMessage === true
-        && cachedIndex > 0
-      );
-      if (continuationReferenceContradictsCache || newlyConfirmedUserTurn) {
-        invalidateLogicalMessageGroup(sessionId, cachedIds);
-      }
-    });
-
-    const groups = [];
-    let previousGroup = null;
-    let previousRecord = null;
-    records.forEach((record) => {
-      if (!record) {
-        previousGroup = null;
-        previousRecord = null;
-        return;
-      }
-      const cachedIds = knownLogicalMessageIds(sessionId, record.messageId);
-      const previousRecordClosesGroup = (
-        previousGroup?.messageIds[previousGroup.messageIds.length - 1]
-        === previousRecord?.messageId
-      );
-      const explicitlyContinuesPrevious = (
-        previousRecordClosesGroup
-        && record.metadata.hasContinuationReference
-        && Boolean(record.metadata.continuationFromMessageId)
-        && record.metadata.continuationFromMessageId === previousRecord?.messageId
-      );
-      const cachedWithPrevious = (
-        cachedIds.length > 1
-        && Boolean(previousRecord)
-        && cachedIds.includes(previousRecord.messageId)
-      );
-      const heuristicallyContinuesInterruptedRequest = (
-        previousRecordClosesGroup
-        && !record.metadata.hasContinuationReference
-        && record.metadata.hasUserMessage === false
-        && previousRecord?.metadata.status === "interrupted"
-        && previousGroup?.originHasUserMessage === true
-      );
-      if (
-        previousGroup
-        && (explicitlyContinuesPrevious
-          || cachedWithPrevious
-          || heuristicallyContinuesInterruptedRequest)
-      ) {
-        previousGroup.records.push(record);
-        previousGroup.messageIds = mergeMessageIds(
-          previousGroup.messageIds,
-          cachedIds,
-          explicitlyContinuesPrevious ? record.metadata.continuationFromMessageId : [],
-          record.messageId,
-        );
-      } else {
-        previousGroup = {
-          messageIds: mergeMessageIds(
-            cachedIds.length > 1 ? cachedIds : [record.messageId],
-          ),
-          originHasUserMessage: (
-            record.metadata.hasUserMessage === true
-            || cachedIds.length > 1
-          ),
-          records: [record],
-        };
-        groups.push(previousGroup);
-      }
-      previousRecord = record;
-    });
-    groups.forEach((group) => {
-      if (group.messageIds.length > 1) {
-        group.messageIds = rememberLogicalMessageIds(sessionId, group.messageIds);
-      }
-    });
-    return groups;
-  };
-
-  const messageSelectButtonForRow = (row) => {
-    const cachedButton = messageSelectButtons.get(row);
-    if (
-      cachedButton
-      && cachedButton.isConnected !== false
-      && cachedButton.parentElement === row
-    ) return cachedButton;
-    return row.querySelector("[data-codey-message-select]");
-  };
-
-  const installMessageSelectButton = (row) => {
-    const existingButton = messageSelectButtonForRow(row);
-    if (existingButton) {
-      messageSelectButtons.set(row, existingButton);
-      return { button: existingButton, installed: false };
-    }
-    const button = document.createElement("button");
-    button.type = "button";
-    button.dataset.codeyMessageSelect = "true";
-    button.setAttribute("aria-pressed", row.classList.contains(selectedClass) ? "true" : "false");
-    button.setAttribute("aria-label", "选择这一轮对话");
-    button.title = "选择这一轮对话；按住 Shift 可连续选择";
-    button.textContent = row.classList.contains(selectedClass) ? "✓" : "○";
-    button.addEventListener("click", (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      selectRow(row, event);
-    });
-    // 行的定位交给零特异性的 :where 规则：默认 static 的行得到 relative，
-    // Codex 自己定位过的行不受影响；避免在安装循环里读取布局。
-    row.dataset.codeyMessageRow = "true";
-    row.appendChild(button);
-    messageSelectButtons.set(row, button);
-    return { button, installed: true };
-  };
-
-  const installMessageSelection = (root = document) => {
-    mountToolbar();
-    if (lastSelectedRow?.isConnected === false) lastSelectedRow = null;
-    let rows = messageSelectionRowsWithin(root);
-    let installed = false;
-    const directCanonicalRow = (
-      rows.length === 1
-      && rows[0] === root
-      && root instanceof HTMLElement
-      && root.matches?.(canonicalConversationTurnSelector)
-    );
-    let sessionId = "";
-    if (directCanonicalRow) {
-      const record = messageSelectionRecord(root);
-      const cachedButton = messageSelectButtons.get(root);
-      const cachedButtonMounted = (
-        cachedButton
-        && cachedButton.isConnected !== false
-        && cachedButton.parentElement === root
-      );
-      const previousLogicalAnchor = logicalAnchorForMessageRow(root);
-      const logicalTopologyChanged = (
-        previousLogicalAnchor !== root
-        && previousLogicalAnchor.isConnected === false
-      );
-      sessionId = hardDeletedMessageKeys.size ? getSessionId() : "";
-      if (record && isHardDeletedMessage(sessionId, record.messageId)) {
-        root.remove();
-        syncSelectionGroups();
-        updateToolbar();
-        return;
-      }
-      if (
-        record
-        && cachedButtonMounted
-        && root.dataset.codeySelectionSignature === record.signature
-        && !logicalTopologyChanged
-      ) return;
-      // A new, hydrated, completed, or virtualized physical row can change its
-      // relationship with the immediately preceding turn. Recompute the
-      // mounted conversation once for those bounded transitions; stable
-      // streaming scans retain the direct-row fast path above.
-      const documentRows = messageSelectionRowsWithin(document);
-      if (documentRows.includes(root)) rows = documentRows;
-    }
-    // Stable scans return through the direct-row signature fast path above.
-    // Resolve the session only for rows whose identity or logical grouping may
-    // have changed, so the virtualization cache stays scoped to one task.
-    if (!sessionId) sessionId = getSessionId();
-    const records = rows.map((row) => {
-      const record = messageSelectionRecord(row);
-      if (!record) return null;
-      if (isHardDeletedMessage(sessionId, record.messageId)) {
-        row.remove();
-        installed = true;
-        return null;
-      }
-      const previousMessageId = row.dataset.codeyMessageId || "";
-      if (previousMessageId !== record.messageId) {
-        const previousNormalizedMessageId = normalizeMessageId(previousMessageId);
-        const tailHydrated = isHistoryTailMessageId(previousMessageId)
-          && !isHistoryTailMessageId(record.messageId);
-        if (tailHydrated) {
-          replaceLogicalMessageId(sessionId, previousMessageId, record.messageId);
-        }
-        if (
-          !tailHydrated
-          && previousNormalizedMessageId
-          && previousNormalizedMessageId !== record.messageId
-        ) {
-          const previousAnchor = logicalAnchorForMessageRow(row);
-          if (previousAnchor === row) {
-            setLogicalRowSelected(previousAnchor, false);
-            if (lastSelectedRow === previousAnchor) lastSelectedRow = null;
-          } else {
-            row.classList.remove(selectedClass);
-            updateSelectionButton(previousAnchor);
-            if (lastSelectedRow === row) lastSelectedRow = previousAnchor;
-          }
-        }
-        row.dataset.codeyMessageId = record.messageId;
-        installed = true;
-      }
-      row.dataset.codeyMessageRow = "true";
-      const buttonResult = installMessageSelectButton(row);
-      record.button = buttonResult.button;
-      installed = installed || buttonResult.installed;
-      return record;
-    });
-
-    groupMessageSelectionRecords(records, sessionId).forEach((group) => {
-      const anchor = group.records[0].row;
-      const groupedRows = group.records.map((record) => record.row);
-      const groupedMessageIds = group.messageIds;
-      const groupSelected = (
-        logicalMessageGroupIsSelected(sessionId, groupedMessageIds)
-        || groupedRows.some((row) => (
-          row.classList.contains(selectedClass)
-          && row.dataset.codeyLogicalTurn !== "continuation"
-        ))
-      );
-      if (groupSelected) {
-        rememberLogicalMessageSelection(sessionId, groupedMessageIds, true);
-      }
-      messageLogicalRowsByAnchor.set(anchor, groupedRows);
-      group.records.forEach((record, index) => {
-        const { button, row } = record;
-        const logicalTurn = index === 0 ? "anchor" : "continuation";
-        if (row.dataset.codeyLogicalTurn !== logicalTurn) installed = true;
-        messageLogicalAnchorByRow.set(row, anchor);
-        row.dataset.codeyLogicalTurn = logicalTurn;
-        row.dataset.codeySelectionSignature = record.signature;
-        if (groupSelected) row.classList.add(selectedClass);
-        else row.classList.remove(selectedClass);
-        button.hidden = index !== 0;
-        button.tabIndex = index === 0 ? 0 : -1;
-        if (index === 0) button.removeAttribute("aria-hidden");
-        else button.setAttribute("aria-hidden", "true");
-        if (lastSelectedRow === row && index !== 0) lastSelectedRow = anchor;
-        if (index === 0) row.dataset.codeyMessageIds = JSON.stringify(groupedMessageIds);
-        else delete row.dataset.codeyMessageIds;
-      });
-      updateSelectionButton(anchor);
-    });
-    if (installed || records.some(Boolean)) {
-      syncSelectionGroups();
-      updateToolbar();
-    }
-  };
-
   const scan = (root = document, syncTitles = true) => {
-    // Streaming output makes conversation turns by far the most frequent scan
-    // root. Sidebar controls can never live inside a turn, so running their
-    // installers there is a guaranteed-miss walk of the whole turn subtree.
-    if (
-      root instanceof HTMLElement
-      && root.matches?.(conversationTurnSelector)
-      && !root.matches?.(sidebarScanRootSelector)
-    ) {
-      installMessageSelection(root);
-      return;
-    }
     installSessionExportButtons(root);
     installTasksImportButton(root);
     installSessionDeleteButtons(root);
     installProjectImportButtons(root);
     installThreadUpdatedTimes(root);
     recoverHiddenRunningThreads(root);
-    installMessageSelection(root);
     if (syncTitles) syncSidebarTitles(root);
   };
 
@@ -2818,7 +1744,6 @@
   window.__codeyGetSessionId = getSessionId;
   window.__codeyGetSessionTitle = getSessionTitle;
   window.__codeySyncSidebarTitles = syncSidebarTitles;
-  window.__codeyGetMessageId = getMessageId;
   window.__codeyReconcileStaleCompletedTask = reconcileStaleCompletedTask;
   window.__codeyProjectPathFromRow = projectPathFromRow;
   window.__codeyFormatRelativeThreadTime = formatRelativeThreadTime;
@@ -2832,13 +1757,9 @@
   window.__codeyExportSession = exportSession;
   window.__codeyImportSessionFile = importSessionFile;
   window.__codeyInstallSessionDeleteButtons = installSessionDeleteButtons;
-  window.__codeySyncSelectionGroups = syncSelectionGroups;
-  window.__codeyDeleteSelectedMessages = deleteSelected;
-  window.__codeyInstallMessageSelection = installMessageSelection;
 
   const codeyOwnedSelector = [
     rendererSettingsButtonSelector,
-    `#${toolbarId}`,
     `#${toastId}`,
     `#${sidebarActionTooltipId}`,
     `[${sessionExportAttribute}]`,
@@ -2846,13 +1767,9 @@
     `[${projectImportAttribute}]`,
     `[${sessionDeleteAttribute}]`,
     `[${threadUpdatedAtAttribute}]`,
-    "[data-codey-message-select]",
     "[data-codey-prompt-optimize]",
   ].join(", ");
-  const scanBoundarySelector = [
-    sidebarScanRootSelector,
-    conversationTurnSelector,
-  ].join(", ");
+  const scanBoundarySelector = sidebarScanRootSelector;
   const interactiveControlSelector = [
     "button",
     "[role=button]",
@@ -3049,11 +1966,7 @@
         }
         if (!containsRelevantElement(element)) continue;
         if (target && !isCodeyOwned(target)) {
-          const topologyRoot = addedSubtreeScanRoot(target) || nearestScanRoot(target);
-          messageSelectionRowsWithin(topologyRoot).forEach((row) => {
-            delete row.dataset.codeySelectionSignature;
-          });
-          addPendingScanRoot(topologyRoot);
+          addPendingScanRoot(addedSubtreeScanRoot(target) || nearestScanRoot(target));
         }
       }
     }
@@ -3079,11 +1992,6 @@
       "aria-label",
       "aria-expanded",
       "aria-hidden",
-      "data-turn-key",
-      "data-message-id",
-      "data-messageid",
-      "data-item-id",
-      "data-id",
       "data-request-user-input-auto-resolution-conversation-id",
       "data-app-action-sidebar-thread-host-id",
       "data-app-action-sidebar-thread-id",

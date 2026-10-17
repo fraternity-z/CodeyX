@@ -2876,7 +2876,7 @@ const run = async (patch) => {
         assert!(core.contains(SESSION_TOOLS_LOAD_PATH));
         assert!(core.contains("__codeyLazyLoader"));
         assert!(!core.contains("codey-settings-overlay-host"));
-        assert!(!core.contains("hardDeletedMessageKeys"));
+        assert!(!core.contains("__codeyInstallSessionDeleteButtons"));
         assert!(core.len() < SETTINGS_OVERLAY_SCRIPT.len());
         assert!(core.contains("插件市场兼容 injection failed"));
         assert!(core.contains("window.__codeyInjectionStatus"));
@@ -2940,7 +2940,7 @@ const run = async (patch) => {
             session_tools_load_script.contains("window.__codeySessionToolsInjectLoading = false")
         );
         // 压缩会改写内部标识符，锚点必须用不会被改名的 window 属性。
-        assert!(session_tools_load_script.contains("__codeyDeleteSelectedMessages"));
+        assert!(session_tools_load_script.contains("__codeyInstallSessionDeleteButtons"));
     }
 
     #[test]

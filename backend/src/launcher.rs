@@ -32,7 +32,6 @@ use crate::crashpad_pending_guard::{self, CrashpadPendingStatsHandle};
 use crate::error_log;
 use crate::local_router::{self, LocalRouter, ROUTER_PROVIDER_ID, RuntimeRouterEndpoint};
 use crate::maintenance_lock;
-use crate::message_delete;
 use crate::model_catalog;
 use crate::model_id;
 use crate::pet_slim_patch;
@@ -418,17 +417,13 @@ async fn run_startup_session_maintenance(
     let maintenance_result = tokio::task::spawn_blocking(move || {
         let stale_lock_recovery = maintenance_lock::recover_stale_locks(&maintenance_home);
         let session_cleanup = crate::session_management::finish_pending(&maintenance_home);
-        // A loaded Codex thread may have flushed a deleted turn after the live
-        // request completed. Reapply durable tombstones after the old process
-        // is stopped and before the new process can hydrate that stale data.
-        let message_delete_replay = message_delete::reapply_persisted_deletions(&maintenance_home);
         // `session_index.jsonl` is also cleaned before spawn, while its
         // source snapshot is stable. The original file is backed up.
         let index_cleanup = session_index_cleanup::cleanup(&maintenance_home);
-        (stale_lock_recovery, message_delete_replay, index_cleanup, session_cleanup)
+        (stale_lock_recovery, index_cleanup, session_cleanup)
     })
     .await;
-    let (stale_lock_recovery, message_delete_replay, index_cleanup, session_cleanup) = match maintenance_result {
+    let (stale_lock_recovery, index_cleanup, session_cleanup) = match maintenance_result {
         Ok(result) => result,
         Err(error) => {
             let error = anyhow::Error::new(error).context("启动前会话修复任务异常退出");
@@ -459,37 +454,6 @@ async fn run_startup_session_maintenance(
                 }),
             );
             eprintln!("清理陈旧维护锁失败：{error:#}");
-        }
-    }
-    match message_delete_replay {
-        Ok(summary) => {
-            if summary.deleted > 0 {
-                eprintln!(
-                    "启动前重新清理了 {} 个已删除对话轮（{} 个会话）",
-                    summary.deleted, summary.cleared_sessions
-                );
-            }
-            for (session_id, message) in summary.failures {
-                error_log::record_failure(
-                    "patch_failed",
-                    "reapply_message_deletion",
-                    message,
-                    serde_json::json!({
-                        "sessionId": session_id,
-                    }),
-                );
-            }
-        }
-        Err(error) => {
-            error_log::record_failure(
-                "patch_failed",
-                "reapply_message_deletions",
-                format!("{error:#}"),
-                serde_json::json!({
-                    "codexHome": home,
-                }),
-            );
-            eprintln!("启动前重施消息删除失败：{error:#}");
         }
     }
     if let Err(error) = &index_cleanup {

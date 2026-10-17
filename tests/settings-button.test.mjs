@@ -431,7 +431,6 @@ test("moves the CodeyX button beside the visible header's trailing action region
 
   const placeholders = {
     "codey-injected-style": new FakeElement("style"),
-    "codey-message-toolbar": new FakeElement(),
     "codey-settings-button": codeyButton,
   };
   const document = {
