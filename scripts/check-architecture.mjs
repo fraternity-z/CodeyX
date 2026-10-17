@@ -29,8 +29,9 @@ export function checkArchitecture(sources) {
     edges.set(file, dependencies);
     const checkImport = (node, specifier, typeOnly = false) => {
       if (typeof specifier !== "string" || typeOnly) return;
-      const target = specifier.startsWith(".") ? path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier)) : specifier;
-      const resolved = [target, `${target}.ts`, `${target}.tsx`, `${target}/index.ts`].find((candidate) => candidate in sources);
+      const target = (specifier.startsWith(".") ? path.posix.normalize(path.posix.join(path.posix.dirname(file), specifier)) : specifier)
+        .replace(/\.jsx?$/, (extension) => extension === ".jsx" ? ".tsx" : ".ts");
+      const resolved = [target, `${target}.ts`, `${target}.tsx`, `${target}/index.ts`, `${target}/index.tsx`].find((candidate) => candidate in sources);
       if (resolved) dependencies.push(resolved);
       const targetFeature = featureOf(`${target}/`);
       if (targetFeature && targetFeature !== feature
@@ -63,9 +64,14 @@ export function checkArchitecture(sources) {
         const allExportedTypes = exports && ts.isNamedExports(exports) && exports.elements.length > 0 && exports.elements.every((item) => item.isTypeOnly);
         checkImport(node, node.moduleSpecifier.text, node.isTypeOnly || clause?.isTypeOnly || allNamedTypes || allExportedTypes);
       }
+      if (ts.isImportEqualsDeclaration(node) && ts.isExternalModuleReference(node.moduleReference)) {
+        const specifier = node.moduleReference.expression;
+        if (specifier && ts.isStringLiteral(specifier)) checkImport(node, specifier.text, node.isTypeOnly);
+      }
       if (ts.isCallExpression(node)) {
         const callee = node.expression.getText(tree);
-        if ((node.expression.kind === ts.SyntaxKind.ImportKeyword || callee === "require") && ts.isStringLiteral(node.arguments[0])) checkImport(node, node.arguments[0].text);
+        const specifier = node.arguments[0];
+        if ((node.expression.kind === ts.SyntaxKind.ImportKeyword || callee === "require") && specifier && ts.isStringLiteralLike(specifier)) checkImport(node, specifier.text);
         if (governed && layer !== "requests" && /^(?:invoke|fetch|\w+\.(?:invoke|fetch))$/.test(callee)) report(file, node, tree, "后端与网络调用必须进入请求层");
         if (file === "src/App.tsx" && /^(?:invoke|fetch|\w+\.(?:invoke|fetch))$/.test(callee)) {
           report(file, node, tree, "App 不得新增业务命令，请放入功能请求层");
@@ -77,18 +83,38 @@ export function checkArchitecture(sources) {
     };
     visit(tree);
   }
-  // 功能目录的运行时依赖统一查环；根目录历史模块按职责逐步迁移。
-  const checked = new Set();
-  const stack = new Set();
+  // 检查包含功能模块的强连通分量，保留根目录历史模块自身的兼容边界。
+  // 必须遍历根目录中转模块，否则转导出会隐藏环；一个分量只报告一次。
+  const indices = new Map();
+  const lowLinks = new Map();
+  const stack = [];
+  const pending = new Set();
   const visitDependency = (file) => {
-    if (stack.has(file)) { errors.push(`${file}: 运行时循环依赖`); return; }
-    if (checked.has(file) || !featureOf(file)) return;
-    checked.add(file);
-    stack.add(file);
-    for (const next of edges.get(file) ?? []) visitDependency(next);
-    stack.delete(file);
+    const index = indices.size;
+    indices.set(file, index);
+    lowLinks.set(file, index);
+    stack.push(file);
+    pending.add(file);
+    for (const next of edges.get(file) ?? []) {
+      if (!indices.has(next)) {
+        visitDependency(next);
+        lowLinks.set(file, Math.min(lowLinks.get(file), lowLinks.get(next)));
+      } else if (pending.has(next)) {
+        lowLinks.set(file, Math.min(lowLinks.get(file), indices.get(next)));
+      }
+    }
+    if (lowLinks.get(file) !== index) return;
+    const component = [];
+    let member;
+    do {
+      member = stack.pop();
+      pending.delete(member);
+      component.push(member);
+    } while (member !== file);
+    const cyclic = component.length > 1 || edges.get(file)?.includes(file);
+    if (cyclic && component.some(featureOf)) errors.push(`${component.sort().join(", ")}: 运行时循环依赖`);
   };
-  for (const file of edges.keys()) visitDependency(file);
+  for (const file of edges.keys()) if (!indices.has(file)) visitDependency(file);
   return errors;
 }
 

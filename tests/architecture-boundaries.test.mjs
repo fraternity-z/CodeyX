@@ -49,3 +49,60 @@ test("扩展管理不再豁免视图请求、纯逻辑副作用和内部依赖�
   assert.match(checkArchitecture({ "src/features/codex-extensions/state.ts": 'document.createElement("a");' }).join(), /副作用/);
   assert.match(checkArchitecture({ "src/App.tsx": 'import { readInventory } from "./features/codex-extensions/requests";' }).join(), /公开入口/);
 });
+
+test("JavaScript 扩展名、目录视图和 import equals 不能绕开边界", () => {
+  for (const source of [
+    'import { request } from "./requests.js";',
+    'import request = require("./requests");',
+    'import(`./requests`);',
+  ]) {
+    assert.match(checkArchitecture({ "src/features/demo/DemoView.tsx": source }).join(), /视图不能依赖请求层/);
+  }
+  assert.match(checkArchitecture({
+    "src/features/demo/useDemoController.ts": 'import { Control } from "../../components/control";',
+    "src/components/control/index.tsx": 'export const Control = () => <div />;',
+  }).join(), /不能依赖视图/);
+  assert.deepEqual(checkArchitecture({
+    "src/features/demo/useDemoController.ts": 'import { request } from "./requests.js";',
+    "src/features/demo/requests.ts": 'export const request = () => 1;',
+    "src/features/demo/types.ts": 'import type View = require("./DemoView");',
+  }), []);
+  assert.doesNotThrow(() => checkArchitecture({ "src/features/demo/state.ts": "require();" }));
+});
+
+test("查环穿过根目录转导出并报告分量，不误报纯类型或共享依赖", () => {
+  const sources = {
+    "src/compat.ts": 'export { value } from "./features/demo/index.js";',
+    "src/features/demo/index.ts": 'export { value } from "./state.js";',
+    "src/features/demo/state.ts": 'import { value } from "../../compat";',
+  };
+  const errors = checkArchitecture(sources);
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /compat\.ts.*index\.ts.*state\.ts.*循环依赖/);
+  assert.deepEqual(checkArchitecture({
+    ...sources,
+    "src/features/demo/state.ts": 'import type { Value } from "../../compat";',
+  }), []);
+  assert.deepEqual(checkArchitecture({
+    "src/features/demo/index.ts": 'export { a } from "./a"; export { b } from "./b";',
+    "src/features/demo/a.ts": 'import { shared } from "../../shared";',
+    "src/features/demo/b.ts": 'import { shared } from "../../shared";',
+    "src/shared.ts": "export const shared = 1;",
+  }), []);
+});
+
+test("多个相交环仍识别功能依赖，根目录独立历史环不扩大迁移范围", () => {
+  const legacy = {
+    "src/a.ts": 'import "./b";',
+    "src/b.ts": 'import "./a";',
+  };
+  assert.deepEqual(checkArchitecture(legacy), []);
+  const errors = checkArchitecture({
+    ...legacy,
+    "src/b.ts": 'import "./a"; import "./features/demo";',
+    "src/features/demo/index.ts": 'import "../../a";',
+  });
+  assert.equal(errors.length, 1);
+  assert.match(errors[0], /循环依赖/);
+  assert.match(checkArchitecture({ "src/features/demo/state.ts": 'import "./state";' }).join(), /循环依赖/);
+});
