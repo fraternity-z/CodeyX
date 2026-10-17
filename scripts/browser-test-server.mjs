@@ -12,7 +12,9 @@ await build({
   define: { "import.meta.env.DEV": "true", "import.meta.env.PROD": "false" },
   build: {
     outDir, emptyOutDir: false, target: "es2022",
-    rollupOptions: { input: join(root, "tests/ui-browser.html") },
+    rollupOptions: {
+      input: ["ui-browser.html", "remote-control-browser.html"].map(file => join(root, "tests", file)),
+    },
   },
 });
 const server = await preview({
