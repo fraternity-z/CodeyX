@@ -112,7 +112,7 @@ test("筛选和显示排序不改变保存顺序，节点修改后测试结果�
   assert.equal(state.currentProbe({ ...first, endpoint: { ...first.endpoint, port: 1081 } }, probes).stale, true);
 });
 
-function fixture(initial = pool(node())) {
+function fixture(initial = pool(node()), capabilities = {}) {
   const calls = [], adopted = [];
   const options = { active: true, remote: false, isBusy: false,
     config: { settingsRevision: 1, codexLaunchProxy: "", networkProxy: initial, localRouterEnabled: true, profiles: [{ id: "route", name: "线路" }] },
@@ -124,6 +124,7 @@ function fixture(initial = pool(node())) {
   const snapshot = (revision = options.config.settingsRevision, value = options.config.networkProxy) => ({
     config: { ...options.config, settingsRevision: revision, networkProxy: value }, probeUrl: "https://probe.example/",
     launchProxyPoolSupported: true,
+    ...capabilities,
   });
   const render = () => h.render(options);
   const ready = async () => { render(); calls.at(-1).resolve(snapshot()); await h.flush(); return render(); };
@@ -364,6 +365,40 @@ test("启动出口独立于线路配置，拒绝禁用或缺失出口，解除�
   const cleared = processProxy.prepareProcessProxySave(next, { original: draft.selection, selection: draft.original }, false);
   assert.equal(cleared.processProxy, undefined);
   assert.deepEqual(cleared.upstreamByProfile, current.upstreamByProfile);
+});
+
+test("流量接管必须显式启用，校验宿主、出口和过期草稿", () => {
+  const current = pool({ ...node(), enabled: true });
+  const draft = { original: { kind: "legacy" }, selection: { kind: "node", id: "one" } };
+  assert.equal(processProxy.prepareProcessProxySave(current, draft, true, true).processCapture, undefined);
+  assert.throws(() => processProxy.prepareProcessProxySave(current, { ...draft, capture: true }, true), /Windows/);
+  assert.throws(() => processProxy.prepareProcessProxySave(current, { ...draft, selection: draft.original, capture: true }, true, true), /出口/);
+  const saved = processProxy.prepareProcessProxySave(current, { ...draft, capture: true }, true, true);
+  assert.equal(saved.processCapture, true);
+  assert.throws(() => processProxy.prepareProcessProxySave(saved, { original: draft.selection, selection: draft.selection }, true, true), /其他操作/);
+  const disabled = processProxy.prepareProcessProxySave(saved, { original: draft.selection, selection: draft.selection, originalCapture: true, capture: false }, true, false);
+  assert.equal(disabled.processCapture, undefined);
+  assert.deepEqual(disabled.processProxy, draft.selection);
+});
+
+test("接管勾选不立即启动服务，保存失败和隐藏保留草稿，解除池选择会关闭接管", async t => {
+  installControllerWindow(t);
+  const h = fixture(pool({ ...node(), enabled: true }), { trafficCaptureSupported: true, trafficCaptureAvailable: false });
+  (await h.ready()).openProcess();
+  h.render().changeProcess("node:one");
+  h.render().changeProcessCapture(true);
+  assert.equal(h.render().processDraft.capture, true);
+  assert.equal(h.calls.length, 1);
+  let work = h.render().saveProcess();
+  assert.equal(h.calls.at(-1).args.config.processCapture, true);
+  h.calls.at(-1).reject(new Error("fixture save failed")); await work; await h.flush();
+  assert.equal(h.render().processDraft.capture, true);
+  h.options.active = false; h.render().changeProcessCapture(false);
+  assert.equal(h.render().processDraft.capture, true);
+  h.options.active = true; h.render();
+  h.render().changeProcess("legacy");
+  assert.equal(h.render().processDraft.capture, false);
+  h.unmount();
 });
 
 test("启动出口保存与其他编辑互斥，失败保留草稿，禁用节点不清除选择", async t => {

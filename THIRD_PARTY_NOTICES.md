@@ -10,6 +10,8 @@ CodeyX 基于 [SuperGness/Codey](https://github.com/SuperGness/codey) 独立维�
 | [codex-mobile-bridge](https://github.com/try2love/codex-mobile-bridge) | 远程会话协议适配来源，MIT，Copyright (c) 2026 try2love。 |
 | [cloudflared](https://github.com/cloudflare/cloudflared) | 可选下载的隧道组件，Apache-2.0。 |
 | [CodeGraph](https://github.com/colbymchenry/codegraph) | 可选下载的代码索引工具，[MIT](https://github.com/colbymchenry/codegraph/blob/main/LICENSE)；运行包及其依赖保留各自许可。 |
+| [mitmproxy_rs](https://github.com/mitmproxy/mitmproxy_rs) | 流量接管验证组件使用其 MIT Rust 网络引擎，Copyright (c) 2022, Fabio Valentini and Maximilian Hils；进程关联设计参考 LGPL-3.0-or-later Windows redirector，完整许可随验证包分发。 |
+| [WinDivert](https://github.com/basil00/WinDivert) 与 [Rust FFI](https://github.com/Rubensei/windivert-rust) | 流量接管验证组件依赖，选择 LGPL-3.0-or-later 许可；动态库、驱动保持原样，完整许可随验证包分发。 |
 
 ## FastCtx NOTICE
 

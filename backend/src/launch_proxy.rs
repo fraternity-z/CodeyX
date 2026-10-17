@@ -17,6 +17,8 @@ pub(crate) struct CodexLaunchProxy {
     /// Chromium `--proxy-server=` 的值；socks5h 已转写为 socks5。
     chromium_server: String,
     auth: Option<crate::network_proxy::process_gateway::ProcessProxyAuth>,
+    #[cfg(windows)]
+    capture: Option<codey_traffic_service::client::ProcessScope>,
 }
 
 impl std::fmt::Debug for CodexLaunchProxy {
@@ -31,7 +33,7 @@ impl std::fmt::Debug for CodexLaunchProxy {
 /// 本次 Codey 启动的运行时所使用的代理。Codey 自己拉起的共享 app-server
 /// 也继承这份环境；配置保存后仍要到下次启动才刷新。
 /// 外层 None 表示尚未启动；Some(None) 表示本次启动明确没有附加代理。
-static ACTIVE: RwLock<Option<Option<CodexLaunchProxy>>> = RwLock::new(None);
+static ACTIVE: RwLock<(u64, Option<Option<CodexLaunchProxy>>)> = RwLock::new((0, None));
 
 impl CodexLaunchProxy {
     pub(crate) fn resolve(value: &str) -> anyhow::Result<Option<Self>> {
@@ -59,12 +61,19 @@ impl CodexLaunchProxy {
             url: value.to_string(),
             chromium_server: format!("{scheme}://{host}:{port}"),
             auth: None,
+            #[cfg(windows)]
+            capture: None,
         }))
     }
 
     pub(crate) fn from_gateway(gateway: &crate::network_proxy::process_gateway::ProcessGateway) -> Self {
-        Self { url: gateway.proxy_url(), chromium_server: gateway.server_url(), auth: Some(gateway.auth()) }
+        Self { url: gateway.proxy_url(), chromium_server: gateway.server_url(), auth: Some(gateway.auth()),
+            #[cfg(windows)] capture: gateway.capture_scope(),
+        }
     }
+
+    #[cfg(windows)]
+    pub(crate) fn capture_scope(&self) -> Option<codey_traffic_service::client::ProcessScope> { self.capture.clone() }
 
     pub(crate) fn authentication(&self) -> Option<crate::network_proxy::process_gateway::ProcessProxyAuth> {
         self.auth.clone()
@@ -123,24 +132,36 @@ impl CodexLaunchProxy {
 
 /// 记录本次 Codey 启动的运行时代理；只对 Codey 拉起的进程生效。
 pub(crate) fn set_active(proxy: Option<CodexLaunchProxy>) {
-    *ACTIVE
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(proxy);
+    let mut active = ACTIVE.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    active.0 = active.0.wrapping_add(1);
+    active.1 = Some(proxy);
 }
 
 /// Codey 自己拉起的共享 app-server 继承同一份启动代理环境。共享实例
 /// 按需创建，可能早于本次 Codex 启动，因此尚未启动时回读已保存的配置。
-pub(crate) fn shared_app_server_environment() -> Result<Vec<(String, String)>, String> {
-    let active = ACTIVE
+pub(crate) struct SharedAppServerLaunch {
+    pub environment: Vec<(String, String)>,
+    pub generation: u64,
+    #[cfg(windows)]
+    pub capture: Option<codey_traffic_service::client::ProcessScope>,
+}
+
+pub(crate) fn shared_app_server_launch() -> Result<SharedAppServerLaunch, String> {
+    let (generation, active) = ACTIVE
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
-    resolve_shared_environment(active.as_ref(), || {
+    let environment = resolve_shared_environment(active.as_ref(), || {
         let (config, recovered) = crate::config::ConfigStore::default().load_with_recovery()?;
         if recovered || config.network_proxy.has_process_proxy() {
             anyhow::bail!("managed proxy must be started first");
         }
         Ok(config.codex_launch_proxy)
+    })?;
+    Ok(SharedAppServerLaunch {
+        environment, generation,
+        #[cfg(windows)]
+        capture: active.as_ref().and_then(Option::as_ref).and_then(CodexLaunchProxy::capture_scope),
     })
 }
 
@@ -282,6 +303,7 @@ mod tests {
         let proxy = CodexLaunchProxy {
             url: "http://codeyx:fixture-local-secret@127.0.0.1:49152".into(),
             chromium_server: "http://127.0.0.1:49152".into(), auth: Some(auth),
+            #[cfg(windows)] capture: None,
         };
         assert!(!format!("{proxy:?}").contains("fixture-local-secret"));
         assert_eq!(proxy.chromium_argument(), "--proxy-server=http://127.0.0.1:49152");

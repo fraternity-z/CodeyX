@@ -1352,4 +1352,7 @@ fn network_proxy_startup_selection_requires_restart_but_node_edits_do_not() {
     }])).unwrap();
     assert!(!config_requires_restart_with_route_status(false, &applied,
         &RuntimeModelConfig::from_config(&applied), &RuntimeSubagentConfig::from_config(&applied), &current));
+    current.network_proxy.process_capture = true;
+    assert!(config_requires_restart_with_route_status(false, &applied,
+        &RuntimeModelConfig::from_config(&applied), &RuntimeSubagentConfig::from_config(&applied), &current));
 }

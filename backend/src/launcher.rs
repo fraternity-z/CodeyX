@@ -2109,6 +2109,12 @@ impl CodeyRuntime {
                 egress.clone(), config.network_proxy.process_proxy.clone(),
             ).await.map_err(anyhow::Error::msg)?)
         } else { None };
+        if config.network_proxy.process_capture {
+            #[cfg(windows)]
+            process_proxy.as_ref().context("流量接管缺少代理池出口")?.enable_capture().await?;
+            #[cfg(not(windows))]
+            anyhow::bail!("当前平台尚不支持流量接管，请明确关闭接管后再启动");
+        }
         let launch_proxy = match &process_proxy {
             Some(gateway) => Some(crate::launch_proxy::CodexLaunchProxy::from_gateway(gateway)),
             None => crate::launch_proxy::CodexLaunchProxy::resolve(&config.codex_launch_proxy)?,

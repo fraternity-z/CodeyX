@@ -3108,6 +3108,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.codex_launch_proxy != current.codex_launch_proxy
         || applied.network_proxy.process_proxy != current.network_proxy.process_proxy
+        || applied.network_proxy.process_capture != current.network_proxy.process_capture
         || applied.fast_context_tools != current.fast_context_tools
         || applied.conversation_git.enabled != current.conversation_git.enabled
         || applied.subagent_optimization != current.subagent_optimization

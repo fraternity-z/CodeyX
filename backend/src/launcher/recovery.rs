@@ -135,6 +135,7 @@ async fn launch_native(app_dir: &Path, home: &Path) -> Result<()> {
             "",
             required.then_some(environment.as_slice()),
             required,
+            None,
         )
         .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;

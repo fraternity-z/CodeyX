@@ -32,6 +32,8 @@ export function useNetworkProxyController({ active, config, isBusy, onConfigChan
   const [policyDraft, setPolicyDraft] = useState<PolicyDraft | null>(null);
   const [deletePolicyId, setDeletePolicyId] = useState<string | null>(null);
   const [launchProxyPoolSupported, setLaunchProxyPoolSupported] = useState(false);
+  const [trafficCaptureSupported, setTrafficCaptureSupported] = useState(false);
+  const [trafficCaptureAvailable, setTrafficCaptureAvailable] = useState(false);
   const [savedProfiles, setSavedProfiles] = useState<Profile[]>([]);
   const [routerEnabled, setRouterEnabled] = useState(false);
   const [chainProbes, setChainProbes] = useState<Record<string, ChainProbeSnapshot>>({});
@@ -54,6 +56,8 @@ export function useNetworkProxyController({ active, config, isBusy, onConfigChan
     setSavedProfiles(snapshot.config.profiles);
     setRouterEnabled(snapshot.config.localRouterEnabled);
     setLaunchProxyPoolSupported(snapshot.launchProxyPoolSupported === true);
+    setTrafficCaptureSupported(snapshot.trafficCaptureSupported === true);
+    setTrafficCaptureAvailable(snapshot.trafficCaptureAvailable === true);
     setReady(true);
     return true;
   });
@@ -246,16 +250,20 @@ export function useNetworkProxyController({ active, config, isBusy, onConfigChan
   });
   const openProcess = () => {
     if (!available || editing) return;
-    setProcessDraft({ original: processSelection, selection: processSelection }); setError(""); setNotice(""); setDeleteIds([]); setDeleteChainId(null); setDeletePolicyId(null);
+    setProcessDraft({ original: processSelection, selection: processSelection, originalCapture: Boolean(pool.processCapture), capture: Boolean(pool.processCapture) }); setError(""); setNotice(""); setDeleteIds([]); setDeleteChainId(null); setDeletePolicyId(null);
   };
   const changeProcess = (value: string) => {
     if (!active || remote || scope.pending || isBusy) return;
-    setProcessDraft(previous => previous ? { ...previous, selection: parseSelection(value) } : null);
+    setProcessDraft(previous => previous ? { ...previous, selection: parseSelection(value), capture: parseSelection(value).kind === "legacy" ? false : previous.capture } : null);
+  };
+  const changeProcessCapture = (capture: boolean) => {
+    if (!active || remote || scope.pending || isBusy) return;
+    setProcessDraft(previous => previous ? { ...previous, capture } : null);
   };
   const cancelProcess = () => { if (!scope.pending) setProcessDraft(null); };
   const saveProcess = () => run("save-process", async current => {
     if (!processDraft) return;
-    if (await persist(prepareProcessProxySave(pool, processDraft, launchProxyPoolSupported), [], current)) {
+    if (await persist(prepareProcessProxySave(pool, processDraft, launchProxyPoolSupported, trafficCaptureSupported), [], current)) {
       setProcessDraft(null); setNotice("Codex 启动出口已保存，重启 Codex 后应用；各线路的上游出口保持各自选择");
     }
   });
@@ -299,7 +307,7 @@ export function useNetworkProxyController({ active, config, isBusy, onConfigChan
   let upstreamDraftError = "";
   if (upstreamDraft) { try { prepareUpstreamSave(pool, upstreamDraft, savedProfiles, routerEnabled); } catch (cause) { upstreamDraftError = errorText(cause); } }
   let processDraftError = "";
-  if (processDraft) { try { prepareProcessProxySave(pool, processDraft, launchProxyPoolSupported); } catch (cause) { processDraftError = errorText(cause); } }
+  if (processDraft) { try { prepareProcessProxySave(pool, processDraft, launchProxyPoolSupported, trafficCaptureSupported); } catch (cause) { processDraftError = errorText(cause); } }
   return { launchProxy, launchProxyError, changeLaunchProxy, pool, draft, draftError: draft ? validateDraft(draft) : "",
     filter, changeFilter, rows, selectedIds, toggleSelected, deleteIds, requestDelete, cancelDelete, confirmDelete,
     openNode, changeDraft, cancelDraft, saveDraft, setEnabled, testNode, probeUrl, busy, loading, ready, error, notice,
@@ -309,7 +317,7 @@ export function useNetworkProxyController({ active, config, isBusy, onConfigChan
     upstreamRows, upstreamDraft, upstreamDraftError, openUpstream, changeUpstream, cancelUpstream, saveUpstream, routerEnabled,
     processSelection, processLabel: processSelection.kind === "legacy" ? "手动启动地址或原有网络环境" : upstreamLabel(pool, processSelection),
     processProblem: upstreamProblem(pool, processSelection), processDraft, processDraftError,
-    openProcess, changeProcess, cancelProcess, saveProcess, launchProxyPoolSupported,
+    openProcess, changeProcess, changeProcessCapture, cancelProcess, saveProcess, launchProxyPoolSupported, trafficCaptureSupported, trafficCaptureAvailable,
     policyDraft, policyDraftError: policyDraft ? validatePolicyDraft(pool, policyDraft) : "", openPolicy, changePolicy, addRule, moveRule, cancelPolicy, savePolicy, setPolicyEnabled,
     deletePolicyId, requestDeletePolicy, cancelDeletePolicy, confirmDeletePolicy,
     disabled: !available, draftDisabled: !active || remote || isBusy || scope.pending, remote, refresh };

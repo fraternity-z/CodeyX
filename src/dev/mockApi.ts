@@ -743,6 +743,7 @@ if (import.meta.env.DEV) {
         }
         return { config: previewConfig, probeUrl: "https://api.ipify.org?format=json",
           launchProxyPoolSupported: true,
+          trafficCaptureSupported: previewClientPlatform === "windows", trafficCaptureAvailable: false,
           fastContextToolsStatus: { userConfigured: false, detectionFailed: false } };
       }
       if (command === "network_proxy_test") {

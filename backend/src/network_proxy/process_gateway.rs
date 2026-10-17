@@ -1,6 +1,7 @@
-//! Authenticated loopback HTTP ingress for the Codex launch environment.
-//! This is cooperative proxying, not OS process isolation. Pool policy is
-//! resolved before each connection; upstream failures never become direct I/O.
+//! Authenticated loopback HTTP/SOCKS ingress for the Codex launch environment
+//! and the traffic helper. Pool policy is resolved before each connection;
+//! upstream failures never become direct I/O. Process isolation belongs to the
+//! helper, not this gateway.
 use std::{
     convert::Infallible,
     pin::Pin,
@@ -24,6 +25,7 @@ use hyper::{
 };
 use hyper_util::rt::{TokioIo, TokioTimer};
 use tokio::{
+    io::AsyncWriteExt,
     net::{TcpListener, TcpStream},
     sync::{Semaphore, oneshot},
     task::{JoinHandle, JoinSet},
@@ -72,6 +74,8 @@ struct ContextState {
 pub(crate) struct ProcessGateway {
     auth: ProcessProxyAuth,
     task: Mutex<Option<JoinHandle<()>>>,
+    #[cfg(windows)]
+    capture: Mutex<Option<super::process_capture::CaptureSession>>,
 }
 
 impl ProcessGateway {
@@ -122,11 +126,26 @@ impl ProcessGateway {
         Ok(Self {
             auth,
             task: Mutex::new(Some(task)),
+            #[cfg(windows)]
+            capture: Mutex::new(None),
         })
     }
 
     pub(crate) fn auth(&self) -> ProcessProxyAuth {
         self.auth.clone()
+    }
+
+    #[cfg(windows)]
+    pub(crate) async fn enable_capture(&self) -> anyhow::Result<()> {
+        let capture = super::process_capture::CaptureSession::start(self.auth()).await?;
+        *self.capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(capture);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    pub(crate) fn capture_scope(&self) -> Option<codey_traffic_service::client::ProcessScope> {
+        self.capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .as_ref().map(super::process_capture::CaptureSession::scope)
     }
 
     pub(crate) fn proxy_url(&self) -> String {
@@ -141,6 +160,15 @@ impl ProcessGateway {
     }
 
     pub(crate) async fn stop(&self) {
+        #[cfg(windows)]
+        {
+            let capture = self.capture.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+            if let Some(mut capture) = capture {
+                // Runtime cleanup has already confirmed that its Codex processes
+                // stopped. The session's drop guard also stops its owned Job.
+                let _ = capture.stop().await;
+            }
+        }
         let task = self
             .task
             .lock()
@@ -168,6 +196,17 @@ impl Drop for ProcessGateway {
 
 async fn serve(socket: TcpStream, state: Arc<ContextState>) {
     let _ = socket.set_nodelay(true);
+    let mut first = [0; 1];
+    if !matches!(
+        timeout(Duration::from_secs(10), socket.peek(&mut first)).await,
+        Ok(Ok(1))
+    ) {
+        return;
+    }
+    if first[0] == 5 {
+        serve_socks(socket, state).await;
+        return;
+    }
     let (sender, receiver) = oneshot::channel();
     let sender = Arc::new(Mutex::new(Some(sender)));
     let service = service_fn(move |request| handle(request, state.clone(), sender.clone()));
@@ -187,6 +226,43 @@ async fn serve(socket: TcpStream, state: Arc<ContextState>) {
     if let Ok(relay) = receiver.await {
         relay.run().await;
     }
+}
+
+async fn serve_socks(mut downstream: TcpStream, state: Arc<ContextState>) {
+    let Ok(Ok(destination)) = timeout(
+        Duration::from_secs(10),
+        super::gateway::read_request(&mut downstream, &state.auth.password),
+    )
+    .await
+    else {
+        return;
+    };
+    if is_self_destination(&destination, &state.auth) {
+        let _ = downstream.write_all(&[5, 2, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+        return;
+    }
+    // Re-resolve each request. Holding a cached lease here would keep using a
+    // removed/disabled node after the user changes the pool configuration.
+    let Ok(lease) = state.egress.for_selection(&state.selection).await else {
+        let _ = downstream.write_all(&[5, 1, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+        return;
+    };
+    let Ok(mut upstream) = lease.connect(destination).await else {
+        let _ = downstream.write_all(&[5, 1, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+        return;
+    };
+    if downstream
+        .write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0])
+        .await
+        .is_ok()
+    {
+        let _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await;
+    }
+}
+
+fn is_self_destination(destination: &Destination, auth: &ProcessProxyAuth) -> bool {
+    destination.port == auth.port
+        && (destination.host == auth.host || destination.host.eq_ignore_ascii_case("localhost"))
 }
 
 async fn handle(
@@ -210,10 +286,7 @@ async fn handle(
         Err(()) => return Ok(reply(StatusCode::BAD_REQUEST, "代理目标地址无效")),
     };
     // Refuse obvious self-loops even if a selected first hop is a local proxy.
-    if destination.port == state.auth.port
-        && (destination.host == state.auth.host
-            || destination.host.eq_ignore_ascii_case("localhost"))
-    {
+    if is_self_destination(&destination, &state.auth) {
         return Ok(reply(StatusCode::BAD_REQUEST, "代理入口不能作为目标"));
     }
     let websocket = request

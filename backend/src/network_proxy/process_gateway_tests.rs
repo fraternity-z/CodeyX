@@ -349,3 +349,124 @@ async fn disabled_or_unavailable_exit_blocks_new_requests_without_direct_fallbac
             .is_err()
     );
 }
+
+async fn socks_request(
+    gateway: &ProcessGateway,
+    password: &str,
+    host: &str,
+    port: u16,
+) -> TcpStream {
+    let mut stream = TcpStream::connect(address(gateway)).await.unwrap();
+    stream.write_all(&[5, 1, 2]).await.unwrap();
+    let mut reply = [0; 2];
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply, [5, 2]);
+    let mut auth = vec![1, 6];
+    auth.extend_from_slice(b"codeyx");
+    auth.push(password.len() as u8);
+    auth.extend_from_slice(password.as_bytes());
+    stream.write_all(&auth).await.unwrap();
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply, [1, u8::from(password != gateway.auth.password)]);
+    if reply[1] == 0 {
+        let mut request = vec![5, 1, 0, 3, host.len() as u8];
+        request.extend_from_slice(host.as_bytes());
+        request.extend_from_slice(&port.to_be_bytes());
+        stream.write_all(&request).await.unwrap();
+    }
+    stream
+}
+
+#[tokio::test]
+async fn socks_uses_current_pool_and_streams_opaque_data_with_half_close() {
+    let (gateway, egress, mut policy, listener) = fixture().await;
+    let serving = tokio::spawn(async move {
+        let mut stream = origin(listener, 443).await;
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).await.unwrap();
+        assert_eq!(request, b"\x16\x03\x03opaque\0\xff");
+        stream.write_all(b"reply").await.unwrap();
+    });
+    let mut stream = socks_request(&gateway, &gateway.auth.password, "target.invalid", 443).await;
+    let mut reply = [0; 10];
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 0);
+    policy.nodes[0].enabled = false;
+    egress.configure(policy);
+    stream.write_all(b"\x16\x03\x03opaque\0\xff").await.unwrap();
+    stream.shutdown().await.unwrap();
+    let mut response = Vec::new();
+    timeout(Duration::from_secs(3), stream.read_to_end(&mut response))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(response, b"reply");
+    serving.await.unwrap();
+    let mut blocked = socks_request(&gateway, &gateway.auth.password, "target.invalid", 443).await;
+    blocked.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 1);
+}
+
+#[tokio::test]
+async fn socks_rejects_credentials_and_self_loops_without_contacting_an_exit() {
+    let (gateway, _, _, listener) = fixture().await;
+    let mut rejected = socks_request(&gateway, "wrong", "target.invalid", 443).await;
+    let mut byte = [0; 1];
+    assert_eq!(rejected.read(&mut byte).await.unwrap(), 0);
+    let mut looped = socks_request(
+        &gateway,
+        &gateway.auth.password,
+        "127.0.0.1",
+        gateway.auth.port,
+    )
+    .await;
+    let mut reply = [0; 10];
+    looped.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 2);
+    assert!(
+        timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn socks_never_falls_back_to_direct_and_gateway_stop_closes_sessions() {
+    let (gateway, _, _, listener) = fixture().await;
+    drop(listener);
+    let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let mut blocked = socks_request(
+        &gateway,
+        &gateway.auth.password,
+        "127.0.0.1",
+        target.local_addr().unwrap().port(),
+    )
+    .await;
+    let mut reply = [0; 10];
+    blocked.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 1);
+    assert!(
+        timeout(Duration::from_millis(50), target.accept())
+            .await
+            .is_err()
+    );
+
+    let (gateway, _, _, listener) = fixture().await;
+    let serving = tokio::spawn(async move {
+        let mut stream = origin(listener, 443).await;
+        let mut byte = [0; 1];
+        assert_eq!(
+            timeout(Duration::from_secs(3), stream.read(&mut byte))
+                .await
+                .unwrap()
+                .unwrap(),
+            0
+        );
+    });
+    let mut stream = socks_request(&gateway, &gateway.auth.password, "target.invalid", 443).await;
+    stream.read_exact(&mut reply).await.unwrap();
+    assert_eq!(reply[1], 0);
+    gateway.stop().await;
+    assert_eq!(stream.read(&mut reply).await.unwrap(), 0);
+    serving.await.unwrap();
+}

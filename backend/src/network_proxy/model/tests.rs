@@ -220,6 +220,20 @@ fn process_proxy_references_survive_disable_but_prevent_deletion() {
 }
 
 #[test]
+fn traffic_capture_is_opt_in_and_requires_an_explicit_pool_exit() {
+    let mut config: NetworkProxyConfig = serde_json::from_str("{}").unwrap();
+    assert!(!config.process_capture);
+    assert!(serde_json::to_value(&config).unwrap().get("processCapture").is_none());
+    config.process_capture = true;
+    assert!(config.validate().unwrap_err().contains("请选择代理池"));
+    config.nodes = vec![node("exit")];
+    config.process_proxy = ProxySelection::Node { id: "exit".into() };
+    config.validate().unwrap();
+    let restored: NetworkProxyConfig = serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+    assert_eq!(restored, config);
+}
+
+#[test]
 fn manual_test_can_inspect_disabled_chain_but_never_relaxes_runtime_selection() {
     let mut config = NetworkProxyConfig {
         nodes: vec![node("first"), node("second")],

@@ -22,8 +22,8 @@ export type ProxyPolicy = { id: string; name: string; enabled: boolean; allowDir
 export type RuleDraft = Omit<ProxyRule, "ports"> & { ports: string };
 export type PolicyDraft = Omit<ProxyPolicy, "rules"> & { original: ProxyPolicy | null; rules: RuleDraft[] };
 export type UpstreamDraft = { profileId: string; original: ProxySelection; selection: ProxySelection };
-export type ProcessProxyDraft = { original: ProxySelection; selection: ProxySelection };
-export type NetworkProxyConfig = { schemaVersion: number; nodes: ProxyNode[]; chains: ProxyChain[]; policies?: ProxyPolicy[]; upstreamByProfile?: Record<string, ProxySelection>; processProxy?: ProxySelection };
+export type ProcessProxyDraft = { original: ProxySelection; selection: ProxySelection; originalCapture?: boolean; capture?: boolean };
+export type NetworkProxyConfig = { schemaVersion: number; nodes: ProxyNode[]; chains: ProxyChain[]; policies?: ProxyPolicy[]; upstreamByProfile?: Record<string, ProxySelection>; processProxy?: ProxySelection; processCapture?: boolean };
 export type CredentialUpdate = {
   nodeId: string;
   change: { kind: "clear" } | { kind: "replace"; username: string; password: string };
@@ -56,5 +56,5 @@ export type ProxyProbe = {
 };
 export type ProbeSnapshot = { node: ProxyNode; result: ProxyProbe };
 export type ChainProbeSnapshot = { chain: ProxyChain; nodes: ProxyNode[]; result: Omit<ProxyProbe, "nodeId"> & { chainId: string } };
-export type PoolSnapshot = ConfigSaveResult & { probeUrl: string; launchProxyPoolSupported?: boolean };
+export type PoolSnapshot = ConfigSaveResult & { probeUrl: string; launchProxyPoolSupported?: boolean; trafficCaptureSupported?: boolean; trafficCaptureAvailable?: boolean };
 export type PoolFilter = { query: string; enabled: "all" | "enabled" | "disabled"; sort: "saved" | "name" | "latency" };

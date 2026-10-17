@@ -232,6 +232,42 @@ test("Codex 启动出口独立保存，禁用后显示阻断并保留原有线�
   await expect(entry).toHaveCount(0);
 });
 
+for (const theme of ["light", "dark"]) test(`TCP 接管显式保存和关闭，键盘与窄屏可用（${theme}）`, async ({ page }) => {
+  await page.setViewportSize({ width: 430, height: 900 });
+  await openNetwork(page, theme);
+  await addProxy(page, "接管出口");
+  const entry = page.getByRole("list", { name: "代理节点列表" }).getByRole("listitem");
+  await entry.getByRole("button", { name: "启用", exact: true }).click();
+  await expect(entry.getByText("已启用", { exact: true })).toBeVisible();
+  const savedPool = async () => page.evaluate(async () => (await window.__codexSessionDeleteBridge("/api/network_proxy_get", {})).config.networkProxy);
+  const before = await savedPool();
+  await page.getByRole("button", { name: "选择 Codex 启动出口", exact: true }).click();
+  const capture = page.getByRole("checkbox", { name: "启用实验性 TCP 流量接管", exact: true });
+  await expect(capture).not.toBeChecked();
+  await expect(capture).toBeDisabled();
+  await page.getByLabel("Codex 启动出口", { exact: true }).selectOption(`node:${before.nodes[0].id}`);
+  await capture.focus(); await page.keyboard.press("Space");
+  await expect(capture).toBeChecked();
+  expect((await savedPool()).processCapture).toBeUndefined();
+  await expect(page.getByRole("status").filter({ hasText: "尚未找到接管组件" })).toBeVisible();
+  const editor = page.getByRole("form", { name: "Codex 启动出口编辑" });
+  expect(await editor.evaluate(element => element.scrollWidth <= element.clientWidth + 1)).toBe(true);
+  await editor.screenshot({ path: `output/playwright/network-proxy-capture-${theme}.png` });
+  await page.getByRole("button", { name: "保存启动出口", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect((await savedPool()).processCapture).toBe(true);
+  await page.getByRole("button", { name: "刷新代理池", exact: true }).click();
+  await page.getByRole("button", { name: "选择 Codex 启动出口", exact: true }).click();
+  await expect(capture).toBeChecked();
+  await capture.uncheck();
+  await page.getByRole("button", { name: "保存启动出口", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  const after = await savedPool();
+  expect(after.processCapture).toBeUndefined();
+  expect(after.processProxy).toEqual({ kind: "node", id: before.nodes[0].id });
+  expect(after.nodes).toEqual(before.nodes);
+});
+
 test("出口策略显式授权、排序和绑定，禁用保留绑定且未解除前不可删除", async ({ page }) => {
   await page.setViewportSize({ width: 430, height: 900 });
   await openNetwork(page, "dark");

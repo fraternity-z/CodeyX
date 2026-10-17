@@ -29,7 +29,7 @@ export function NetworkProxyPage(props: Props) {
         <div className="feature-policy-heading">
           <div className="flex items-center gap-2">
             <h3 id="launch-proxy-title" className="settings-section-heading">Codex 启动代理</h3>
-            <Badge variant="secondary">兼容接入</Badge>
+            <Badge variant="secondary">{controller.pool.processCapture ? "下次启动接管" : "兼容接入"}</Badge>
           </div>
           <p>为客户端与支持代理设置的子进程选择出口；保存后，重启 Codex 后生效。</p>
         </div>
@@ -53,7 +53,9 @@ export function NetworkProxyPage(props: Props) {
           </div>
         </div>
         <p className="m-0 text-xs text-muted" role="note">
-          当前为兼容接入，未启用强制进程隔离。忽略代理设置的程序、DNS 或 UDP 请求可能不经过此代理。
+          {controller.pool.processCapture
+            ? "已为下次启动选择实验性 TCP 接管；系统 DNS 与异常退出防泄漏仍有边界，保存设置不代表接管正在运行。"
+            : "当前为兼容接入，未启用强制进程隔离。忽略代理设置的程序、DNS 或 UDP 请求可能不经过此代理。"}
         </p>
       </section>
       <ProxyPool controller={controller} />

@@ -5,6 +5,7 @@ members = [
   "crates/codey-error-log",
   "crates/codey-fastctx",
   "crates/codey-plugin-sdk",
+  "crates/codey-traffic-service",
   "vendor/CodeyRuntime/crates/codey-runtime-core",
   "vendor/CodeyRuntime/crates/codey-runtime-data",
 ]

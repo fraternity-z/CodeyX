@@ -133,7 +133,10 @@ async fn serve(
     let _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await;
 }
 
-async fn read_request(stream: &mut TcpStream, password: &str) -> Result<Destination, ()> {
+pub(super) async fn read_request(
+    stream: &mut TcpStream,
+    password: &str,
+) -> Result<Destination, ()> {
     let mut header = [0; 2];
     stream.read_exact(&mut header).await.map_err(|_| ())?;
     if header[0] != 5 || header[1] == 0 {

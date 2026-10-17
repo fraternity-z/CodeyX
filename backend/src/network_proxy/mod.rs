@@ -5,6 +5,8 @@ mod forwarding;
 pub(crate) mod model;
 pub(crate) mod probe;
 pub(crate) mod process_gateway;
+#[cfg(windows)]
+pub(crate) mod process_capture;
 pub(crate) mod routing;
 pub(crate) mod secrets;
 pub(crate) mod tunnel;

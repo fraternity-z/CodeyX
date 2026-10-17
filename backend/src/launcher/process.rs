@@ -356,6 +356,7 @@ pub(super) async fn spawn_codex(
                     runtime_config_overrides,
                     subagent_gate_active,
                     launch_proxy_environment.as_deref(),
+                    options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
                     format!(
                         "启动尝试 {attempt}/2：NODE_OPTIONS 注入不可用（{}），主进程 Inspector 不可用（{}），且 CLI 兼容入口不可用：{error:#}",
                         fuses.node_options.as_str(),
@@ -386,6 +387,7 @@ pub(super) async fn spawn_codex(
                 &launch_arguments,
                 &launch_environment,
                 wrapper_environment_required || options.launch_proxy.is_some(),
+                options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
             )
             .await;
             let (mut spawned, wrapper_environment_applied) = match launch {
@@ -591,6 +593,7 @@ pub(super) async fn spawn_codex(
                         &runtime_arguments,
                         launch_proxy_environment.as_deref().unwrap_or(&[]),
                         options.launch_proxy.is_some(),
+                        options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
                     )
                     .await
                     {
@@ -1658,6 +1661,7 @@ async fn launch_windows_codex_without_compatibility(
     runtime_config_overrides: &[String],
     subagent_gate_active: bool,
     launch_proxy_environment: Option<&[(String, String)]>,
+    capture: Option<codey_traffic_service::client::ProcessScope>,
     startup_error: String,
 ) -> Result<SpawnedCodex> {
     if !runtime_config_overrides.is_empty() {
@@ -1676,6 +1680,7 @@ async fn launch_windows_codex_without_compatibility(
         runtime_arguments,
         launch_proxy_environment.unwrap_or(&[]),
         launch_proxy_environment.is_some(),
+        capture,
     )
     .await
     .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;

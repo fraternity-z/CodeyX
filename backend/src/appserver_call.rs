@@ -22,6 +22,7 @@ pub(crate) struct Route {
 
 struct SharedClient {
     route_key: String,
+    launch_generation: u64,
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<tokio::process::ChildStdout>,
@@ -95,13 +96,14 @@ enum Reply {
 
 async fn invoke(route: &Route, method: &str, params: &Value) -> Result<Reply, String> {
     let mut guard = SHARED.lock().await;
+    let launch = crate::launch_proxy::shared_app_server_launch()?;
     let key = route_key(route);
     let reusable = guard
         .as_mut()
-        .is_some_and(|client| client.route_key == key && !client.exited());
+        .is_some_and(|client| client.route_key == key && client.launch_generation == launch.generation && !client.exited());
     if !reusable {
         *guard = None;
-        *guard = Some(SharedClient::start(route).await?);
+        *guard = Some(SharedClient::start(route, launch).await?);
     }
     let client = guard.as_mut().expect("共享 app-server 已启动");
     match client.request(method, params).await {
@@ -114,8 +116,7 @@ async fn invoke(route: &Route, method: &str, params: &Value) -> Result<Reply, St
 }
 
 impl SharedClient {
-    async fn start(route: &Route) -> Result<Self, String> {
-        let proxy_environment = crate::launch_proxy::shared_app_server_environment()?;
+    async fn start(route: &Route, launch: crate::launch_proxy::SharedAppServerLaunch) -> Result<Self, String> {
         let executable = codex_cli().ok_or("未找到 Codex app-server")?;
         let mut command = Command::new(executable);
         command.arg("app-server").arg("--listen").arg("stdio://");
@@ -126,16 +127,29 @@ impl SharedClient {
             .env("CODEX_HOME", crate::codex_config::codex_home())
             .env_remove("CODEX_CLI_PATH")
             .env_remove("CODEX_APP_SERVER_FORCE_CLI")
-            .envs(proxy_environment)
+            .envs(launch.environment)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
+        #[cfg(windows)]
+        let capture = launch.capture;
+        #[cfg(windows)]
+        if capture.is_some() {
+            command.creation_flags(windows::Win32::System::Threading::CREATE_SUSPENDED.0
+                | windows::Win32::System::Threading::CREATE_NO_WINDOW.0);
+        }
         let mut child = command.spawn().map_err(|_| "app-server 启动失败")?;
+        #[cfg(windows)]
+        if let Some(scope) = &capture {
+            crate::network_proxy::process_capture::bind_and_resume(scope, &mut child)
+                .await.map_err(|_| "app-server 未能绑定到流量接管会话，已停止启动")?;
+        }
         let stdin = child.stdin.take().ok_or("app-server 缺少输入")?;
         let stdout = child.stdout.take().ok_or("app-server 缺少输出")?;
         let mut client = Self {
             route_key: route_key(route),
+            launch_generation: launch.generation,
             child,
             stdin,
             stdout: BufReader::new(stdout),

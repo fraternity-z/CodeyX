@@ -82,8 +82,15 @@ async fn snapshot(state: &Arc<AppState>, config: &crate::config::CodeyConfig) ->
         "fastContextToolsStatus": current_fast_context_tools_status(),
         "probeUrl": probe::EXIT_PROBE_URL,
         "launchProxyPoolSupported": crate::codex_config::runtime_router_platform_supported(),
+        "trafficCaptureSupported": cfg!(all(windows, target_arch = "x86_64")),
+        "trafficCaptureAvailable": capture_available(),
         "restartRequired": super::runtime_config_requires_restart(state, config).await,
     })
+}
+
+fn capture_available() -> bool {
+    #[cfg(windows)] { crate::network_proxy::process_capture::available() }
+    #[cfg(not(windows))] { false }
 }
 
 async fn save(state: &Arc<AppState>, input: SaveInput) -> Result<Value, String> {
@@ -98,7 +105,8 @@ async fn save(state: &Arc<AppState>, input: SaveInput) -> Result<Value, String> 
     let mut validated = previous.clone();
     validated.network_proxy = input.config.clone();
     validated.validate_network_proxy()?;
-    if input.config.process_proxy != previous.network_proxy.process_proxy
+    if (input.config.process_proxy != previous.network_proxy.process_proxy
+        || input.config.process_capture != previous.network_proxy.process_capture)
         && input.config.has_process_proxy()
     {
         if !crate::codex_config::runtime_router_platform_supported() {
@@ -107,6 +115,10 @@ async fn save(state: &Arc<AppState>, input: SaveInput) -> Result<Value, String> 
         input
             .config
             .validate_active_selection(&input.config.process_proxy)?;
+    }
+    if input.config.process_capture && !previous.network_proxy.process_capture
+        && !cfg!(all(windows, target_arch = "x86_64")) {
+        return Err("当前宿主暂不支持流量接管".into());
     }
     for (profile_id, selection) in &input.config.upstream_by_profile {
         if matches!(selection, ProxySelection::Legacy)

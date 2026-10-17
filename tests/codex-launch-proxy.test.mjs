@@ -90,6 +90,6 @@ test("launch proxy reaches Chromium arguments, spawn environment and restart det
   );
   assert.match(
     appServerSource,
-    /shared_app_server_environment\(\)/,
+    /shared_app_server_launch\(\)/,
   );
 });

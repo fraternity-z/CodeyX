@@ -184,6 +184,9 @@ pub(crate) struct NetworkProxyConfig {
     /// Applied to the next managed Codex launch, independently of model routes.
     #[serde(default)]
     pub process_proxy: ProxySelection,
+    /// Explicit opt-in; old configurations never load a capture driver.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub process_capture: bool,
 }
 
 fn schema_version() -> u32 {
@@ -199,6 +202,7 @@ impl Default for NetworkProxyConfig {
             policies: Vec::new(),
             upstream_by_profile: std::collections::BTreeMap::new(),
             process_proxy: ProxySelection::Legacy,
+            process_capture: false,
         }
     }
 }
@@ -267,6 +271,9 @@ impl NetworkProxyConfig {
             self.validate_selection_reference(selection)?;
         }
         self.validate_selection_reference(&self.process_proxy)?;
+        if self.process_capture && !self.has_process_proxy() {
+            return Err("启用流量接管前请选择代理池出口或链路".into());
+        }
         Ok(())
     }
 
