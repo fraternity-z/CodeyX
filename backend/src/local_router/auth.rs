@@ -297,6 +297,7 @@ pub(crate) async fn resolve_siwc_upstream_auth(
     caches: &Mutex<SiwcAuthCaches>,
     default_client: &reqwest::Client,
     proxied_clients: &Mutex<HashMap<String, reqwest::Client>>,
+    proxy_override: Option<&str>,
 ) -> Result<OfficialUpstreamAuth> {
     let credential = read_cached_siwc_auth(siwc_path, caches).await?;
     if let Some(reason) = credential.invalid_reason.as_deref() {
@@ -309,11 +310,12 @@ pub(crate) async fn resolve_siwc_upstream_auth(
         let store = crate::official_accounts::OfficialAccountStore::for_config_path(
             &crate::config::default_config_path(),
         );
-        if let Err(error) = crate::official_accounts::refresh_siwc_if_stale(
+        if let Err(error) = crate::official_accounts::refresh_siwc_if_stale_with_proxy(
             default_client,
             &store,
             account_id,
             Some(proxied_clients),
+            proxy_override,
         )
         .await
         {

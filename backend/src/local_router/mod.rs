@@ -269,4 +269,7 @@ mod gemini_tests;
 mod lifecycle_tests;
 
 #[cfg(test)]
+mod network_proxy_tests;
+
+#[cfg(test)]
 mod retry_contract_tests;

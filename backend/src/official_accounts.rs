@@ -1444,7 +1444,7 @@ pub async fn refresh_if_stale(
     refresh_if_stale_cached(client, record, upstream_proxy, None).await
 }
 
-fn official_http_client(
+pub(crate) fn official_http_client(
     default_client: &reqwest::Client,
     proxied_clients: Option<&Mutex<HashMap<String, reqwest::Client>>>,
     upstream_proxy: Option<&str>,
@@ -1474,6 +1474,7 @@ fn official_http_client(
 
 fn build_official_proxy_client(proxy: &str) -> Result<reqwest::Client> {
     Ok(reqwest::Client::builder()
+        .no_proxy()
         .connect_timeout(Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::none())
         .proxy(reqwest::Proxy::all(proxy).context("官方账号上游代理无效")?)
@@ -2276,8 +2277,8 @@ impl SiwcLoginSessions {
 /// 为既有账号启动 SIWC 授权。已有 SIWC 凭据时走重授权：复用签发的
 /// client_id，带 `id_token_hint` 跳过账号选择页；否则用
 /// `dynamic_agent_client` 注册新客户端，回调里收签发的 client_id。
-pub async fn start_siwc_login(
-    client: reqwest::Client,
+pub(crate) async fn start_siwc_login(
+    client: crate::network_proxy::egress::PreparedClient,
     account: &OfficialAccountRecord,
     host_id: &str,
 ) -> Result<SiwcLoginSession> {
@@ -2323,7 +2324,7 @@ pub async fn start_siwc_login(
             LOGIN_TIMEOUT,
             run_siwc_callback_server(
                 listener,
-                client,
+                (*client).clone(),
                 state,
                 nonce,
                 pkce.verifier,
@@ -2331,6 +2332,7 @@ pub async fn start_siwc_login(
             ),
         )
         .await;
+        drop(client); // The gateway must stay alive while the callback exchanges tokens.
         let next = match outcome {
             Ok(Ok(credential)) => SiwcLoginPhase::Completed(Box::new(credential)),
             Ok(Err(error)) => SiwcLoginPhase::Failed(format!("{error:#}")),
@@ -2691,11 +2693,12 @@ fn siwc_refresh_lock(account_id: &str) -> Arc<tokio::sync::Mutex<()>> {
 
 /// SIWC 凭据临期时刷新；账号移除、凭据缺失或仍有效时返回 Ok(false)。
 /// 刷新失败只影响 SIWC 槽位，Codex 凭据不受牵连。
-pub async fn refresh_siwc_if_stale(
+pub(crate) async fn refresh_siwc_if_stale_with_proxy(
     client: &reqwest::Client,
     store: &OfficialAccountStore,
     account_id: &str,
     proxied_clients: Option<&Mutex<HashMap<String, reqwest::Client>>>,
+    proxy_override: Option<&str>,
 ) -> Result<bool> {
     let lock = siwc_refresh_lock(account_id);
     let _guard = lock.lock().await;
@@ -2729,7 +2732,7 @@ pub async fn refresh_siwc_if_stale(
         }));
     }
     let request_client =
-        official_http_client(client, proxied_clients, record.upstream_proxy.as_deref())?;
+        official_http_client(client, proxied_clients, proxy_override.or(record.upstream_proxy.as_deref()))?;
     let response = request_client
         .post(SIWC_TOKEN_URL)
         .timeout(Duration::from_secs(20))

@@ -22,6 +22,7 @@ import { UsageAnalysisPanel } from "./features/usage-analysis";
 import { OperationsPanel } from "./OperationsPanel";
 import { CodeyPluginsSection } from "./features/codey-plugins";
 import { BuiltinToolsPage } from "./features/builtin-tools";
+import { NetworkProxyPage } from "./features/network-proxy";
 import { CodexExtensionsPage } from "./features/codex-extensions";
 import { SessionsPage } from "./features/session-management";
 import { DiagnosticCleanupToast, useRuntimeMaintenanceController } from "./features/runtime-maintenance";
@@ -735,6 +736,8 @@ export function App({
             />
           ),
           remote: (active) => <RemoteControlPanel active={active} />,
+          network: (active) => <NetworkProxyPage active={active && (!embedded || modalVisible)}
+            config={config} isBusy={isBusy} onConfigChange={handleConfigChange} onSaved={applySavedConfig} />,
           sessions: (active) => <SessionsPage active={active} isBusy={isBusy} onRestart={handleRestartCodex} container={popupContainer} />,
           tools: (active) => (
             <BuiltinToolsPage active={active} config={config} fastContextToolsStatus={fastContextToolsStatus}

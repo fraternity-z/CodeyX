@@ -43,23 +43,22 @@ test("codex launch proxy validator matches the launch-time constraints", async (
   }
 });
 
-test("launch proxy input lives in the Codex feature policy card", async () => {
-  const [cardSource, typesSource, mockSource] = await Promise.all([
-    readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
+test("launch proxy input lives on the independent network proxy page", async () => {
+  const [cardSource, typesSource, mockSource, controllerSource, featureSource] = await Promise.all([
+    readFile(new URL("src/features/network-proxy/NetworkProxyPage.tsx", root), "utf8"),
     readFile(new URL("src/App.types.ts", root), "utf8"),
     readFile(new URL("src/dev/mockApi.ts", root), "utf8"),
+    readFile(new URL("src/features/network-proxy/useNetworkProxyController.ts", root), "utf8"),
+    readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
   ]);
 
   assert.match(typesSource, /codexLaunchProxy: string/);
   assert.match(mockSource, /codexLaunchProxy: ""/);
-  // 启动代理是与「Codex 功能策略」平级的独立区块，排在它前面。
-  assert.match(
-    cardSource,
-    /secondary-section launch-proxy-section" aria-labelledby="launch-proxy-title"[\s\S]*?Codex 启动代理[\s\S]*?aria-labelledby="runtime-title"/,
-  );
-  assert.match(cardSource, /codexLaunchProxy: event\.target\.value/);
+  assert.match(cardSource, /title="网络代理"/);
+  assert.doesNotMatch(featureSource, /codexLaunchProxy|launch-proxy-title/);
+  assert.match(cardSource, /changeLaunchProxy\(event\.target\.value\)/);
   assert.match(cardSource, /aria-invalid=\{Boolean\(launchProxyError\)\}/);
-  assert.match(cardSource, /validateCodexLaunchProxy\(launchProxy\)/);
+  assert.match(controllerSource, /validateCodexLaunchProxy\(launchProxy\)/);
   assert.match(cardSource, /重启 Codex 后生效/);
 });
 

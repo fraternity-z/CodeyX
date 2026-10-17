@@ -1337,3 +1337,19 @@ fn codex_launch_proxy_change_requires_restart() {
         &current
     ));
 }
+
+#[test]
+fn network_proxy_startup_selection_requires_restart_but_node_edits_do_not() {
+    use crate::network_proxy::model::ProxySelection;
+    let applied = CodeyConfig::default();
+    let mut current = applied.clone();
+    current.network_proxy.process_proxy = ProxySelection::Node { id: "exit".into() };
+    assert!(config_requires_restart_with_route_status(false, &applied,
+        &RuntimeModelConfig::from_config(&applied), &RuntimeSubagentConfig::from_config(&applied), &current));
+    let applied = current.clone();
+    current.network_proxy.nodes = serde_json::from_value(serde_json::json!([{
+        "id":"exit","name":"Exit","endpoint":{"protocol":"socks5","host":"proxy.invalid","port":1080},"enabled":false
+    }])).unwrap();
+    assert!(!config_requires_restart_with_route_status(false, &applied,
+        &RuntimeModelConfig::from_config(&applied), &RuntimeSubagentConfig::from_config(&applied), &current));
+}

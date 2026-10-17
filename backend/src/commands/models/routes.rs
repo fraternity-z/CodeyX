@@ -346,18 +346,19 @@ pub(crate) async fn fetch_official_route_models(
     } else {
         official_models_endpoint(base_url, client_version.as_deref())
     };
-    let client = if profile.upstream_proxy.trim().is_empty() {
-        state.http_client.clone()
-    } else {
-        reqwest::Client::builder()
+    let proxy = state.proxy_for_profile(profile).await?;
+    let client = if let Some(proxy_url) = proxy.as_deref() {
+        reqwest::Client::builder().no_proxy()
             .user_agent(format!("Codey/{}", env!("CARGO_PKG_VERSION")))
             .connect_timeout(std::time::Duration::from_secs(5))
             .proxy(
-                reqwest::Proxy::all(profile.upstream_proxy.trim())
-                    .map_err(|error| format!("官方线路的上游代理地址无效：{error}"))?,
+                reqwest::Proxy::all(proxy_url)
+                    .map_err(|_| "官方线路的上游代理地址无效".to_string())?,
             )
             .build()
-            .map_err(|error| format!("创建官方模型请求客户端失败：{error}"))?
+            .map_err(|_| "创建官方模型请求客户端失败".to_string())?
+    } else {
+        state.http_client.clone()
     };
     let mut request = client
         .get(endpoint)
@@ -517,7 +518,7 @@ pub async fn fetch_route_models(
             })
             .collect::<Vec<_>>()
     } else {
-        fetch_provider_models(profile.clone())
+        super::sync::fetch_provider_models_with_state(state, profile.clone())
             .await
             .map_err(|error| error.to_string())?
     };

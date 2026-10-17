@@ -44,6 +44,7 @@ impl CodeyRuntime {
             crashpad_guard_shutdown: Mutex::new(None),
             crashpad_guard_task: Mutex::new(None),
             local_router,
+            process_proxy: None,
         }
     }
 }

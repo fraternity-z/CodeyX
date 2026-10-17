@@ -22,8 +22,8 @@ export type Profile = {
   upstreamProxy?: string;
   sourceProviderId?: string;
   pluginOwnerId?: string;
-  /** 宿主已返回的插件声明；这里只使用独立于用户设置的模型能力。 */
-  pluginRouteSpec?: { modelReasoningEfforts?: Record<string, string[]> };
+  /** 宿主返回的插件声明，用于模型与网络传输能力。 */
+  pluginRouteSpec?: { modelReasoningEfforts?: Record<string, string[]>; transport?: object | null };
   officialAccount: boolean;
   /** 该线路来自哪个已保存的官方账号；多条官方线路靠它区分。 */
   officialAccountId?: string;
@@ -114,6 +114,7 @@ export type Config = {
   slimCodexPet: boolean;
   gpuLaunchMode: "off" | "disableGpu" | "disableGpuRasterization";
   codexLaunchProxy: string;
+  networkProxy?: import("./features/network-proxy").NetworkProxyConfig;
   fastContextTools: boolean;
   subagentOptimization: boolean;
   subagentModel: string;

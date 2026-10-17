@@ -8,6 +8,7 @@ import { readSource } from "./read-source.mjs";
 export async function loadStartupPatchTemplate({
   disablePet = false,
   miscModel = null,
+  processProxyAuth = null,
   requireAppServerRuntimeOverrides = false,
   runtimeConfigOverrides = null,
   subagentGateActive = null,
@@ -21,6 +22,7 @@ export async function loadStartupPatchTemplate({
       '"__CODEY_MISC_MODEL_ID__"',
       JSON.stringify(miscModel),
     )
+    .replaceAll('"__CODEY_PROCESS_PROXY_AUTH__"', JSON.stringify(processProxyAuth))
     .replaceAll(
       "__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__",
       requireAppServerRuntimeOverrides ? "true" : "false",

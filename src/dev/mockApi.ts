@@ -728,6 +728,37 @@ if (import.meta.env.DEV) {
         return { pluginId: plugin.id, version: plugin.version, path: plugin.configPath, content: pluginConfigContent, sha256: await configHash(pluginConfigContent) };
       }
 
+      if (command === "network_proxy_get" || command === "network_proxy_save") {
+        if (previewConfigLoadFailed) throw new Error("预览：配置路径不存在");
+        if (command === "network_proxy_save") {
+          if (args.settingsRevision !== previewConfig.settingsRevision) return { status: "failed", message: "设置已被其他操作更新，请刷新后再保存" };
+          const pool = args.config as NonNullable<Config["networkProxy"]>;
+          const credentials = args.credentials as Array<{ nodeId: string; change: { kind: string } }>;
+          previewConfig = { ...previewConfig, settingsRevision: previewConfig.settingsRevision + 1, networkProxy: {
+            ...pool, nodes: pool.nodes.map(node => {
+              const change = credentials.find(item => item.nodeId === node.id)?.change;
+              return { ...node, credentialRef: change?.kind === "replace" ? crypto.randomUUID() : change?.kind === "clear" ? null : node.credentialRef };
+            }),
+          } };
+        }
+        return { config: previewConfig, probeUrl: "https://api.ipify.org?format=json",
+          launchProxyPoolSupported: true,
+          fastContextToolsStatus: { userConfigured: false, detectionFailed: false } };
+      }
+      if (command === "network_proxy_test") {
+        const node = previewConfig.networkProxy?.nodes.find(item => item.id === args.nodeId);
+        if (!node) throw new Error("预览：代理节点不存在");
+        return { node, result: { nodeId: node.id, success: true, testedAt: new Date().toISOString(), elapsedMs: 42,
+          exitIp: "203.0.113.5", errorCode: null, message: "预览结果，未发出真实网络请求" } };
+      }
+      if (command === "network_proxy_test_chain") {
+        const chain = previewConfig.networkProxy?.chains.find(item => item.id === args.chainId);
+        if (!chain) throw new Error("预览：代理链路不存在");
+        const nodes = chain.nodeIds.map(id => previewConfig.networkProxy?.nodes.find(node => node.id === id));
+        if (nodes.some(node => !node)) throw new Error("预览：链路节点不存在");
+        return { chain, nodes, result: { chainId: chain.id, success: true, testedAt: new Date().toISOString(), elapsedMs: 86,
+          exitIp: "203.0.113.8", errorCode: null, failedHop: null, message: "预览结果，未发出真实网络请求" } };
+      }
       if (command === "load_codey_config") {
         if (previewConfigLoadFailed) throw new Error("预览：配置路径不存在");
         return {

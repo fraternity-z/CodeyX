@@ -248,13 +248,16 @@ impl RouterServer {
                             .as_ref()
                             .map(|auth| auth.path.clone())
                             .unwrap_or_else(|| self.official_auth_path.clone());
-                        crate::account_usage::query_shared_snapshot_at(
+                        match self.egress.proxy_for_profile(&route.profile_id, route.upstream_proxy.as_deref(), route.plugin_transport.is_some()).await {
+                        Ok(proxy) => crate::account_usage::query_shared_snapshot_at(
                             &self.account_usage_cache,
                             &auth_path,
                             args.force_refresh.unwrap_or(false),
-                            route.upstream_proxy.as_deref(),
+                            proxy.as_deref(),
                         )
-                        .await
+                        .await,
+                        Err(message) => json!({"status":"error", "reason":"proxy_unavailable", "message":message}),
+                        }
                     }
                 };
                 write_json_response(&mut stream, 200, &value).await?;
@@ -671,7 +674,7 @@ impl RouterServer {
         if editing {
             upstream_url = format!("{}/edits", upstream_url.trim_end_matches("/generations"));
         }
-        let headers = match self
+        let (headers, upstream_client) = match self
             .prepare_upstream_request_headers(&request, &route)
             .await
         {
@@ -701,21 +704,6 @@ impl RouterServer {
         if let Some(probe) = &probe {
             probe.set_upstream_request_headers(&format_upstream_headers(&headers));
         }
-        let upstream_client = match self.upstream_client(&route) {
-            Ok(client) => client,
-            Err(message) => {
-                mark_error(502, "route_configuration_error");
-                write_error_response(
-                    &mut stream,
-                    502,
-                    "route_configuration_error",
-                    message,
-                    Some(&route),
-                )
-                .await?;
-                return Ok(());
-            }
-        };
         let request_body = if body_mutated {
             Bytes::from(serde_json::to_vec(&body).context("序列化 Images 上游请求失败")?)
         } else {
@@ -864,7 +852,11 @@ impl RouterServer {
         &self,
         request: &HttpRequest,
         route: &RouteTarget,
-    ) -> std::result::Result<HeaderMap, (u16, &'static str, String)> {
+    ) -> std::result::Result<(HeaderMap, crate::network_proxy::egress::PreparedClient), (u16, &'static str, String)> {
+        // Pin one egress lease before auth refresh or any plugin network work.
+        // The caller retains it through the whole response, including SSE.
+        let client = self.upstream_client(route).await
+            .map_err(|message| (502, "proxy_unavailable", message))?;
         let prepared_headers = route
             .upstream_headers
             .as_ref()
@@ -894,6 +886,7 @@ impl RouterServer {
         if let Some(target) = &route.plugin_transport {
             return plugin_transport::account_headers(target)
                 .await
+                .map(|headers| (headers, client))
                 .map_err(|message| (401, "plugin_account_unavailable", message));
         }
         if route.official_account {
@@ -910,6 +903,7 @@ impl RouterServer {
                     &self.siwc_auth_cache,
                     &self.client,
                     &self.proxied_clients,
+                    client.proxy.uses_pool().then(|| client.proxy.as_deref()).flatten(),
                 )
                 .await
                 .map_err(|error| (401, "siwc_auth_unavailable", format!("{error:#}")))?;
@@ -958,7 +952,7 @@ impl RouterServer {
                 }
             }
         }
-        Ok(headers)
+        Ok((headers, client))
     }
 
     pub(crate) fn authorized(&self, request: &HttpRequest) -> bool {
@@ -2079,7 +2073,7 @@ impl RouterServer {
             body_mutated = true;
             encoded_body = None;
         }
-        let mut headers = match self
+        let (mut headers, upstream_client) = match self
             .prepare_upstream_request_headers(&request, &resolved.route)
             .await
         {
@@ -2175,6 +2169,7 @@ impl RouterServer {
             // Grok 回包要改工具名和整数参数，不能走原样透传的上游 WebSocket。
             // 历史仍由下面的 HTTP 回退展开。
             if !compacting
+                && !upstream_client.proxy.uses_pool()
                 && !lifecycle.is_active()
                 && !native_upstream_needs_xai_compat(upstream_url, &resolved.upstream_model)
             {
@@ -2344,19 +2339,6 @@ impl RouterServer {
         // 用 .header() 会追加重复值。只在 HTTP 请求上设置，上游 WebSocket 握手已在
         // 此前发起，不携带 content-type。
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        let upstream_client = match self.upstream_client(&resolved.route) {
-            Ok(client) => client,
-            Err(message) => {
-                return downstream
-                    .write_error(
-                        502,
-                        "route_configuration_error",
-                        message,
-                        Some(&resolved.route),
-                    )
-                    .await;
-            }
-        };
         // 部分第三方 thinking 线路要求把上一轮的 reasoning 明文原样回传，而 Codex
         // 回放历史时只保留加密字段。DeepSeek 官方地址在首次发送前还原已有摘要。
         // 其它线路仍先按原样发送，只有上游明确报出明文缺失时才回填：有摘要用摘要，

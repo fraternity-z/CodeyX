@@ -186,17 +186,27 @@ impl LocalRouter {
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
     ) -> Result<Self> {
-        Self::start_with_logger_and_usage(config, request_log, Arc::default()).await
+        Self::start_with_logger_and_usage(config, request_log, Arc::default(), Arc::new(crate::network_proxy::egress::EgressPool::for_config(&crate::config::default_config_path(), config.network_proxy.clone()))).await
     }
 
+    #[cfg(test)]
     pub(crate) async fn start_with_usage(
         config: &CodeyConfig,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+    ) -> Result<Self> {
+        Self::start_with_egress(config, account_usage_cache, Arc::new(crate::network_proxy::egress::EgressPool::for_config(&crate::config::default_config_path(), config.network_proxy.clone()))).await
+    }
+
+    pub(crate) async fn start_with_egress(
+        config: &CodeyConfig,
+        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+        egress: Arc<crate::network_proxy::egress::EgressPool>,
     ) -> Result<Self> {
         Self::start_with_logger_and_usage(
             config,
             Arc::new(RouteRequestLogController::new()),
             account_usage_cache,
+            egress,
         )
         .await
     }
@@ -205,6 +215,7 @@ impl LocalRouter {
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
+        egress: Arc<crate::network_proxy::egress::EgressPool>,
     ) -> Result<Self> {
         let listener = bind_router_listener().await?;
         let port = listener
@@ -253,6 +264,7 @@ impl LocalRouter {
                 .context("创建 Codey 本地路由 HTTP 客户端任务异常退出")?
                 .context("创建 Codey 本地路由 HTTP 客户端失败")?,
             proxied_clients: Mutex::new(HashMap::new()),
+            egress,
             official_auth_path,
             account_usage_cache,
             official_auth_cache: Arc::new(Mutex::new(
@@ -623,6 +635,7 @@ pub(crate) struct RouterServer {
     /// 按代理地址缓存的线路专用客户端，保留连接池复用。上限内缓存，
     /// 超出后清空重建（代理地址变更是罕见操作，代价仅为重建连接）。
     pub(crate) proxied_clients: Mutex<HashMap<String, reqwest::Client>>,
+    pub(crate) egress: Arc<crate::network_proxy::egress::EgressPool>,
     pub(crate) official_auth_path: PathBuf,
     pub(crate) account_usage_cache:
         Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
@@ -638,19 +651,20 @@ const MAX_PROXIED_CLIENTS: usize = 8;
 impl RouterServer {
     /// 选择线路的上游 HTTP 客户端：未配置代理的线路共用默认客户端（遵循
     /// 系统代理），配置了上游代理的线路使用仅走该代理的专用客户端。
-    pub(crate) fn upstream_client(
+    pub(crate) async fn upstream_client(
         &self,
         route: &RouteTarget,
-    ) -> std::result::Result<reqwest::Client, String> {
-        let Some(proxy) = route.upstream_proxy.as_deref() else {
-            return Ok(self.client.clone());
+    ) -> std::result::Result<crate::network_proxy::egress::PreparedClient, String> {
+        let prepared = self.egress.proxy_for_profile(&route.profile_id, route.upstream_proxy.as_deref(), route.plugin_transport.is_some()).await?;
+        let Some(proxy) = prepared.as_deref() else {
+            return Ok(prepared.bind(self.client.clone()));
         };
         let mut clients = self
             .proxied_clients
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(client) = clients.get(proxy) {
-            return Ok(client.clone());
+            return Ok(prepared.bind(client.clone()));
         }
         let proxy_target = reqwest::Proxy::all(proxy).map_err(|_| {
             format!(
@@ -659,6 +673,7 @@ impl RouterServer {
             )
         })?;
         let client = upstream_http_client_builder()
+            .no_proxy()
             .proxy(proxy_target)
             .build()
             .map_err(|_| {
@@ -671,7 +686,7 @@ impl RouterServer {
             clients.clear();
         }
         clients.insert(proxy.to_string(), client.clone());
-        Ok(client)
+        Ok(prepared.bind(client))
     }
 }
 
@@ -830,6 +845,7 @@ impl RouterSnapshot {
                 &profile.upstream_protocol,
             );
             let mut target = RouteTarget {
+                profile_id: profile.id.clone(),
                 provider_id: provider_id.to_string(),
                 route_name: profile.name.trim().to_string(),
                 upstream_url: prepare_upstream_url(protocol, &base_url),
@@ -1174,6 +1190,7 @@ impl RouterSnapshot {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RouteTarget {
+    pub(crate) profile_id: String,
     pub(crate) provider_id: String,
     pub(crate) route_name: String,
     pub(crate) upstream_url: std::result::Result<String, String>,

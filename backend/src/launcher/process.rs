@@ -247,6 +247,7 @@ pub(super) async fn spawn_codex(
         disable_pet: disable_codex_pet,
         subagent_gate_active,
         misc_model,
+        proxy_auth: options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::authentication),
     };
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (
@@ -304,6 +305,7 @@ pub(super) async fn spawn_codex(
             let use_require = require_patch.is_some();
             let use_inspector =
                 !use_require && inspect_fuse.inspector_possible() && !retry_without_inspector;
+            require_proxy_authentication_entry(&patch_options, use_require || use_inspector)?;
 
             let (wrapper, wrapper_preparation_error) = match prepare_cli_wrapper(
                 app_dir,
@@ -449,7 +451,9 @@ pub(super) async fn spawn_codex(
                 .then_some(require_patch)
                 .flatten()
                 .map(|prepared| prepared.marker_path);
-            if inspector_port.is_none() && wrapper_handshake.is_none() && require_marker.is_none() {
+            if inspector_port.is_none() && wrapper_handshake.is_none() && require_marker.is_none()
+                && patch_options.proxy_auth.is_none()
+            {
                 // The process is already running without any compatibility
                 // entry. It carries no constraints (see above), so keep it
                 // instead of stopping and relaunching the same configuration.
@@ -570,6 +574,7 @@ pub(super) async fn spawn_codex(
                         }
                         continue;
                     }
+                    require_proxy_authentication_entry(&patch_options, false)?;
                     if !runtime_config_overrides.is_empty() {
                         return Err(recovery::recoverable(format!(
                             "Codex 启动兼容方案未能确认 app-server 运行时覆盖；Codey 集成未启用：{startup_error}"
@@ -629,6 +634,7 @@ pub(super) async fn spawn_codex(
         .await;
         let use_require = require_patch.is_some();
         let use_inspector = !use_require && inspect_fuse.inspector_possible();
+        require_proxy_authentication_entry(&patch_options, use_require || use_inspector)?;
         // Only request a breakpoint when the runtime explicitly allows it.
         // Never combine Inspector and NODE_OPTIONS: both wrap Module._load.
         let pass_inspect_brk = use_inspector;
@@ -1972,6 +1978,10 @@ async fn install_startup_patch_with_cli_fallback(
         spawned,
         require_marker,
     } = context;
+    // The CLI wrapper cannot answer Chromium proxy challenges. With a selected
+    // pool exit we must wait for the main-process hook itself to be confirmed.
+    let wrapper_handshake = if patch_options.proxy_auth.is_some() { None } else { wrapper_handshake };
+    require_proxy_authentication_entry(&patch_options, inspector_port.is_some() || require_marker.is_some())?;
     let exited = startup_process_exited(spawned);
     let compatibility = wait_for_startup_compatibility(
         inspector_port,
@@ -1987,6 +1997,17 @@ async fn install_startup_patch_with_cli_fallback(
         exited = exited => Err(exited.into()),
         result = compatibility => result,
     }
+}
+
+#[cfg(any(windows, target_os = "macos"))]
+fn require_proxy_authentication_entry(
+    options: &crate::codex_startup_patch::PatchOptions,
+    available: bool,
+) -> Result<()> {
+    if options.proxy_auth.is_some() && !available {
+        anyhow::bail!("Codex 主进程认证入口不可用，代理池启动已停止；请修复客户端兼容入口后重试");
+    }
+    Ok(())
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -2580,7 +2601,25 @@ mod cli_wrapper_tests {
             disable_pet: false,
             subagent_gate_active: true,
             misc_model: None,
+            proxy_auth: None,
         }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[tokio::test]
+    async fn process_proxy_requires_a_main_process_authentication_entry() {
+        let mut options = test_patch_options();
+        assert!(require_proxy_authentication_entry(&options, false).is_ok());
+        options.proxy_auth = Some(crate::network_proxy::process_gateway::ProcessProxyAuth {
+            host: "127.0.0.1".into(), port: 49152, username: "codeyx".into(),
+            password: "fixture-private-value".into(), realm: "fixture".into(),
+        });
+        assert!(require_proxy_authentication_entry(&options, true).is_ok());
+        let error = install_startup_patch_with_cli_fallback(None, options, &[], None,
+            test_context(tokio::time::Instant::now() + Duration::from_secs(1)))
+            .await.unwrap_err();
+        assert!(error.to_string().contains("认证入口不可用"));
+        assert!(!error.to_string().contains("fixture-private-value"));
     }
 
     #[tokio::test(start_paused = true)]

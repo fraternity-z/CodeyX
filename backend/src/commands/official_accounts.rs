@@ -18,7 +18,7 @@ use crate::config::{
 };
 use crate::official_accounts::{
     LoginPhase, OfficialAccountInvalid, OfficialAccountRecord, OfficialAccountStore,
-    SiwcLoginPhase, agent_host_id, refresh_if_stale_cached, refresh_siwc_if_stale,
+    SiwcLoginPhase, agent_host_id, refresh_if_stale_cached, refresh_siwc_if_stale_with_proxy,
     revoke_siwc_session, start_login, start_siwc_login,
 };
 
@@ -299,7 +299,8 @@ pub(super) async fn start_official_account_siwc(
         state.official_siwc_logins.lock().await.cancel_all();
     }
     tokio::task::yield_now().await;
-    let session = start_siwc_login(state.http_client.clone(), &record, &host_id)
+    let client = official_account_client(state, &record.id).await?;
+    let session = start_siwc_login(client, &record, &host_id)
         .await
         .map_err(|error| format!("{error:#}"))?;
     let auth_url = session.auth_url.clone();
@@ -425,7 +426,7 @@ pub(super) async fn remove_official_account_siwc(
         .map_err(|error| format!("{error:#}"))?
         .ok_or_else(|| format!("找不到官方账号：{account_id}"))?;
     let remote_confirmed = match record.siwc.as_ref() {
-        Some(credential) => revoke_siwc_session(&state.http_client, credential)
+        Some(credential) => revoke_account_siwc(state, &account_id, credential)
             .await
             .is_ok(),
         None => true,
@@ -539,7 +540,7 @@ pub(super) async fn refresh_official_account_tokens(
         // 状态，重新添加账号会写入新凭据并清除标记。
         if !record.invalid() {
             let expected = record.clone();
-            let proxy = super::official_account_usage_proxy(state, account_id).await;
+            let proxy = super::official_account_usage_proxy(state, account_id).await?;
             match refresh_if_stale_cached(
                 &state.http_client,
                 &mut record,
@@ -610,11 +611,13 @@ pub(super) async fn refresh_official_account_tokens(
     // 线路已下线，没必要再碰远端）。SIWC 刷新失败只标记直连槽位，对话会
     // 在线路重算后自动回落到 Codex 平面。
     if !record.invalid() && record.siwc.is_some() {
-        match refresh_siwc_if_stale(
+        let proxy = super::official_account_usage_proxy(state, account_id).await?;
+        match refresh_siwc_if_stale_with_proxy(
             &state.http_client,
             &store,
             account_id,
             Some(&state.official_proxied_clients),
+            proxy.uses_pool().then(|| proxy.as_deref()).flatten(),
         )
         .await
         {
@@ -732,7 +735,7 @@ pub(super) async fn remove_official_account(
     .ok()
     .and_then(|result| result.ok().flatten());
     if let Some(credential) = siwc_credential
-        && let Err(error) = revoke_siwc_session(&state.http_client, &credential).await
+        && let Err(error) = revoke_account_siwc(state, &account_id, &credential).await
     {
         error_log::record_failure(
             "official_siwc_revoke_failed",
@@ -806,6 +809,19 @@ pub(super) async fn drop_derived_official_routes(state: &Arc<AppState>) -> Resul
     let next = save_config_to_store(state, next).await?;
     *state.config.write().await = next;
     Ok(())
+}
+
+async fn official_account_client(state: &Arc<AppState>, account_id: &str) -> Result<crate::network_proxy::egress::PreparedClient, String> {
+    let proxy = super::official_account_usage_proxy(state, account_id).await?;
+    let client = crate::official_accounts::official_http_client(
+        &state.http_client, Some(&state.official_proxied_clients), proxy.as_deref(),
+    ).map_err(|_| "无法创建官方账号代理客户端".to_string())?;
+    Ok(proxy.bind(client))
+}
+
+async fn revoke_account_siwc(state: &Arc<AppState>, account_id: &str, credential: &crate::official_accounts::SiwcCredential) -> Result<(), String> {
+    let client = official_account_client(state, account_id).await?;
+    revoke_siwc_session(&client, credential).await.map_err(|error| format!("{error:#}"))
 }
 
 /// Saves the route name, short name, gateway and upstream proxy of one

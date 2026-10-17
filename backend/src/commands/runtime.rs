@@ -292,6 +292,12 @@ fn ensure_runtime_can_start(state: &AppState) -> Result<(), String> {
     if state.is_shutting_down() {
         return Err("Codey 正在退出，无法启动 Codex".to_string());
     }
+    if state.config_load_error.is_some() {
+        return Err(
+            "现有配置无法读取，不能确认网络代理设置，Codex 未启动；请恢复配置并重新打开 Codey"
+                .to_string(),
+        );
+    }
     // 平台限制原来要等 Codex 被停掉、本地路由起来之后才发现。这里直接拒绝，
     // 避免为一次必然失败的启动改写用户的 config.toml。
     if !crate::codex_config::runtime_router_platform_supported() {
@@ -399,6 +405,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> anyhow::Result<Valu
         &state.trace_log_write_protection_active,
         state.crashpad_pending_stats.clone(),
         Arc::clone(&state.account_usage_cache),
+        state.network_proxy_egress().await,
     )
     .await
     {
@@ -679,6 +686,19 @@ mod tests {
     };
     use crate::commands::{AppShutdownReason, AppState};
     use crate::config::{CodeyConfig, ProviderProfile};
+
+    #[test]
+    fn network_proxy_blocks_start_when_configuration_cannot_be_read() {
+        let state = AppState {
+            config: tokio::sync::RwLock::new(CodeyConfig::default()),
+            config_load_error: Some("fixture-private-config-source".into()),
+            ..AppState::default()
+        };
+        let error = super::ensure_runtime_can_start(&state).unwrap_err();
+        assert!(error.contains("不能确认网络代理设置"));
+        assert!(error.contains("未启动"));
+        assert!(!error.contains("fixture-private-config-source"));
+    }
 
     #[test]
     fn remote_compaction_status_separates_saved_and_running_capabilities() {

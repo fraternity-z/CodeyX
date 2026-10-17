@@ -112,6 +112,7 @@ fn test_server(config: &CodeyConfig) -> RouterServer {
             .build()
             .unwrap(),
         proxied_clients: Mutex::default(),
+        egress: Arc::new(crate::network_proxy::egress::EgressPool::for_config(Path::new("unused-test-config.json"), config.network_proxy.clone())),
         official_auth_path: PathBuf::from("/nonexistent/codey-lifecycle-test-auth"),
         account_usage_cache: Arc::default(),
         official_auth_cache: Arc::default(),
@@ -288,7 +289,7 @@ async fn official_history_is_sanitized_for_websocket_and_opaque_http_continuatio
             .target_for_model(&model)
             .unwrap();
         let request = official_history_request();
-        let headers = server
+        let (headers, _client) = server
             .prepare_upstream_request_headers(&request, &resolved.route)
             .await
             .unwrap();

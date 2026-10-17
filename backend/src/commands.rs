@@ -16,6 +16,7 @@ mod diagnostics;
 mod extensions;
 mod models;
 mod native_plugins;
+mod network_proxy;
 mod official_accounts;
 mod plugins;
 mod prompt_optimization;
@@ -132,6 +133,7 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Official token refresh clients keyed by account proxy URL.
     official_proxied_clients: BlockingMutex<HashMap<String, reqwest::Client>>,
+    network_proxy_egress: std::sync::OnceLock<Arc<crate::network_proxy::egress::EgressPool>>,
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
     /// Built on first use: the login/sync client is only needed for WeChat
@@ -214,13 +216,13 @@ pub enum AppShutdownReason {
     InstallUpdate,
 }
 
-/// An unreadable config falls back to defaults for this launch. The broken
-/// files are copied aside first because saving the defaults rotates them
-/// through the backup chain.
+/// Keep recovered data available for review, but do not authorize networking
+/// from an older backup or defaults. Preserve the originals before any save.
 fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>) {
-    let error = match store.load() {
-        Ok(config) => return (config, None),
-        Err(error) => error,
+    let (config, reason) = match store.load_with_recovery() {
+        Ok((config, false)) => return (config, None),
+        Ok((config, true)) => (config, "Codey 主配置无法读取，已加载备份供检查"),
+        Err(_) => (CodeyConfig::default(), "Codey 配置无法读取，已加载默认值供检查"),
     };
     let preserved = store.preserve_unreadable();
     let preserved = if preserved.is_empty() {
@@ -234,7 +236,7 @@ fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>)
         format!("；原文件已另存为：{paths}")
     };
     let message = format!(
-        "Codey 配置无法读取，已使用安全默认值启动；请先检查或恢复配置文件：{error:#}{preserved}"
+        "{reason}；Codex 启动与受管理的上游连接已暂停，请核对并恢复配置后重新打开 Codey{preserved}"
     );
     error_log::record_failure(
         "config_load_failed",
@@ -242,7 +244,7 @@ fn load_config_or_defaults(store: &ConfigStore) -> (CodeyConfig, Option<String>)
         message.clone(),
         json!({ "path": store.path().display().to_string() }),
     );
-    (CodeyConfig::default(), Some(message))
+    (config, Some(message))
 }
 
 impl Default for AppState {
@@ -267,6 +269,7 @@ impl Default for AppState {
                 .build()
                 .expect("shared Codey HTTP client should be constructible"),
             official_proxied_clients: BlockingMutex::new(HashMap::new()),
+            network_proxy_egress: std::sync::OnceLock::new(),
             #[cfg(test)]
             webhook_http_client_override: None,
             wechat_claw_login_http_client: std::sync::OnceLock::new(),
@@ -346,6 +349,24 @@ fn bridge_string_array(payload: &Value, name: &str, limit: usize) -> Vec<String>
 }
 
 impl AppState {
+    pub(crate) async fn network_proxy_egress(&self) -> Arc<crate::network_proxy::egress::EgressPool> {
+        // Hold the config read lock through initialization, so a save cannot
+        // publish its policy before an older initial policy is installed.
+        let config = self.config.read().await;
+        self.network_proxy_egress.get_or_init(|| {
+            let mut egress = crate::network_proxy::egress::EgressPool::for_config(self.store.path(), config.network_proxy.clone());
+            if self.config_load_error.is_some() { egress.require_configuration_recovery(); }
+            Arc::new(egress)
+        }).clone()
+    }
+
+    pub(crate) async fn proxy_for_profile(&self, profile: &crate::config::ProviderProfile) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
+        self.network_proxy_egress().await.proxy_for_profile(
+            &profile.id, Some(&profile.upstream_proxy),
+            profile.plugin_route_spec.as_ref().is_some_and(|spec| spec.transport.is_some()),
+        ).await
+    }
+
     /// Codey's own store of ChatGPT accounts, kept next to the config file.
     pub(crate) fn official_accounts(&self) -> OfficialAccountStore {
         OfficialAccountStore::for_config_path(self.store.path())
@@ -1065,6 +1086,8 @@ async fn resolve_session_name_cached(
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
+        "network_proxy_get" | "network_proxy_save" | "network_proxy_test" | "network_proxy_test_chain" =>
+            network_proxy::invoke(state, command, &args).await,
         "remote_control_status"
         | "start_remote_control"
         | "stop_remote_control"
@@ -1420,6 +1443,7 @@ pub async fn load_codey_config(state: &Arc<AppState>) -> Result<Value, String> {
 }
 
 pub(super) async fn ensure_default_route_imported(state: &Arc<AppState>) -> bool {
+    if state.config_load_error.is_some() { return false; }
     let config = state.config.read().await.clone();
     if !config.local_router_enabled
         || !config.needs_initial_route_import()
@@ -1781,6 +1805,7 @@ async fn save_codey_config_locked(
     if local_router_enabled_present {
         config.local_router_enabled = config_input.local_router_enabled;
     }
+    config.validate_network_proxy()?;
     if route_request_log_present {
         config.route_request_log = config_input.route_request_log;
     }
@@ -2800,16 +2825,23 @@ async fn query_official_account_usage(
             .profiles
             .iter()
             .find(|profile| profile.enabled && profile.official_account)
-            .map(|profile| profile.upstream_proxy.trim().to_string())
-            .filter(|proxy| !proxy.is_empty());
+            .cloned();
     }
+
+    let official_proxy = match official_proxy {
+        Some(profile) => match state.proxy_for_profile(&profile).await {
+            Ok(proxy) => Some(proxy),
+            Err(message) => return json!({"status":"error", "reason":"proxy_unavailable", "message":message}),
+        },
+        None => None,
+    };
 
     let home = codex_home();
     account_usage::query_shared_snapshot_at(
         &state.account_usage_cache,
         &account_usage::codex_auth_path(home),
         force_refresh,
-        official_proxy.as_deref(),
+        official_proxy.as_ref().and_then(|proxy| proxy.as_deref()),
     )
     .await
 }
@@ -2895,7 +2927,10 @@ async fn query_stored_official_account_usage(
             "message": reason,
         });
     }
-    let upstream_proxy = official_account_usage_proxy(state, &account_id).await;
+    let upstream_proxy = match official_account_usage_proxy(state, &account_id).await {
+        Ok(proxy) => proxy,
+        Err(message) => return json!({"status":"error", "reason":"proxy_unavailable", "message":message}),
+    };
     let snapshot = account_usage::query_shared_snapshot_at(
         &state.account_usage_cache,
         &auth_path,
@@ -3008,23 +3043,23 @@ async fn mark_official_account_invalid(
     false
 }
 
-/// Egress proxy that belongs to one account's route. When the account has no
-/// route yet the query falls back to a direct connection instead of borrowing
-/// another account's proxy, so two accounts never share one exit by accident.
-async fn official_account_usage_proxy(state: &Arc<AppState>, account_id: &str) -> Option<String> {
-    let configured = |config: &CodeyConfig| -> Option<String> {
-        config
+/// Resolve even a temporarily absent account route by its stable profile ID.
+/// A stored pool binding must never disappear because its token became invalid.
+async fn official_account_usage_proxy(state: &Arc<AppState>, account_id: &str) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
+    let profile = state.config.read().await
             .profiles
             .iter()
             .find(|profile| {
                 profile.official_account
                     && profile.official_account_id.as_deref() == Some(account_id)
             })
-            .map(|profile| profile.upstream_proxy.trim().to_string())
-            .filter(|proxy| !proxy.is_empty())
-    };
-    let config = state.config.read().await;
-    configured(&config)
+            .cloned();
+    match profile {
+        Some(profile) => state.proxy_for_profile(&profile).await,
+        None => state.network_proxy_egress().await.proxy_for_profile(
+            &crate::config::official_profile_id(account_id), None, false,
+        ).await,
+    }
 }
 
 #[cfg(test)]
@@ -3072,6 +3107,7 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.slim_codex_pet != current.slim_codex_pet
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.codex_launch_proxy != current.codex_launch_proxy
+        || applied.network_proxy.process_proxy != current.network_proxy.process_proxy
         || applied.fast_context_tools != current.fast_context_tools
         || applied.conversation_git.enabled != current.conversation_git.enabled
         || applied.subagent_optimization != current.subagent_optimization
