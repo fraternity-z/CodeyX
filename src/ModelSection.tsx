@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useState } from "react";
 import {
   IconCheck as Check,
   IconAdjustmentsHorizontal,
@@ -25,7 +25,7 @@ import {
   IconWorld,
 } from "@tabler/icons-react";
 
-import type { Confirmation, Config, ModelContextConfig, ModelState, OfficialAccount, OfficialAccountsResult, Profile, ProviderStatus, RuntimeStatus } from "./App.types";
+import type { Confirmation, Config, ModelState, OfficialAccount, OfficialAccountsResult, Profile, ProviderStatus, RuntimeStatus } from "./App.types";
 import { OfficialAccountsPanel } from "./OfficialAccountsPanel";
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { ModelCombobox } from "./components/ModelCombobox";
@@ -48,25 +48,19 @@ import {
   Switch,
   Tooltip,
 } from "./components/ui";
-import { modelIdsEqual, modelKey, moveModelId, uniqueModelIds } from "./modelIds";
-import {
-  MAX_ROUTE_NAME_CHARACTERS,
-  validateOfficialRouteSettings,
-  type OfficialRouteSettingsDraft,
-} from "./officialRouteSettings";
-import { headersTextFromMap, parseHeadersText } from "./requestHeaders";
-import { globalDefaultForRoute, routeProviderId, sortRoutesByEnabled } from "./modelRoutes";
+import { modelIdsEqual, modelKey, moveModelId } from "./modelIds";
+import { MAX_ROUTE_NAME_CHARACTERS } from "./officialRouteSettings";
+import { routeProviderId } from "./modelRoutes";
 import { maskEmail, maskUrl } from "./sensitiveText";
 import {
   MAX_ROUTE_SHORT_NAME_CHARACTERS,
-  fallbackRouteShortName,
   prefixedRouteName,
 } from "./routeShortNames";
-import { createRouteDraft, routeProtocolPatch, useRoutePanelController, validateRouteDraft } from "./features/routes";
+import { accountForRoute as findRouteAccount, useRouteCatalogController, useRouteEditorController, useRoutePanelController, type RouteEditorActions } from "./features/routes";
 import { readHostTheme } from "./overlayTheme";
 import { getRouteCompactionStatus } from "./remoteCompactionStatus";
 
-type ModelSectionProps = {
+type ModelSectionProps = RouteEditorActions & {
   config: Config;
   runtimeStatus?: RuntimeStatus;
   currentProvider: ProviderStatus["provider"] | null;
@@ -84,7 +78,6 @@ type ModelSectionProps = {
   onToggleLocalRouter: (checked: boolean) => void;
   onToggleRouteRequestLog: (checked: boolean) => void;
   onOpenUsageAnalysis: (trigger: HTMLElement) => void;
-  onSaveRoute: (route: Profile) => Promise<boolean>;
   onSetRouteEnabled: (routeId: string, enabled: boolean) => Promise<boolean>;
   onReorderRoute: (sourceId: string, targetId: string) => Promise<void>;
   onReorderRouteModels: (routeId: string, models: string[]) => Promise<void>;
@@ -92,37 +85,12 @@ type ModelSectionProps = {
   onFetchRouteModels: (route: Profile) => void;
   onOfficialAccountsChanged: (result: OfficialAccountsResult) => void;
   onNotice: (notice: { tone: "success" | "info" | "error"; text: string }) => void;
-  onSaveOfficialRouteSettings?: (
-    routeId: string,
-    models: string[],
-    showAccountUsageInHeader: boolean,
-    enabled: boolean,
-    modelContexts: Record<string, ModelContextConfig> | undefined,
-    upstreamProxy?: string,
-    routeSettings?: {
-      accountId: string;
-      routeName: string;
-      routeShortName: string;
-      baseUrl: string;
-    },
-  ) => Promise<boolean>;
   onSetDefaultModel: (routeId: string, model: string) => void;
   onConfigChange?: (config: Config) => void;
   onRequestConfirmation?: (confirmation: Confirmation) => void;
 };
 
 type RouteModelRef = { routeId: string; model: string };
-
-type RouteModelGroup = {
-  profile: Profile;
-  providerId: string;
-  models: string[];
-  defaultModel: string;
-  official: boolean;
-};
-
-// 官方线路的编辑入口只改线路名、短名称、网关和代理，模型列举交给同步入口。
-type OfficialRouteDialogScope = "settings" | "models";
 
 const UPSTREAM_PROXY_TOOLTIP_CONTENT = (
   <div className="space-y-1.5 text-xs text-left leading-relaxed">
@@ -169,7 +137,7 @@ function ModelSectionComponent({
   modelState,
   dirty,
   canSyncCurrentProvider,
-  isBusy,
+  isBusy: externalBusy,
   busy,
   showAccountUsageInHeader,
   subagentModelOptions = [],
@@ -189,62 +157,48 @@ function ModelSectionComponent({
   onConfigChange,
   onRequestConfirmation,
 }: ModelSectionProps) {
-  const [routeDialogOpen, setRouteDialogOpen] = useState(false);
   const [draggedRouteId, setDraggedRouteId] = useState<string | null>(null);
   const [dropRouteId, setDropRouteId] = useState<string | null>(null);
   // 模型只能在所属线路内拖动排序，因此拖动状态同时记录线路和模型。
   const [draggedModel, setDraggedModel] = useState<RouteModelRef | null>(null);
   const [dropModel, setDropModel] = useState<RouteModelRef | null>(null);
-  const [pendingRouteToggle, setPendingRouteToggle] = useState<{
-    id: string;
-    enabled: boolean;
-  } | null>(null);
-  const [routeDraft, setRouteDraft] = useState<Profile | null>(null);
-  const [routeValidationAttempted, setRouteValidationAttempted] = useState(false);
   const [routeApiKeyVisible, setRouteApiKeyVisible] = useState(false);
-  const [routeHeadersText, setRouteHeadersText] = useState("{}");
-  const [headerDialogProfile, setHeaderDialogProfile] = useState<Profile | null>(null);
-  const [headerError, setHeaderError] = useState("");
-  const [officialModelDraft, setOfficialModelDraft] = useState<string[]>([]);
-  const [officialModelContextDraft, setOfficialModelContextDraft] =
-    useState<Record<string, ModelContextConfig>>({});
   // 脱敏只作用于当前页面显示，每次进入页面默认关闭。
   const [maskSensitive, setMaskSensitive] = useState(false);
-  const [officialRouteDraft, setOfficialRouteDraft] =
-    useState<OfficialRouteSettingsDraft | null>(null);
-  const [officialDialogScope, setOfficialDialogScope] =
-    useState<OfficialRouteDialogScope | null>(null);
   const routeConfigReadOnly = !config.localRouterEnabled;
-
-  useEffect(() => {
-    if (!routeConfigReadOnly) return;
-    setRouteDialogOpen(false);
-    setRouteDraft(null);
-    setOfficialRouteDraft(null);
-    setOfficialDialogScope(null);
-    setRouteApiKeyVisible(false);
-  }, [routeConfigReadOnly]);
 
   const { officialAccounts, refreshOfficialAccounts, adoptOfficialAccounts,
     handleOfficialAccountsChanged, openRequestLogs } = useRoutePanelController({
       active, readOnly: routeConfigReadOnly, onAccountsChanged: onOfficialAccountsChanged, onNotice,
     });
 
-  const defaultOfficialAccount = useMemo(
-    () => officialAccounts?.find((account) => account.isDefault) ?? null,
-    [officialAccounts],
-  );
-  // 每条官方线路对应一个账号记录，线路卡片和编辑弹窗都显示所属账号。
-  const accountForRoute = useCallback(
-    (profile: Profile | null | undefined): OfficialAccount | null => {
-      if (!profile) return null;
-      if (profile.officialAccountId) {
-        return officialAccounts?.find((account) => account.id === profile.officialAccountId) ?? null;
-      }
-      return defaultOfficialAccount;
-    },
-    [defaultOfficialAccount, officialAccounts],
-  );
+  const { officialCatalog, officialDisplayNames, visibleProfiles, modelGroupByProviderId,
+    totalModelCount, pendingRouteToggle, handleToggleRouteEnabled } = useRouteCatalogController({
+      active, config, currentProvider, modelState, officialAccountAvailable, isBusy: externalBusy,
+      dirty, onSetRouteEnabled, onNotice,
+    });
+  const { routeDraft, routeDialogOpen, routeValidationAttempted, routeDraftErrors, routeDraftHasErrors,
+    officialRouteDraft, officialRouteDraftErrors, officialDialogScope, officialModelDraft, officialModelDraftKeys,
+    officialModelContextDraft, draftOfficialAccount, headerDialogProfile, routeHeadersText, headerError, saving,
+    openNewRouteDialog, openRouteDialog, updateRouteDraft, changeProtocol, updateOfficialRouteDraft,
+    toggleOfficialModel, updateOfficialModelContext, openHeadersDialog, changeHeaders, saveHeaders, saveRouteDraft,
+    closeRouteDialog, closeHeadersDialog } = useRouteEditorController({
+      active, config, isBusy: externalBusy, officialAccounts, officialCatalog, showAccountUsageInHeader,
+      onSaveRoute, onSaveOfficialRouteSettings, refreshOfficialAccounts, onNotice,
+    });
+  const isBusy = externalBusy || saving;
+  useEffect(() => { setRouteApiKeyVisible(false); }, [routeDialogOpen, routeDraft?.id]);
+  const toggleRouteApiKeyVisibility = () => setRouteApiKeyVisible(visible => !visible);
+  const accountForRoute = (profile: Profile) => findRouteAccount(profile, officialAccounts);
+  const saveAndFocusInvalidField = async () => {
+    const invalid = await saveRouteDraft();
+    if (!invalid) return;
+    requestAnimationFrame(() => {
+      const root = popupContainer ?? document;
+      root.querySelector<HTMLInputElement>(invalid === "official"
+        ? ".official-route-editor [aria-invalid='true']" : ".route-editor-form [aria-invalid='true']")?.focus();
+    });
+  };
   const displayedEmail = useCallback(
     (account: OfficialAccount | null) => {
       const email = account?.email?.trim();
@@ -265,308 +219,6 @@ function ModelSectionComponent({
     [maskSensitive],
   );
 
-  const nativeProfile = useMemo<Profile | null>(() => {
-    if (!routeConfigReadOnly || !currentProvider) return null;
-    const matchingProfile = config.profiles.find(
-      (profile) =>
-        profile.id === currentProvider.id ||
-        routeProviderId(profile) === currentProvider.id,
-    );
-    const official = currentProvider.official;
-    if (matchingProfile?.enabled === false) return null;
-    return {
-      id: matchingProfile?.id || currentProvider.id,
-      name: matchingProfile
-        ? matchingProfile.name.trim()
-        : currentProvider.name.trim() || currentProvider.id,
-      shortName: matchingProfile?.shortName || "",
-      baseUrl: currentProvider.baseUrl || matchingProfile?.baseUrl || "",
-      apiKey: "",
-      upstreamProtocol:
-        matchingProfile?.upstreamProtocol ||
-        (official ? "official" : "openaiResponses"),
-      authMode: official ? "officialAccount" : "apiKey",
-      apiKeyConfigured: matchingProfile?.apiKeyConfigured === true,
-      sourceProviderId: currentProvider.id,
-      officialAccount: official,
-      supportsRemoteCompaction: matchingProfile?.supportsRemoteCompaction,
-      supportsWebsockets: matchingProfile?.supportsWebsockets,
-      supportsNativeWebSearch: matchingProfile?.supportsNativeWebSearch,
-      supportsAutoReview: matchingProfile?.supportsAutoReview,
-      modelRequestHeaders: matchingProfile?.modelRequestHeaders || {},
-      upstreamProxy: matchingProfile?.upstreamProxy || "",
-    };
-  }, [config.profiles, currentProvider, routeConfigReadOnly]);
-  const visibleProfiles = useMemo(
-    () => {
-      if (routeConfigReadOnly) return nativeProfile ? [nativeProfile] : [];
-      const profiles = config.profiles.filter(
-        (profile) =>
-          profile.enabled === false ||
-          profile.authMode !== "officialAccount" ||
-          officialAccountAvailable ||
-          // 存储账号的官方线路自带凭据，默认登录缺失时仍由本地路由提供服务。
-          Boolean(profile.officialAccountId),
-      );
-      return sortRoutesByEnabled(pendingRouteToggle
-        ? profiles.map((profile) => profile.id === pendingRouteToggle.id
-          ? { ...profile, enabled: pendingRouteToggle.enabled }
-          : profile)
-        : profiles);
-    },
-    [config.profiles, nativeProfile, officialAccountAvailable, routeConfigReadOnly, pendingRouteToggle],
-  );
-  const officialDisplayNames = useMemo(
-    () =>
-      new Map(
-        modelState.officialModels.map((model) => [
-          modelKey(model.slug),
-          model.displayName,
-        ]),
-      ),
-    [modelState.officialModels],
-  );
-  const officialCatalog = useMemo(
-    () =>
-      uniqueModelIds([
-        ...modelState.officialModelIds,
-        ...modelState.officialModels.map((model) => model.slug),
-      ]),
-    [modelState.officialModelIds, modelState.officialModels],
-  );
-  const officialModelDraftKeys = useMemo(
-    () => new Set(officialModelDraft.map(modelKey)),
-    [officialModelDraft],
-  );
-  const modelGroups = useMemo<RouteModelGroup[]>(
-    () => {
-      const nativeOfficialModels = routeConfigReadOnly
-        ? modelState.officialModels.filter((model) => model.supported).map((model) => model.slug)
-        : [];
-      return visibleProfiles.filter((profile) => profile.enabled !== false).map((profile) => {
-        const providerId = routeProviderId(profile);
-        const official = profile.authMode === "officialAccount";
-        const configuredModels = config.selectedModelsByProvider[providerId] || [];
-        const models = routeConfigReadOnly
-          ? official
-            ? uniqueModelIds(
-                nativeOfficialModels.length > 0
-                  ? nativeOfficialModels
-                  : modelState.officialModelIds,
-              )
-            : modelState.thirdPartyModels
-            : official
-              ? uniqueModelIds(
-                  configuredModels.length > 0 ? configuredModels : officialCatalog,
-                )
-            : uniqueModelIds([
-                ...configuredModels,
-                ...(config.declaredOfficialModelsByProvider[providerId] || []),
-              ]);
-        return {
-          profile,
-          providerId,
-          models,
-          defaultModel: routeConfigReadOnly
-            ? modelState.defaultModel
-            : globalDefaultForRoute(config, profile, models),
-          official,
-        };
-      });
-    },
-    [config, modelState, officialCatalog, routeConfigReadOnly, visibleProfiles],
-  );
-  const modelGroupByProviderId = useMemo(
-    () => new Map(modelGroups.map((group) => [group.providerId, group])),
-    [modelGroups],
-  );
-
-  const totalModelCount = useMemo(
-    () => modelGroups.reduce((count, group) => count + group.models.length, 0),
-    [modelGroups],
-  );
-  const routeDraftErrors = useMemo(
-    () => routeDraft ? validateRouteDraft(routeDraft, config.profiles) : null,
-    [config.profiles, routeDraft],
-  );
-  const routeDraftHasErrors = Boolean(
-    routeDraftErrors && Object.values(routeDraftErrors).some(Boolean),
-  );
-  const officialRouteDraftErrors = useMemo(
-    () =>
-      officialRouteDraft
-        ? validateOfficialRouteSettings(
-            officialRouteDraft,
-            config.profiles,
-            officialAccounts,
-            routeDraft?.officialAccountId ?? defaultOfficialAccount?.id ?? "",
-          )
-        : null,
-    [config.profiles, defaultOfficialAccount, officialAccounts, officialRouteDraft, routeDraft],
-  );
-
-  const openNewRouteDialog = () => {
-    setRouteDraft(createRouteDraft(`route-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`));
-    setRouteValidationAttempted(false);
-    setRouteApiKeyVisible(false);
-    setRouteHeadersText(JSON.stringify({}, null, 2));
-    setHeaderError("");
-    setOfficialModelDraft([]);
-    setOfficialDialogScope(null);
-    setRouteDialogOpen(true);
-  };
-  const openRouteDialog = (
-    profile: Profile,
-    officialScope: OfficialRouteDialogScope | null = null,
-  ) => {
-    const official = profile.authMode === "officialAccount";
-    setRouteDraft({ ...profile, shortName: profile.shortName || fallbackRouteShortName(profile.name) });
-    setRouteValidationAttempted(false);
-    setRouteApiKeyVisible(false);
-    setRouteHeadersText(headersTextFromMap(profile.modelRequestHeaders));
-    setHeaderError("");
-    const routeAccount = official ? accountForRoute(profile) : null;
-    setOfficialRouteDraft(
-      official && officialScope === "settings"
-        ? {
-            routeName: routeAccount?.routeName ?? profile.name,
-            routeShortName: routeAccount?.routeShortName || profile.shortName || fallbackRouteShortName(profile.name),
-            baseUrl: routeAccount?.baseUrl ?? "",
-            upstreamProxy: profile.upstreamProxy ?? "",
-          }
-        : null,
-    );
-    if (official && officialScope === "models") {
-      const providerId = routeProviderId(profile);
-      const configuredModels = config.selectedModelsByProvider[providerId] || [];
-      const catalogKeys = new Set(officialCatalog.map(modelKey));
-      const enabledModels = configuredModels.filter((model) => catalogKeys.has(modelKey(model)));
-      setOfficialModelDraft(
-        uniqueModelIds(enabledModels.length > 0 ? enabledModels : officialCatalog),
-      );
-      setOfficialModelContextDraft(
-        config.modelContextByProvider?.[providerId] || {},
-      );
-    } else {
-      setOfficialModelDraft([]);
-      setOfficialModelContextDraft({});
-    }
-    setOfficialDialogScope(official ? officialScope : null);
-    setRouteDialogOpen(true);
-  };
-  const updateRouteDraft = (patch: Partial<Profile>) => {
-    setRouteDraft((current) => current ? { ...current, ...patch } : current);
-  };
-  const updateOfficialRouteDraft = (patch: Partial<OfficialRouteSettingsDraft>) => {
-    setOfficialRouteDraft((current) => current ? { ...current, ...patch } : current);
-  };
-  const openHeadersDialog = (profile: Profile) => {
-    setHeaderDialogProfile(profile);
-    setRouteHeadersText(headersTextFromMap(profile.modelRequestHeaders));
-    setHeaderError("");
-  };
-  const saveHeaders = async () => {
-    if (!headerDialogProfile) return;
-    let modelRequestHeaders: Record<string, string>;
-    try {
-      modelRequestHeaders = parseHeadersText(routeHeadersText);
-    } catch (error) {
-      setHeaderError((error as Error).message);
-      return;
-    }
-    setHeaderError("");
-    if (!await onSaveRoute({ ...headerDialogProfile, modelRequestHeaders })) return;
-    setHeaderDialogProfile(null);
-  };
-  const toggleRouteApiKeyVisibility = () => {
-    setRouteApiKeyVisible((visible) => !visible);
-  };
-  const saveRouteDraft = async () => {
-    if (!routeDraft) return;
-    let modelRequestHeaders: Record<string, string>;
-    try {
-      modelRequestHeaders = parseHeadersText(routeHeadersText);
-    } catch (error) {
-      setHeaderError((error as Error).message);
-      setRouteValidationAttempted(true);
-      return;
-    }
-    if (routeDraft.authMode === "officialAccount") {
-      if (officialDialogScope === "models") {
-        if (officialModelDraft.length === 0) return;
-      } else if (officialRouteDraftErrors && Object.values(officialRouteDraftErrors).some(Boolean)) {
-        setRouteValidationAttempted(true);
-        requestAnimationFrame(() => {
-          const firstInvalid = document.querySelector<HTMLInputElement>(
-            ".official-route-editor [aria-invalid='true']",
-          );
-          firstInvalid?.focus();
-        });
-        return;
-      }
-    } else if (routeDraftHasErrors) {
-      setRouteValidationAttempted(true);
-      requestAnimationFrame(() => {
-        const firstInvalid = document.querySelector<HTMLInputElement>(
-          ".route-editor-form [aria-invalid='true']",
-        );
-        firstInvalid?.focus();
-      });
-      return;
-    }
-    const accountId = routeDraft.officialAccountId ?? defaultOfficialAccount?.id ?? "";
-    const officialProviderId = routeProviderId(routeDraft);
-    const configuredOfficialModels = config.selectedModelsByProvider[officialProviderId] || [];
-    const currentOfficialModels = configuredOfficialModels.length > 0
-      ? configuredOfficialModels
-      : officialCatalog;
-    const savingOfficialSettings =
-      routeDraft.authMode === "officialAccount" && officialDialogScope === "settings";
-    // 同步入口只改模型，代理等设置保持现状，因此不传代理值。
-    const upstreamProxy = savingOfficialSettings
-      ? officialRouteDraft?.upstreamProxy ?? routeDraft.upstreamProxy ?? ""
-      : undefined;
-    const saved = routeDraft.authMode === "officialAccount"
-      ? (onSaveOfficialRouteSettings
-          ? await onSaveOfficialRouteSettings(
-              routeDraft.id,
-              officialDialogScope === "models" ? officialModelDraft : currentOfficialModels,
-              showAccountUsageInHeader,
-              routeDraft.enabled !== false,
-              officialDialogScope === "models" ? officialModelContextDraft : undefined,
-              upstreamProxy,
-              savingOfficialSettings && accountId && officialRouteDraft
-                ? {
-                    accountId,
-                    routeName: officialRouteDraft.routeName.trim(),
-                    routeShortName: officialRouteDraft.routeShortName.trim(),
-                    baseUrl: officialRouteDraft.baseUrl.trim(),
-                  }
-                : undefined,
-            )
-          : true)
-      : await onSaveRoute({ ...routeDraft, modelRequestHeaders });
-    if (saved) {
-      if (routeDraft.authMode === "officialAccount") void refreshOfficialAccounts();
-      setRouteDialogOpen(false);
-      setRouteDraft(null);
-      setOfficialRouteDraft(null);
-      setOfficialDialogScope(null);
-    }
-  };
-
-  const handleToggleRouteEnabled = async (profile: Profile, enabled: boolean) => {
-    if (isBusy || dirty || routeConfigReadOnly || pendingRouteToggle) return;
-    setPendingRouteToggle({ id: profile.id, enabled });
-    try {
-      await onSetRouteEnabled(profile.id, enabled);
-    } finally {
-      // 待保存状态仅用于显示，失败后自然恢复后端配置，避免改动设置草稿。
-      setPendingRouteToggle(null);
-    }
-  };
-
-  const draftOfficialAccount = accountForRoute(routeDraft);
   const draggedProfile = draggedRouteId
     ? visibleProfiles.find((profile) => profile.id === draggedRouteId)
     : undefined;
@@ -1188,15 +840,7 @@ function ModelSectionComponent({
       <Dialog
         open={routeDialogOpen}
         onOpenChange={(open) => {
-          if (!isBusy) {
-            setRouteDialogOpen(open);
-            if (!open) {
-              setRouteDraft(null);
-              setOfficialRouteDraft(null);
-              setOfficialDialogScope(null);
-              setRouteApiKeyVisible(false);
-            }
-          }
+          if (!open) closeRouteDialog();
         }}
       >
         {routeDialogOpen && routeDraft && (
@@ -1412,15 +1056,7 @@ function ModelSectionComponent({
                               <Checkbox
                                 checked={checked}
                                 disabled={isBusy || (checked && officialModelDraft.length <= 1)}
-                                onCheckedChange={(nextChecked) => {
-                                  setOfficialModelDraft((current) =>
-                                    nextChecked === true
-                                      ? uniqueModelIds([...current, model])
-                                      : current.filter(
-                                          (candidate) => !modelIdsEqual(candidate, model),
-                                        ),
-                                  );
-                                }}
+                                onCheckedChange={(nextChecked) => toggleOfficialModel(model, nextChecked === true)}
                                 aria-label={`${checked ? "停用" : "启用"}官方模型 ${model}`}
                               />
                               <span>
@@ -1436,17 +1072,7 @@ function ModelSectionComponent({
                                   policy={Object.entries(officialModelContextDraft).find(
                                     ([candidate]) => modelIdsEqual(candidate, model),
                                   )?.[1]}
-                                  onChange={(policy) => {
-                                    setOfficialModelContextDraft((current) => {
-                                      const next = Object.fromEntries(
-                                        Object.entries(current).filter(
-                                          ([candidate]) => !modelIdsEqual(candidate, model),
-                                        ),
-                                      );
-                                      if (policy) next[model] = policy;
-                                      return next;
-                                    });
-                                  }}
+                                  onChange={(policy) => updateOfficialModelContext(model, policy)}
                                 />
                               )}
                             </div>
@@ -1533,10 +1159,7 @@ function ModelSectionComponent({
                     aria-required={true}
                     value={routeDraft.upstreamProtocol}
                     disabled={isBusy}
-                    onChange={(value) => {
-                      const patch = routeProtocolPatch(routeDraft, value);
-                      if (patch) updateRouteDraft(patch);
-                    }}
+                    onChange={changeProtocol}
                     optionList={routeProtocolOptions}
                   />
                 </div>
@@ -1807,14 +1430,7 @@ function ModelSectionComponent({
               <Button
                 variant="outline"
                 disabled={isBusy}
-                onClick={() => {
-                  setRouteDialogOpen(false);
-                  setRouteDraft(null);
-                  setOfficialRouteDraft(null);
-                  setOfficialDialogScope(null);
-                  setRouteValidationAttempted(false);
-                  setRouteApiKeyVisible(false);
-                }}
+                onClick={closeRouteDialog}
               >
                 取消
               </Button>
@@ -1824,7 +1440,7 @@ function ModelSectionComponent({
                     ? officialDialogScope === "models" && officialModelDraft.length === 0
                     : routeValidationAttempted && routeDraftHasErrors
                 )}
-                onClick={() => void saveRouteDraft()}
+                onClick={() => void saveAndFocusInvalidField()}
               >
                 <Check aria-hidden="true" />
                 {routeDraft.authMode === "officialAccount" && officialDialogScope === "models"
@@ -1835,7 +1451,7 @@ function ModelSectionComponent({
           </DialogContent>
         )}
       </Dialog>
-      <Dialog open={headerDialogProfile !== null} onOpenChange={(open) => { if (!open && !isBusy) setHeaderDialogProfile(null); }}>
+      <Dialog open={headerDialogProfile !== null} onOpenChange={(open) => { if (!open) closeHeadersDialog(); }}>
         {headerDialogProfile && (
           <DialogContent className="route-editor-dialog">
             <DialogHeader>
@@ -1852,13 +1468,13 @@ function ModelSectionComponent({
                 disabled={isBusy}
                 rows={10}
                 className="min-h-48 rounded-lg border border-[rgb(var(--codey-ink-rgb,0,0,0))]/10 bg-[var(--codey-surface,#fff)] p-2 font-mono text-xs"
-                onChange={(event) => { setRouteHeadersText(event.target.value); setHeaderError(""); }}
+                onChange={(event) => changeHeaders(event.target.value)}
                 placeholder={'{"X-Custom-Header": "value"}'}
               />
               {headerError && <small id="request-headers-error" className="text-[var(--codey-red,#d70015)]" role="alert">{headerError}</small>}
             </label>
             <DialogFooter className="route-editor-footer">
-              <Button variant="outline" disabled={isBusy} onClick={() => setHeaderDialogProfile(null)}>取消</Button>
+              <Button variant="outline" disabled={isBusy} onClick={closeHeadersDialog}>取消</Button>
               <Button disabled={isBusy} onClick={() => void saveHeaders()}><Check aria-hidden="true" />保存请求头</Button>
             </DialogFooter>
           </DialogContent>

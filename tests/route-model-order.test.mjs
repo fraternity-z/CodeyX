@@ -58,23 +58,23 @@ test("official picker draft starts in the order saved on the route", t => {
 const ui = autoStubModule("ui");
 const icons = autoStubModule("icon");
 const heroui = autoStubModule("heroui");
-const modelSection = createModuleGraph(new URL("../src/ModelSection.tsx", import.meta.url), {
-  stubs: {
-    "@heroui/react": heroui,
-    "@tabler/icons-react": icons,
-    "./api": { invoke: async () => ({}) },
-    "./components/ModelCombobox": autoStubModule("combobox"),
-    "./components/ModelSettingsFields": autoStubModule("model-settings"),
-    "./components/ui": ui,
-    "./OfficialAccountsPanel": autoStubModule("official-accounts"),
-    "./overlayTheme": { readHostTheme: () => "light" },
-    "./SettingsPageHeader": autoStubModule("settings-header"),
-  },
-});
+const modelSectionStubs = {
+  "@heroui/react": heroui,
+  "@tabler/icons-react": icons,
+  "./api": { invoke: async () => ({}) },
+  "./components/ModelCombobox": autoStubModule("combobox"),
+  "./components/ModelSettingsFields": autoStubModule("model-settings"),
+  "./components/ui": ui,
+  "./OfficialAccountsPanel": autoStubModule("official-accounts"),
+  "./overlayTheme": { readHostTheme: () => "light" },
+  "./SettingsPageHeader": autoStubModule("settings-header"),
+};
+const modelSection = createModuleGraph(new URL("../src/ModelSection.tsx", import.meta.url), { stubs: modelSectionStubs });
 
 function modelSectionProps(overrides = {}) {
   const reorderCalls = [];
   const props = {
+    active: true,
     config: {
       activeProfileId: "route-a",
       codeyUpdatePolicy: "stable",
@@ -266,7 +266,7 @@ test("控制台通过带版本号的排序命令保存模型顺序", async () =>
   assert.match(api, /"reorder_route_models",/);
 });
 
-test("保存官方连接设置时省略上下文更新，保留已有模型预算", () => {
+test("保存官方连接设置时省略上下文更新，保留已有模型预算", async t => {
   const calls = [];
   const { props } = modelSectionProps({
     onSaveOfficialRouteSettings: async (...args) => { calls.push(args); return false; },
@@ -288,18 +288,19 @@ test("保存官方连接设置时省略上下文更新，保留已有模型预�
     ...props.modelState,
     officialModelIds: [model], officialModels: [{ slug: model, supported: true }],
   };
-  modelSection.reset();
-  let tree = modelSection.exports.ModelSection(props);
+  const harness = createControllerHarness(new URL("../src/ModelSection.tsx", import.meta.url), "ModelSection", modelSectionStubs);
+  t.after(() => harness.unmount());
+  let tree = harness.render(props);
   const edit = collectElements(tree, (element) =>
     elementProps(element)["aria-label"] === "编辑线路 官方账号")[0];
   assert.ok(edit);
   elementProps(edit).onClick();
-  modelSection.restart();
-  tree = modelSection.exports.ModelSection(props);
+  tree = harness.render();
   const save = collectElements(tree, (element) =>
     typeof elementProps(element).onClick === "function" && textContent(element) === "保存线路")[0];
   assert.ok(save);
   elementProps(save).onClick();
+  await harness.flush();
   assert.equal(calls.length, 1);
   assert.equal(calls[0][0], profile.id);
   assert.deepEqual(calls[0][1], [model]);

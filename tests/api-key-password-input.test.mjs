@@ -89,6 +89,7 @@ function renderPromptCard(optimizationOverrides = {}) {
 // 线路编辑器依赖真实 config/modelState 结构：给出最小可用的一整套，让组件按生产路径渲染。
 function modelSectionProps() {
   return {
+    active: true,
     config: {
       activeProfileId: "route-a",
       codeyUpdatePolicy: "stable",

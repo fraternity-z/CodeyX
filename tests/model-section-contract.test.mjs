@@ -3,10 +3,11 @@ import test from "node:test";
 
 import { readSource } from "./helpers/read-source.mjs";
 
-const [modelSectionSource, typeSource, dialogSource] = await Promise.all([
+const [modelSectionSource, typeSource, dialogSource, editorSource] = await Promise.all([
   readSource("src/ModelSection.tsx"),
   readSource("src/App.types.ts"),
   readSource("src/AppDialogs.tsx"),
+  readSource("src/features/routes/useRouteEditorController.ts"),
 ]);
 
 test("route editor offers the native Gemini protocol and its connection hints", () => {
@@ -18,7 +19,8 @@ test("route editor offers the native Gemini protocol and its connection hints", 
 
 test("third-party native Web Search is an explicit Responses-only capability", () => {
   assert.match(typeSource, /supportsNativeWebSearch\?: boolean/);
-  assert.match(modelSectionSource, /routeProtocolPatch\(routeDraft, value\)/);
+  assert.match(editorSource, /routeProtocolPatch\(routeDraft, value\)/);
+  assert.match(modelSectionSource, /onChange=\{changeProtocol\}/);
   assert.match(
     modelSectionSource,
     /checked=\{Boolean\(routeDraft\.supportsNativeWebSearch\)\}/,
@@ -45,7 +47,7 @@ test("official routes expose context budgets and preserve them when editing conn
     .split('<div className="official-route-editor">')[1]
     .split('<div className="route-editor-form">')[0];
   assert.match(officialEditor, /ModelSettingsFields/);
-  assert.match(modelSectionSource, /officialDialogScope === "models" \? officialModelContextDraft : undefined/);
+  assert.match(editorSource, /officialDialogScope === "models" \? officialModelContextDraft : undefined/);
   const backend = await readSource("backend/src/commands/models/defaults.rs");
   const saveOfficial = backend
     .split("pub async fn save_official_route_models(")[1]

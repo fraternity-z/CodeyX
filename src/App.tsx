@@ -687,7 +687,7 @@ export function App({
           ),
           models: (active) => (
             <ModelSection
-              active={active}
+              active={active && (!embedded || modalVisible)}
               config={config}
               runtimeStatus={status}
               currentProvider={provider ?? null}

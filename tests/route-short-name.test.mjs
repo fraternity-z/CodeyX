@@ -153,7 +153,8 @@ test("official route settings are edited on the route card instead of the accoun
   assert.match(modelSection, /留空使用官方默认网关/);
   assert.match(modelSection, /maxLength=\{MAX_ROUTE_NAME_CHARACTERS\}/);
   assert.match(modelSection, /maxLength=\{MAX_ROUTE_SHORT_NAME_CHARACTERS\}/);
-  assert.match(modelSection, /validateOfficialRouteSettings\(/);
+  const editor = await readFile(new URL("../src/features/routes/useRouteEditorController.ts", import.meta.url), "utf8");
+  assert.match(editor, /validateOfficialRouteSettings\(/);
   assert.match(modelSection, /官方账号登录 · \$\{email\}/);
   // 编辑按钮对所有线路渲染，只有第三方线路才有删除按钮。
   const editButton = modelSection.indexOf("aria-label={`编辑线路 ${profile.name}`}");

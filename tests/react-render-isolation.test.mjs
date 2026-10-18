@@ -97,7 +97,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.doesNotMatch(sections, /route-list-pane|route-manager-balanced|<Listy/);
   assert.match(sections, /route-manager-current/);
   assert.match(sections, /className="provider-model-groups"/);
-  assert.match(sections, /modelState\.officialModelIds/);
+  assert.match(sections, /useRouteCatalogController\(/);
   assert.match(sections, /checked=\{config\.localRouterEnabled\}/);
   assert.match(sections, /const routeConfigReadOnly = !config\.localRouterEnabled/);
   assert.match(sections, /checked=\{checked\}/);
@@ -111,7 +111,8 @@ test("settings panels declare render-isolation hooks and stable handlers", async
   assert.match(sections, /查看请求日志/);
   assert.match(sections, /当前线路模型/);
   assert.match(sections, /仅展示 Codex 当前线路，可同步模型/);
-  assert.match(sections, /if \(routeConfigReadOnly\) return nativeProfile \? \[nativeProfile\] : \[\]/);
+  // 原生模式目录与模型筛选由 route-catalog.test.mjs 验证，视图仅消费结果。
+  assert.doesNotMatch(sections, /const nativeProfile = useMemo/);
   assert.match(sections, /disabled=\{!canSyncCurrentProvider \|\| isBusy\}/);
   assert.match(draftConfig, /canSyncCurrentProvider: !dirty \|\| pendingNativeRouterToggle/);
   assert.match(app, /canSyncCurrentProvider=\{canSyncCurrentProvider\}/);

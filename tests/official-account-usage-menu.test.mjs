@@ -16,7 +16,7 @@ test("设置页只在首次打开对应菜单后挂载模块", () => {
 
 test("线路与模型菜单把激活状态透传到官方账号面板", () => {
   assert.match(app, /models: \(active\) => \(/);
-  assert.match(app, /<ModelSection\s+active=\{active\}/);
+  assert.match(app, /<ModelSection\s+active=\{active && \(!embedded \|\| modalVisible\)\}/);
   const section = models.match(/<OfficialAccountsPanel[\s\S]*?\/>/)?.[0];
   assert.ok(section, "应在 ModelSection 内渲染官方账号面板");
   assert.match(section, /active=\{active\}/);
