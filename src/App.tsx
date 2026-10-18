@@ -448,7 +448,7 @@ export function App({
           : "检查 CodeyX 在线更新";
 
   const configHeaderContent = (
-    <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-5 max-[760px]:grid-cols-[minmax(0,1fr)_auto_auto] max-[760px]:gap-2.5">
+    <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-5 max-[760px]:gap-2.5">
       <div className="flex min-w-0 items-center gap-3 justify-self-start max-[760px]:gap-2">
         <CodeyBrandMark />
         <div className="flex min-w-0 flex-col">
@@ -463,21 +463,6 @@ export function App({
           <p className="m-0 mt-0.5 text-[11px] text-[var(--codey-muted,#6e6e73)] max-[760px]:hidden">管理 Codex 线路、模型服务、运行策略与诊断日志</p>
         </div>
       </div>
-
-      {embedded && (
-        <div className="flex items-center gap-3 justify-self-center max-[760px]:gap-2">
-          <Button
-            aria-label="打开 CodeyX GitHub 仓库"
-            className="h-8! w-8! min-w-8! px-0!"
-            onClick={() => window.open("https://github.com/fraternity-z/CodeyX", "_blank", "noopener,noreferrer")}
-            size="icon-sm"
-            title="GitHub 仓库"
-            variant="brand-outline"
-          >
-            <IconBrandGithub aria-hidden="true" />
-          </Button>
-        </div>
-      )}
 
       <div className="flex min-w-0 items-center gap-4 justify-self-end">
         <div className="flex items-center gap-2">
@@ -602,6 +587,9 @@ export function App({
                   </span>
                 )}
               </span>
+            </div>
+
+            <div className="sidebar-footer-right">
               <Tooltip content={updateTooltipText} position="top">
                 <Button
                   size="icon-sm"
@@ -625,9 +613,19 @@ export function App({
                   )}
                 </Button>
               </Tooltip>
-            </div>
-
-            <div className="sidebar-footer-right">
+              {embedded && (
+                <Tooltip content="GitHub 仓库" position="top">
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    className="sidebar-footer-icon-btn"
+                    aria-label="打开 CodeyX GitHub 仓库"
+                    onClick={() => window.open("https://github.com/fraternity-z/CodeyX", "_blank", "noopener,noreferrer")}
+                  >
+                    <IconBrandGithub size={15} aria-hidden="true" />
+                  </Button>
+                </Tooltip>
+              )}
               <Tooltip content="系统设置与偏好" position="top">
                 <Button
                   size="icon-sm"

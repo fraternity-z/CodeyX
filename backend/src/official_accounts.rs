@@ -1596,7 +1596,10 @@ fn credential_from_refresh_token(raw: &str) -> Result<ManualOfficialCredential> 
 
 fn normalize_bare_token(raw: &str) -> String {
     let mut text = raw.trim();
-    if text.len() >= 6 && text[..6].eq_ignore_ascii_case("bearer") {
+    if text
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("bearer"))
+    {
         let rest = &text[6..];
         if rest.chars().next().is_some_and(char::is_whitespace) {
             text = rest.trim();
@@ -4089,6 +4092,33 @@ mod tests {
             refresh_token_grant(token)["client_id"],
             json!(OAUTH_CLIENT_ID)
         );
+    }
+
+    #[test]
+    fn manual_unicode_input_never_exposes_secrets_in_diagnostics() {
+        let secret = "rt_fake_secret_must_not_appear_in_diagnostics";
+        for prefix in ["Token：", "令牌：", "abcde😀", "ééé", "bEaReR\u{2003}"] {
+            for suffix in ["", ".payload.signature"] {
+                let input = format!("{prefix}{secret}{suffix}");
+                let outcome = std::panic::catch_unwind(|| {
+                    parse_manual_official_credential(&input)
+                        .map(|_| ())
+                        .map_err(|error| format!("{error:#}"))
+                });
+                let diagnostic = match &outcome {
+                    Ok(Err(error)) => error.as_str(),
+                    Err(panic) => panic
+                        .downcast_ref::<String>()
+                        .map(String::as_str)
+                        .or_else(|| panic.downcast_ref::<&str>().copied())
+                        .unwrap_or_default(),
+                    Ok(Ok(())) => "",
+                };
+                assert!(!diagnostic.contains(secret), "凭据出现在诊断信息中");
+                assert!(outcome.is_ok(), "Unicode 凭据输入不应触发 panic");
+            }
+        }
+        assert_eq!(manual_refresh(&format!("bEaReR\u{2003}{secret}")), secret);
     }
 
     #[test]

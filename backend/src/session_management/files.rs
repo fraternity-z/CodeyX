@@ -66,12 +66,9 @@ fn walk(home: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
 }
 
 fn filename_id(path: &Path) -> Option<String> {
-    let name = path.file_name()?.to_str()?;
-    name.as_bytes()
-        .windows(36)
-        .filter_map(|bytes| std::str::from_utf8(bytes).ok())
-        .find(|candidate| valid_id(candidate))
-        .map(str::to_owned)
+    let stem = path.file_stem()?.to_str()?;
+    let candidate = stem.get(stem.len().checked_sub(36)?..)?;
+    valid_id(candidate).then(|| candidate.to_owned())
 }
 
 fn rollout_metadata(path: &Path) -> Result<Value> {
@@ -328,4 +325,32 @@ pub(super) fn clean(home: &Path, ids: &BTreeSet<String>, stopped: bool) -> Resul
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filename_identity_uses_only_the_final_uuid() {
+        let id = "11111111-1111-4111-8111-111111111111";
+        let random = "22222222-2222-4222-8222-222222222222";
+        for name in [
+            format!("rollout-2026-10-18-{id}.jsonl"),
+            format!("rollout-123-{random}-{id}.jsonl"),
+            format!("导入-{id}.jsonl"),
+            format!("{id}.ps1"),
+            id.to_owned(),
+        ] {
+            assert_eq!(filename_id(Path::new(&name)).as_deref(), Some(id));
+        }
+        for name in [
+            "short.jsonl".to_owned(),
+            format!("{id}-invalid.jsonl"),
+            format!("é{}.jsonl", "x".repeat(35)),
+            format!("{}.jsonl", "x".repeat(36)),
+        ] {
+            assert_eq!(filename_id(Path::new(&name)), None);
+        }
+    }
 }

@@ -3105,8 +3105,8 @@ impl ConfigStore {
         self.path.with_file_name(format!("{file_name}.bak.{index}"))
     }
 
-    /// Shift the current file into the backup chain with renames. Renames keep
-    /// the private file mode and avoid re-parsing every backup on each save.
+    /// Copy the current file into a private backup, keeping the primary in place
+    /// until its atomic replacement succeeds. Older backups rotate with renames.
     /// Backups are best-effort: a failure here must never block persisting the
     /// user's settings, so errors are logged instead of returned.
     fn rotate_backups_best_effort(&self, next_bytes: &[u8]) {
@@ -3135,7 +3135,9 @@ impl ConfigStore {
                 );
             }
         }
-        if let Err(error) = fs::rename(&self.path, self.backup_path(1)) {
+        if let Err(error) =
+            crate::fs_util::atomic_write_private_with_parent(&self.backup_path(1), &current)
+        {
             crate::error_log::record_failure(
                 "config_backup_rotate_failed",
                 "rotate_codey_config_backups",
@@ -3397,6 +3399,36 @@ mod tests {
             "vendor/model"
         );
         assert_eq!(restored.clone().normalize(), restored);
+    }
+
+    #[test]
+    fn config_backup_rotation_keeps_primary_on_failed_replacement() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        store.save(&named_config("version-1")).unwrap();
+        store.save(&named_config("version-2")).unwrap();
+        let original = fs::read(store.path()).unwrap();
+        let next = named_config("version-3").normalize();
+        let next_bytes = serde_json::to_vec_pretty(&next).unwrap();
+
+        store.rotate_backups_best_effort(&next_bytes);
+        // 模拟备份完成后，替换所需的临时文件未能就绪。
+        let missing_temp = crate::fs_util::unique_temp_path(store.path());
+        assert!(crate::fs_util::persist_temp_file(&missing_temp, store.path()).is_err());
+        assert_eq!(fs::read(store.path()).unwrap(), original);
+        assert_eq!(fs::read(store.backup_path(1)).unwrap(), original);
+        let (loaded, recovered) = store.load_with_recovery().unwrap();
+        assert_eq!(loaded.profiles[0].name, "version-2");
+        assert!(!recovered);
+
+        store.save(&next).unwrap();
+        assert_eq!(store.load().unwrap(), next);
+        assert_eq!(fs::read(store.backup_path(1)).unwrap(), original);
+        assert_eq!(
+            read_config_file(&store.backup_path(2)).unwrap().profiles[0].name,
+            "version-1"
+        );
+        assert!(!store.backup_path(3).exists());
     }
 
     #[test]

@@ -1656,6 +1656,65 @@ mod tests {
     }
 
     #[test]
+    fn imported_sessions_can_be_listed_and_deleted() {
+        use crate::session_management::{finish_pending, list, remove};
+
+        let source = tempdir().unwrap();
+        let project = tempdir().unwrap();
+        let source_id = "01900000-0000-7000-8000-000000000001";
+        create_thread_db(source.path(), source_id, project.path(), "待导入会话");
+        let (_, data) = export_via_chunks(source.path(), source_id);
+
+        for duplicated in [false, true] {
+            let target = tempdir().unwrap();
+            let existing_id = if duplicated {
+                source_id
+            } else {
+                "01900000-0000-7000-8000-000000000002"
+            };
+            create_thread_db(target.path(), existing_id, project.path(), "保留会话");
+            let imported =
+                import_via_chunks(target.path(), project.path().to_str().unwrap(), &data);
+            assert_eq!(imported.duplicated, duplicated);
+            let (thread, _) = find_thread(target.path(), &imported.session_id)
+                .unwrap()
+                .unwrap();
+            let rollout_path = PathBuf::from(thread["rollout_path"].as_str().unwrap());
+            let inventory = serde_json::to_value(list(target.path()).unwrap()).unwrap();
+            assert_eq!(inventory["sessions"].as_array().unwrap().len(), 2);
+            assert!(
+                inventory["sessions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| { entry["id"].as_str() == Some(imported.session_id.as_str()) })
+            );
+
+            let request = serde_json::from_value(serde_json::json!({
+                "ids": [imported.session_id],
+                "revision": inventory["revision"],
+                "confirmed": true,
+            }))
+            .unwrap();
+            let result = serde_json::to_value(remove(target.path(), request).unwrap()).unwrap();
+            assert_eq!(result["selectedCount"], 1);
+            assert!(result["errors"].as_array().unwrap().is_empty());
+            finish_pending(target.path()).unwrap();
+            assert!(!rollout_path.exists());
+            assert!(
+                find_thread(target.path(), &imported.session_id)
+                    .unwrap()
+                    .is_none()
+            );
+            let remaining = serde_json::to_value(list(target.path()).unwrap()).unwrap();
+            assert_eq!(remaining["sessions"].as_array().unwrap().len(), 1);
+            assert_eq!(remaining["sessions"][0]["id"], existing_id);
+            let (retained, _) = find_thread(target.path(), existing_id).unwrap().unwrap();
+            assert!(Path::new(retained["rollout_path"].as_str().unwrap()).exists());
+        }
+    }
+
+    #[test]
     fn rejected_import_leaves_existing_files_and_database_unchanged() {
         let home = tempdir().unwrap();
         let project = tempdir().unwrap();
