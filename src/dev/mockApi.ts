@@ -6,6 +6,7 @@ import { pluginConfigBusinessValuesEqual, validatePluginConfigText, type CodeyPl
 import { createCodexExtensionsPreview } from "./codexExtensionsMock";
 import { createBuiltinToolsPreview } from "./builtinToolsMock";
 import { createSessionsPreview } from "./sessionsMock";
+import { createBackupPreview } from "./backupPreview";
 import {
   AUTO_REVIEW_MODEL,
   includesModelId,
@@ -588,15 +589,19 @@ if (import.meta.env.DEV) {
     const extensionsPreview = createCodexExtensionsPreview(previewClientPlatform);
     const builtinToolsPreview = createBuiltinToolsPreview();
     const sessionsPreview = createSessionsPreview();
+    const backupPreview = createBackupPreview(() => ({ config: previewConfig, modelState: previewModelState,
+      providerStatus: previewProviderStatus(), fastContextToolsStatus: { userConfigured: false, detectionFailed: false } }),
+    config => { previewConfig = config; refreshPreviewModelState(); });
     let computerUseReady = false;
     const previewPackageUploads = new Map<string, { name: string; size: number; signature: string }>();
     window.__codeyInvokeApi = async (command, args) => {
-      console.log(`[Mock API Call] ${command}`, args);
+      console.log(`[Mock API Call] ${command}`, command === "config_backup" ? { action: args.action } : args);
       // Wait a tiny bit to simulate network delay
       await new Promise((resolve) => setTimeout(resolve, 300));
 
       if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
       if (command === "builtin_tools") return builtinToolsPreview(args);
+      if (command === "config_backup") return backupPreview(args);
       if (command === "list_codex_sessions" || command === "delete_codex_sessions") return sessionsPreview(command, args);
 
       if (command === "plugin_marketplace_status" || command === "repair_plugin_marketplace" || command === "prepare_computer_use") {

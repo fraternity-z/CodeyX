@@ -6,6 +6,7 @@ export const CODEY_API_COMMANDS = [
   "revoke_remote_device",
   "load_codey_config",
   "save_codey_config",
+  "config_backup",
   "network_proxy_get",
   "network_proxy_save",
   "network_proxy_test",

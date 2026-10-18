@@ -9,6 +9,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+mod backup;
 mod builtin_tools;
 mod codex_app;
 mod config_repair;
@@ -1108,6 +1109,7 @@ async fn resolve_session_name_cached(
 
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
+        "config_backup" => backup::invoke(state, &args).await,
         "network_proxy_get"
         | "network_proxy_save"
         | "network_proxy_test"
@@ -1818,11 +1820,20 @@ async fn save_codey_config_locked(
         reconcile_subagent_models_for_mode(&mut config, &model_state);
         config = config.normalize();
     }
+    commit_codey_config_locked(state, &previous, config, fast_context_tools_status).await
+}
+
+async fn commit_codey_config_locked(
+    state: &Arc<AppState>,
+    previous: &CodeyConfig,
+    mut config: CodeyConfig,
+    fast_context_tools_status: FastContextToolsStatus,
+) -> Result<SavedCodeyConfig, String> {
     // Codex reads each registered role config_file again when spawning a child.
     // Check the Codey-owned runtime files on every save while the policy stays
     // enabled, even when the in-memory role summary did not change. Enabling or
     // disabling still requires a restart to register/unregister tools and hooks.
-    let reconcile_subagent_config = should_reconcile_runtime_subagent_config(&previous, &config);
+    let reconcile_subagent_config = should_reconcile_runtime_subagent_config(previous, &config);
     config.settings_revision = previous.settings_revision.saturating_add(1);
     let trace_guard_changed = config.disable_trace_log_writes != previous.disable_trace_log_writes;
     let _diagnostic_operation = if trace_guard_changed {

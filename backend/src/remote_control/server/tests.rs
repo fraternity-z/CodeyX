@@ -398,6 +398,7 @@ fn https_origins_are_exact_and_configuration_secrets_are_redacted() {
     assert_eq!(value["config"]["profiles"][0]["apiKeyConfigured"], true);
     assert!(panel_command("save_codey_config"));
     assert!(!panel_command("remote_control_status"));
+    assert!(!panel_command("config_backup"));
     for malformed in [
         json!({"config":"plugin setting"}),
         json!({"config":{"profiles":[1, null],"webhook":[],"promptOptimization":[]}}),
