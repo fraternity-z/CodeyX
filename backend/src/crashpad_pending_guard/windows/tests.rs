@@ -7,6 +7,11 @@ const IDS: [&str; 3] = [
     "00000000-0000-0000-0000-000000000003",
 ];
 
+fn canonical_tempdir() -> tempfile::TempDir {
+    // macOS temp paths can traverse /var; fixtures must not contain ancestor links.
+    tempfile::tempdir_in(std::env::temp_dir().canonicalize().unwrap()).unwrap()
+}
+
 fn metadata(states: &[u32]) -> Vec<u8> {
     let mut bytes = Vec::new();
     for value in [0x4350_4144_u32, 1, states.len() as u32, 0] {
@@ -28,7 +33,7 @@ fn metadata(states: &[u32]) -> Vec<u8> {
 }
 
 fn database(states: &[u32]) -> tempfile::TempDir {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = canonical_tempdir();
     fs::create_dir(temp.path().join("reports")).unwrap();
     fs::write(temp.path().join("metadata"), metadata(states)).unwrap();
     for id in IDS.iter().take(states.len()) {
@@ -89,7 +94,7 @@ fn parses_pending_records_and_rejects_invalid_layouts_and_paths() {
 
 #[test]
 fn empty_database_is_supported_without_creating_directories() {
-    let temp = tempfile::tempdir().unwrap();
+    let temp = canonical_tempdir();
     let reports = temp.path().join("reports");
     assert_eq!(
         inventory(std::slice::from_ref(&reports)).directories_found,
@@ -220,7 +225,7 @@ fn a_recent_upload_attempt_keeps_an_old_dump() {
 fn symlinked_database_and_dumps_are_skipped() {
     use std::os::unix::fs::symlink;
     let temp = database(&[0]);
-    let outside = tempfile::tempdir().unwrap();
+    let outside = canonical_tempdir();
     let reports = temp.path().join("reports");
     let dump = reports.join(format!("{}.dmp", IDS[0]));
     fs::remove_file(&dump).unwrap();
