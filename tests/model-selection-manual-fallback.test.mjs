@@ -1,43 +1,17 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
+import { createControllerHarness } from "./helpers/controller-harness.mjs";
 
 const root = new URL("../", import.meta.url);
 
-test("bulk model selection includes every filtered page and preserves unrelated selections", async () => {
-  const ids = await loadTypeScriptModule(new URL("src/modelIds.ts", root));
-  const reasoningEfforts = await loadTypeScriptModule(new URL("src/modelReasoningEfforts.ts", root));
+test("bulk model selection includes every filtered page and preserves unrelated selections", async t => {
   const { filterModelOptions } = await loadTypeScriptModule(new URL("src/modelPickerPagination.ts", root));
-  const state = [];
-  let cursor = 0;
-  const react = {
-    useEffect: () => {},
-    useCallback: (callback) => callback,
-    useMemo: (factory) => factory(),
-    useRef: (initial) => ({ current: initial }),
-    useState(initial) {
-      const index = cursor++;
-      if (!(index in state)) state[index] = initial;
-      return [state[index], (value) => { state[index] = typeof value === "function" ? value(state[index]) : value; }];
-    },
-  };
-  const source = await readFile(new URL("src/useModelSelection.ts", root), "utf8");
-  const exports = {};
-  new Function("require", "exports", ts.transpileModule(source, {
-    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-  }).outputText)((name) => {
-    if (name === "react") return react;
-    if (name === "./modelIds") return ids;
-    if (name === "./modelReasoningEfforts") return reasoningEfforts;
-    if (name === "./subagentModels") return { buildSubagentModelOptions: () => [] };
-    return {};
-  }, exports);
-  const render = () => {
-    cursor = 0;
-    return exports.useModelSelection({ config: null, currentProvider: null });
-  };
+  const h = createControllerHarness(new URL("../src/features/model-selection/useModelSelectionController.ts", import.meta.url),
+    "useModelSelectionController", { "../../subagentModels": { buildSubagentModelOptions: () => [] } });
+  const render = () => h.render({ active: true, config: null, currentProvider: null });
+  t.after(() => h.unmount());
   const upstream = Array.from({ length: 450 }, (_, index) => `provider-${index}`);
   render().openModelPicker({
     officialModels: [{ slug: "official", supported: true }], officialModelIds: ["official"],
@@ -68,9 +42,11 @@ const readModelCommandSources = async () => {
 };
 
 test("third-party model sync can fall back to manual model support configuration", async () => {
-  const [dialogSource, hookSource, modelCommandSource] = await Promise.all([
+  const [dialogSource, hookSource, stateSource, requestSource, modelCommandSource] = await Promise.all([
     readFile(new URL("src/AppDialogs.tsx", root), "utf8"),
-    readFile(new URL("src/useModelSelection.ts", root), "utf8"),
+    readFile(new URL("src/features/model-selection/useModelSelectionController.ts", root), "utf8"),
+    readFile(new URL("src/features/model-selection/state.ts", root), "utf8"),
+    readFile(new URL("src/features/model-selection/requests.ts", root), "utf8"),
     readModelCommandSources(),
   ]);
 
@@ -87,15 +63,15 @@ test("third-party model sync can fall back to manual model support configuration
   assert.match(dialogSource, /manualThirdPartyModelKeys\.has/);
   assert.match(dialogSource, /aria-label=\{`删除其他模型 \$\{model\}`\}/);
   assert.match(dialogSource, /onDeleteThirdPartyModel\(model\)/);
-  assert.match(hookSource, /modelEditorState\.officialModelIds\.find/);
-  assert.match(hookSource, /已在上方官方模型列表中，请直接勾选，不可重复输入/);
+  assert.match(stateSource, /officialModelIds\.find/);
+  assert.match(stateSource, /已在上方官方模型列表中，请直接勾选，不可重复输入/);
   assert.match(hookSource, /deleteDraftThirdPartyModel/);
-  assert.match(hookSource, /manualThirdPartyModels/);
+  assert.match(stateSource, /manualThirdPartyModels/);
   assert.match(hookSource, /supportsAutoReview/);
-  assert.match(hookSource, /AUTO_REVIEW_MODEL.*线路能力/s);
-  assert.match(hookSource, /deletedThirdPartyModels: deletedModels/);
+  assert.match(stateSource, /AUTO_REVIEW_MODEL.*线路能力/s);
+  assert.match(stateSource, /deletedThirdPartyModels: draft\.deletedModels/);
   assert.match(
-    hookSource,
+    requestSource,
     /"save_selected_models",\s*\{\s*officialModels,\s*thirdPartyModels,/,
   );
   assert.match(modelCommandSource, /argument::<Vec<String>>\(args, "officialModels"\)/);

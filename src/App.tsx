@@ -34,7 +34,7 @@ import { CodeyBrandMark, SettingsModalShell } from "./SettingsModalShell";
 import { SettingsPageHeader } from "./SettingsPageHeader";
 import { SettingsLayout } from "./SettingsLayout";
 import { RemoteControlPanel } from "./features/remote-control";
-import { useModelSelection } from "./useModelSelection";
+import { useModelSelectionController } from "./features/model-selection";
 import { useRuntimeStatusController } from "./features/runtime-status";
 import { useAppUpdatesController } from "./features/app-updates";
 import {
@@ -218,7 +218,8 @@ export function App({
     updateCustomModelInput,
     addCustomModel,
     saveModelSelection,
-  } = useModelSelection({
+  } = useModelSelectionController({
+    active: !embedded || modalVisible,
     config,
     currentProvider: provider ?? null,
     officialAccountAvailable: status.officialAccountAvailable === true,

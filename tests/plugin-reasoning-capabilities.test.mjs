@@ -41,12 +41,13 @@ function picker({ plugin = true, declared = true, stored = efforts(["high"]) } =
     manualThirdPartyModels: [], upstreamModels: [model], defaultModel: model,
     thirdPartyModelMetadata: [{ slug: model, autoSupportedReasoningEfforts: template }],
   };
-  const graph = createModuleGraph(new URL("../src/useModelSelection.ts", import.meta.url), {
-    stubs: { "./subagentModels": { buildSubagentModelOptions: () => [] } },
+  const graph = createModuleGraph(new URL("../src/features/model-selection/useModelSelectionController.ts", import.meta.url), {
+    stubs: { "../../subagentModels": { buildSubagentModelOptions: () => [] } },
   });
   const render = () => {
     graph.restart();
-    return graph.exports.useModelSelection({
+    return graph.exports.useModelSelectionController({
+      active: true,
       config, currentProvider: { id: "different-provider-id", official: false },
       officialAccountAvailable: false,
     });

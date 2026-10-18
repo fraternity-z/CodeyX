@@ -23,23 +23,23 @@ function officialPicker(localRouterEnabled = true) {
     selectedModelsByProvider: { "account-provider": [model] },
     modelContextByProvider: { "account-provider": { [model]: policy } },
   };
-  const graph = createModuleGraph(new URL("../src/useModelSelection.ts", import.meta.url), {
+  const graph = createModuleGraph(new URL("../src/features/model-selection/useModelSelectionController.ts", import.meta.url), {
     stubs: {
-      "./api": { invoke: async (command, args) => {
+      "../../api": { invoke: async (command, args) => {
         calls.push({ command, args });
         return { config, modelState, restartRequired: true };
       } },
-      "./subagentModels": { buildSubagentModelOptions: () => [] },
+      "../../subagentModels": { buildSubagentModelOptions: () => [] },
     },
   });
   const options = {
-    config, currentProvider: null, officialAccountAvailable: true,
+    active: true, config, currentProvider: null, officialAccountAvailable: true,
     runOperation: async (_name, action) => action(),
     adoptRouteConfig: config => ({ config, dirty: false }), setDirty: () => {}, setStatus: () => {}, setNotice: () => {},
   };
   const render = () => {
     graph.restart();
-    return graph.exports.useModelSelection(options);
+    return graph.exports.useModelSelectionController(options);
   };
   render().openModelPicker(modelState, "", "official");
   return { render, calls, config };

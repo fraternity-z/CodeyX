@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
 import test from "node:test";
-import ts from "typescript";
+import { createControllerHarness } from "./helpers/controller-harness.mjs";
 
 import {
   autoStubModule,
@@ -27,56 +26,16 @@ test("model order helpers keep the saved order and move one model onto another",
   assert.equal(moveModelId(["a", "b"], "x", "a"), null);
 });
 
-test("official picker draft starts in the order saved on the route", async () => {
-  const ids = await loadTypeScriptModule(new URL("src/modelIds.ts", root));
-  const reasoningEfforts = await loadTypeScriptModule(
-    new URL("src/modelReasoningEfforts.ts", root),
-  );
-  const state = [];
-  let cursor = 0;
-  const react = {
-    useEffect: () => {},
-    useCallback: (callback) => callback,
-    useMemo: (factory) => factory(),
-    useRef: (initial) => ({ current: initial }),
-    useState(initial) {
-      const index = cursor++;
-      if (!(index in state)) state[index] = initial;
-      return [
-        state[index],
-        (value) => {
-          state[index] = typeof value === "function" ? value(state[index]) : value;
-        },
-      ];
-    },
-  };
-  const source = await readFile(new URL("src/useModelSelection.ts", root), "utf8");
-  const exports = {};
-  new Function(
-    "require",
-    "exports",
-    ts.transpileModule(source, {
-      compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
-    }).outputText,
-  )((name) => {
-    if (name === "react") return react;
-    if (name === "./modelIds") return ids;
-    if (name === "./modelReasoningEfforts") return reasoningEfforts;
-    if (name === "./modelRoutes") {
-      return { routeProviderId: (profile) => profile.sourceProviderId || profile.id };
-    }
-    if (name === "./subagentModels") return { buildSubagentModelOptions: () => [] };
-    return {};
-  }, exports);
+test("official picker draft starts in the order saved on the route", t => {
+  const h = createControllerHarness(new URL("../src/features/model-selection/useModelSelectionController.ts", import.meta.url),
+    "useModelSelectionController", { "../../subagentModels": { buildSubagentModelOptions: () => [] } });
+  t.after(() => h.unmount());
   const config = {
     activeProfileId: "official",
     profiles: [{ id: "official", authMode: "officialAccount", sourceProviderId: "openai" }],
     selectedModelsByProvider: { openai: ["gpt-5.6-luna", "gpt-6-astra"] },
   };
-  const render = () => {
-    cursor = 0;
-    return exports.useModelSelection({ config, currentProvider: null });
-  };
+  const render = () => h.render({ active: true, config, currentProvider: null });
   const officialModels = ["gpt-6-astra", "gpt-5.6-sol", "gpt-5.6-luna"].map((slug) => ({
     slug,
     supported: true,

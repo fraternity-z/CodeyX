@@ -31,7 +31,7 @@ test("settings panels declare render-isolation hooks and stable handlers", async
         "features/subagents/SubagentPolicyCard.tsx",
       ].map((file) => readFile(new URL(`src/${file}`, root), "utf8")),
     ).then((sources) => sources.join("\n")),
-    readFile(new URL("src/useModelSelection.ts", root), "utf8"),
+    readFile(new URL("src/features/model-selection/useModelSelectionController.ts", root), "utf8"),
     readFile(new URL("src/useDraftConfig.ts", root), "utf8"),
     readFile(new URL("src/features/routes/useRoutesController.ts", root), "utf8"),
   ]);

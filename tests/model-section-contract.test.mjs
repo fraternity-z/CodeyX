@@ -52,7 +52,7 @@ test("official routes expose context budgets and preserve them when editing conn
     .split("pub(crate) async fn")[0];
   assert.match(saveOfficial, /set_model_contexts\(/);
   assert.doesNotMatch(saveOfficial, /set_model_reasoning_efforts\(/);
-  const selection = await readSource("src/useModelSelection.ts");
+  const selection = await readSource("src/features/model-selection/requests.ts");
   assert.match(selection, /"save_official_route_models", \{[\s\S]*?\.\.\.contextUpdate/);
   assert.match(dialogSource, /!routeConfigReadOnly && <ModelSettingsFields model=\{model.slug\}/);
 });

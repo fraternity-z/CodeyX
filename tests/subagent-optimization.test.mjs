@@ -7,7 +7,7 @@ const root = new URL("../", import.meta.url);
 test("subagent settings expose the five supported role controls", async () => {
   const [featurePolicySource, modelHookSource, modelOptionsSource, comboboxSource] = await Promise.all([
     readFile(new URL("src/features/subagents/SubagentPolicyCard.tsx", root), "utf8"),
-    readFile(new URL("src/useModelSelection.ts", root), "utf8"),
+    readFile(new URL("src/features/model-selection/useModelSelectionController.ts", root), "utf8"),
     readFile(new URL("src/subagentModels.ts", root), "utf8"),
     readFile(new URL("src/components/ModelCombobox.tsx", root), "utf8"),
   ]);

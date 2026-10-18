@@ -1,7 +1,7 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
 import type { Config, Confirmation, ModelContextConfig, Notice, OfficialAccountsResult, Profile, ProviderStatus, RuntimeStatus } from "../../App.types";
 import type { useDraftConfig } from "../../useDraftConfig";
-import type { useModelSelection } from "../../useModelSelection";
+import type { useModelSelectionController } from "../model-selection";
 import { SETTINGS_OPENED_EVENT } from "../runtime-status";
 import { useStableEvent } from "../../useStableEvent";
 import { errorText } from "../../appUtils";
@@ -14,7 +14,7 @@ import type { RouteResult } from "./types";
 
 type Options = Pick<ReturnType<typeof useDraftConfig>,
   "config" | "dirty" | "setConfig" | "setDirty" | "persistedConfigRef" | "isOnlyNativeRouterToggle" | "adoptRouteConfig"
-> & Pick<ReturnType<typeof useModelSelection>, "modelState" | "setModelState" | "beginModelPickerLoad" | "completeModelPickerLoad" | "cancelModelPickerLoad"> & {
+> & Pick<ReturnType<typeof useModelSelectionController>, "modelState" | "setModelState" | "beginModelPickerLoad" | "completeModelPickerLoad" | "cancelModelPickerLoad"> & {
   active: boolean;
   isBusy: boolean;
   provider: ProviderStatus["provider"] | undefined;
