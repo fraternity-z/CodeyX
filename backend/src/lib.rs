@@ -36,6 +36,7 @@ mod pet_slim_patch;
 mod plugin_log_terminal;
 mod plugin_marketplace;
 mod plugin_routes;
+mod ponytail;
 mod process_cleanup;
 mod process_tree;
 mod prompt_optimization;

@@ -1,4 +1,5 @@
 //! 内置工具入口：开关接入用户 MCP，项目由 MCP 启动钩子自动识别和维护。
+mod ponytail;
 mod runtime;
 
 use super::{AppState, argument, string_argument};
@@ -16,6 +17,8 @@ const SERVER_ID: &str = "codey_codegraph";
 pub(super) struct ToolState {
     operation: Arc<Semaphore>,
     job: Mutex<Option<Value>>,
+    ponytail_operation: Arc<Semaphore>,
+    ponytail_job: Mutex<Option<Value>>,
 }
 
 impl Default for ToolState {
@@ -23,6 +26,8 @@ impl Default for ToolState {
         Self {
             operation: Arc::new(Semaphore::new(1)),
             job: Mutex::new(None),
+            ponytail_operation: Arc::new(Semaphore::new(1)),
+            ponytail_job: Mutex::new(None),
         }
     }
 }
@@ -257,6 +262,10 @@ pub(super) async fn invoke(
 }
 
 async fn invoke_inner(state: &Arc<AppState>, args: &Value) -> Result<Value> {
+    if args["tool"] == "ponytail" {
+        return ponytail::invoke(state, args).await;
+    }
+    ensure!(args.get("tool").is_none(), "未知内置工具");
     let action = string_argument(args, "action").map_err(anyhow::Error::msg)?;
     if action == "status" {
         return status(state).await;

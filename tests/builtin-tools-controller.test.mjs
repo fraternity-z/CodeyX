@@ -9,7 +9,10 @@ function fixture(extra = {}, component = false) {
   const calls = [], changes = [], ui = autoStubModule("ui");
   const options = { active: true, config: { fastContextTools: false, retained: "draft" }, fastContextToolsStatus: { userConfigured: false, detectionFailed: false }, isBusy: false, onConfigChange: next => changes.push(next), ...extra };
   const h = createControllerHarness(new URL(component ? "../src/BuiltinToolsPage.tsx" : "../src/features/builtin-tools/useBuiltinToolsController.ts", import.meta.url), component ? "BuiltinToolsPage" : "useBuiltinToolsController", {
-    "../../api": { invoke(command, args) { const call = { command, args, ...deferred() }; calls.push(call); return call.promise; } },
+    "../../api": { invoke(command, args) {
+      if (args.tool === "ponytail") return Promise.resolve({ installed: false, enabled: false, settings: { defaultMode: "full", revision: "missing" }, job: null });
+      const call = { command, args, ...deferred() }; calls.push(call); return call.promise;
+    } },
     "../../components/ui": ui, "./components/ui": ui, "@tabler/icons-react": autoStubModule("icons"),
   });
   return { ...h, calls, changes, ui, options, render: () => h.render(options) };

@@ -3,6 +3,7 @@ import type { Config, FastContextToolsStatus } from "../../App.types";
 import { Badge, Button, Switch, Tooltip } from "../../components/ui";
 import { SettingsPageHeader } from "../../SettingsPageHeader";
 import { useBuiltinToolsController } from "./useBuiltinToolsController";
+import { PonytailCard } from "./PonytailCard";
 
 type Props = {
   active: boolean;
@@ -25,7 +26,7 @@ export function BuiltinToolsPage({ active, config, fastContextToolsStatus, isBus
   return (
     <section className="secondary-section" aria-labelledby="builtin-tools-title">
       <SettingsPageHeader id="builtin-tools-title" title="内置工具" icon={<IconTools size={15} />}
-        description="统一管理文件检索与代码关系索引，让上下文获取更高效。" />
+        description="统一管理文件检索、代码索引与开发辅助工具。" />
       <div className="flex flex-col gap-4">
         <article className={`feature-card ${fastContextToolsEnabled ? "active" : ""}`}>
           <div className="feature-card-header">
@@ -76,6 +77,7 @@ export function BuiltinToolsPage({ active, config, fastContextToolsStatus, isBus
             {notice && <p role="status" className="m-0 text-xs">{notice}</p>}
           </div>
         </article>
+        <PonytailCard active={active} isBusy={isBusy} />
       </div>
     </section>
   );
