@@ -12,6 +12,23 @@ test("功能视图、controller、请求和纯逻辑遵守依赖方向", () => {
   }), []);
 });
 
+test("手机传输与 WebSocket 只能由功能请求层调用，别名和动态导入也受约束", () => {
+  for (const file of ["Workspace.tsx", "useRemoteWorkspaceController.ts", "state.ts"]) {
+    for (const source of [
+      'import { remoteRequest as send } from "../../remote/transport";',
+      'import("../../remote/transport.js");',
+      'remoteRequest("/remote/action");',
+      'transport.remoteRequest("/remote/session");',
+      'new WebSocket("wss://example.test");',
+      'new window.WebSocket("wss://example.test");',
+    ]) assert.ok(checkArchitecture({ [`src/features/remote-workspace/${file}`]: source }).length, `${file}: ${source}`);
+  }
+  assert.deepEqual(checkArchitecture({
+    "src/features/remote-workspace/requests.ts": 'import { remoteRequest } from "../../remote/transport"; remoteRequest("/remote/session"); new WebSocket("wss://example.test");',
+    "src/remote/workspace.tsx": 'export { Workspace } from "../features/remote-workspace";',
+  }), []);
+});
+
 test("新增功能自动纳入检查，别名导入和动态导入不能绕开请求边界", () => {
   for (const source of ['import { invoke as send } from "../../api";', 'import("./requests");', 'export { request } from "./requests";', 'fetch("/api");']) {
     assert.ok(checkArchitecture({ "src/features/new/DemoView.tsx": source }).length, source);

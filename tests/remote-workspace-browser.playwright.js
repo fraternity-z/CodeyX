@@ -119,7 +119,7 @@ async page => {
   assert(await page.getByRole('button', { name: '发送消息', exact: true }).isDisabled(), 'Uncertain submission allowed duplicate send');
   await page.getByRole('button', { name: '已核对，允许再次发送' }).click();
   await page.getByRole('button', { name: '发送消息', exact: true }).click();
-  await page.getByRole('button', { name: '停止任务' }).waitFor();
+  await page.getByRole('button', { name: '停止任务' }).waitFor(); await ready();
   assert(await input.inputValue() === '', 'Successful send did not clear draft');
   await input.fill('再补充一条指令');
   await page.getByRole('button', { name: '补充指令', exact: true }).click();

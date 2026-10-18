@@ -13,7 +13,7 @@ await build({
   build: {
     outDir, emptyOutDir: false, target: "es2022",
     rollupOptions: {
-      input: ["ui-browser.html", "remote-control-browser.html"].map(file => join(root, "tests", file)),
+      input: ["ui-browser.html", "remote-control-browser.html", "remote-workspace-browser.html"].map(file => join(root, "tests", file)),
     },
   },
 });

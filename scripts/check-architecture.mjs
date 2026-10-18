@@ -42,7 +42,8 @@ export function checkArchitecture(sources) {
         report(file, node, tree, "App 不得直接依赖后端传输，请调用功能 controller");
       }
       if (!governed) return;
-      const requestDependency = /(?:^|\/)(?:api|requests|[^/]*Requests)(?:\.ts)?$/.test(target);
+      const requestDependency = /(?:^|\/)(?:api|requests|[^/]*Requests)(?:\.ts)?$/.test(target)
+        || /^src\/remote\/transport(?:\.ts)?$/.test(target);
       if (layer === "view" && requestDependency) report(file, node, tree, "视图不能依赖请求层");
       if (layer === "controller" && requestDependency && target !== `src/features/${feature}/requests` && target !== `src/features/${feature}/requests.ts`) {
         report(file, node, tree, "controller 必须经本功能 requests 调用后端");
@@ -72,11 +73,13 @@ export function checkArchitecture(sources) {
         const callee = node.expression.getText(tree);
         const specifier = node.arguments[0];
         if ((node.expression.kind === ts.SyntaxKind.ImportKeyword || callee === "require") && specifier && ts.isStringLiteralLike(specifier)) checkImport(node, specifier.text);
-        if (governed && layer !== "requests" && /^(?:invoke|fetch|\w+\.(?:invoke|fetch))$/.test(callee)) report(file, node, tree, "后端与网络调用必须进入请求层");
+        if (governed && layer !== "requests" && /^(?:(?:invoke|fetch|remoteRequest)|\w+\.(?:invoke|fetch|remoteRequest))$/.test(callee)) report(file, node, tree, "后端与网络调用必须进入请求层");
         if (file === "src/App.tsx" && /^(?:invoke|fetch|\w+\.(?:invoke|fetch))$/.test(callee)) {
           report(file, node, tree, "App 不得新增业务命令，请放入功能请求层");
         }
       }
+      if (governed && layer !== "requests" && ts.isNewExpression(node)
+        && /^(?:WebSocket|window\.WebSocket)$/.test(node.expression.getText(tree))) report(file, node, tree, "后端与网络调用必须进入请求层");
       if (governed && layer === "pure" && ts.isPropertyAccessExpression(node) && /^(?:window|document|navigator|localStorage|sessionStorage)\./.test(node.getText(tree))) report(file, node, tree, "纯逻辑不能访问浏览器副作用");
       if (governed && layer !== "view" && (ts.isJsxElement(node) || ts.isJsxSelfClosingElement(node))) report(file, node, tree, "JSX 必须位于视图层");
       ts.forEachChild(node, visit);

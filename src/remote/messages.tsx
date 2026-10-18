@@ -60,7 +60,7 @@ export function ConversationTurn({ turn }: { turn: Turn }) {
     }
     return <article className={`remote-message ${message.role}`} key={message.id || index} aria-label={message.role === "user" ? "你" : "Codex"}>
       {message.role === "user" ? <div className="remote-user-text">{message.text}</div> : <RichText text={message.text} />}
-      {message.attachments?.map((attachment, i) => <div className="remote-message-attachment" key={i}><MarkdownImage src={attachment.url} alt={attachment.name} /></div>)}
+      {message.attachments?.map((attachment, i) => <div className="remote-message-attachment" key={i}><MarkdownImage src={attachment.url ?? undefined} alt={attachment.name} /></div>)}
     </article>;
   })}{turn.status === "failed" && <p className="remote-client-error" role="alert">任务失败：{typeof turn.error === "string" ? turn.error : "请查看电脑端详情"}</p>}{turn.status === "interrupted" && <p className="remote-turn-status">已停止</p>}</section>;
 }

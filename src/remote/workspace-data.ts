@@ -1,12 +1,12 @@
 export type Thread = { id: string; title: string; cwd: string; updatedAt: number };
 export type Project = { id: string; name: string; cwd: string; rootPaths?: string[] };
-export type Question = { id: string; question: string; options?: { label: string; description?: string }[] };
-export type Approval = { id: string | number; method: string; supported: boolean; params: { command?: string; reason?: string; questions?: Question[]; availableDecisions?: string[]; message?: string; permissions?: unknown; changes?: unknown; planContent?: string } };
-export type Attachment = { name: string; url?: string };
-export type Message = { id?: string; role: string; kind: string; text: string; status?: string; attachments?: Attachment[] };
-export type Turn = { id: string; status: string; error?: unknown; startedAt?: number; completedAt?: number; messages: Message[] };
-export type ThreadSettings = { model?: string; effort?: string; serviceTier?: string | null; permissionMode?: string };
-export type View = ThreadSettings & { id: string; title?: string; cwd?: string; status?: string; turns: Turn[]; requests: Approval[]; historyComplete: boolean };
+export type Question = { id: string; question: string; options?: { label: string; description?: string | null }[] | null };
+export type Approval = { id: string | number; method: string; supported: boolean; params: { command?: string | null; reason?: string | null; questions?: Question[] | null; availableDecisions?: string[] | null; message?: string | null; permissions?: unknown; changes?: unknown; planContent?: string | null } };
+export type Attachment = { name: string; url?: string | null };
+export type Message = { id?: string | null; role: string; kind: string; text: string; status?: string | null; attachments?: Attachment[] };
+export type Turn = { id: string | null; status: string | null; error?: unknown; startedAt?: number | null; completedAt?: number | null; messages: Message[] };
+export type ThreadSettings = { model?: string | null; effort?: string | null; serviceTier?: string | null; permissionMode?: string };
+export type View = ThreadSettings & { id: string; title?: string | null; cwd?: string | null; status?: string | null; turns: Turn[]; requests: Approval[]; historyComplete: boolean };
 export type ModelOption = { id: string; label: string; route: string; efforts: string[]; defaultEffort: string };
 export type ModelCatalog = { models?: string[]; default_model?: string; clear_models?: boolean; model_metadata?: { model: string; display_name?: string; model_display_name?: string; route_name?: string; supported_reasoning_efforts?: string[]; default_reasoning_effort?: string }[] };
 
