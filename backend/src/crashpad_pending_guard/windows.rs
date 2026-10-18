@@ -107,7 +107,10 @@ fn parse_records(bytes: &[u8], path: &Path) -> Result<Vec<PendingRecord>, String
     let strings = &bytes[strings_start..];
     let mut names = HashSet::new();
     let mut pending = Vec::new();
-    for record in bytes[HEADER_SIZE..strings_start].chunks_exact(RECORD_SIZE) {
+    for record in bytes[HEADER_SIZE..strings_start]
+        .as_chunks::<RECORD_SIZE>()
+        .0
+    {
         let name_offset = u32_at(record, 16) as usize;
         let suffix = strings.get(name_offset..).ok_or_else(invalid)?;
         let end = suffix
@@ -134,7 +137,7 @@ fn parse_records(bytes: &[u8], path: &Path) -> Result<Vec<PendingRecord>, String
             pending.push(PendingRecord {
                 metadata: path.to_path_buf(),
                 name: name.to_string(),
-                bytes: record.try_into().unwrap(),
+                bytes: *record,
             });
         }
     }
