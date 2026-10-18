@@ -336,7 +336,7 @@ test("原生后台发现的更新等待配置加载后交给图文弹窗，不�
   assert.equal(confirmations.length, 1);
 });
 
-test("首次加载实验版策略不会丢失启动时已发现的公告", () => {
+test("首次加载不会采纳旧实验版公告", () => {
   const h = harness(false, null, { configLoaded: false });
   let confirmation = null;
   h.options.setConfirmation = value => { confirmation = typeof value === "function" ? value(confirmation) : value; };
@@ -345,12 +345,11 @@ test("首次加载实验版策略不会丢失启动时已发现的公告", () =>
   h.window.__codeyPendingUpdatePrompt = update;
   h.window.dispatchEvent(new Event("codey-update-prompt"));
   assert.equal(confirmation, null);
-  h.options.codeyUpdatePolicy = "experimental";
+  h.options.codeyUpdatePolicy = "stable";
   h.options.configLoaded = true;
   h.render();
-  assert.equal(confirmation?.action, "download-update");
-  assert.equal(confirmation?.releaseNotes, update.releaseNotes);
-  assert.equal(h.window.__codeyPendingUpdatePrompt, null);
+  assert.equal(confirmation, null);
+  assert.equal(h.render().updateCheck, null);
 });
 
 test("后台公告不会覆盖正在等待用户确认的其他操作", () => {
@@ -573,7 +572,7 @@ test("Release 或安装包变化时展示错误且不进入安装确认", async 
   assert.equal(confirmation.action, "download-update");
 });
 
-for (const policy of ["stable", "off", "experimental"]) {
+for (const policy of ["stable", "off"]) {
   test(`GitHub 的 prerelease 标记不能被正式版样式的标签绕过：${policy}`, async () => {
     const h = harness(false);
     let confirmation = null;
@@ -582,8 +581,8 @@ for (const policy of ["stable", "off", "experimental"]) {
     const checking = h.render().checkForUpdates();
     h.requests[0].resolve({ ...available, prerelease: true, selectedAsset: { fileName: "setup.exe" } });
     await checking;
-    assert.equal(confirmation !== null, policy === "experimental");
-    assert.equal(h.render().updateCheck !== null, policy === "experimental");
+    assert.equal(confirmation, null);
+    assert.equal(h.render().updateCheck, null);
   });
 }
 
@@ -635,16 +634,19 @@ test("不检查策略的手动检查不接受实验版", async () => {
   assert.match(fixture.render().updateResult.text, /仅检查稳定版/);
 });
 
-test("切换频道丢弃进行中的旧请求并清除已发现的更新", async () => {
+test("关闭更新丢弃旧请求并清除已发现的版本，重新开启后恢复检查", async () => {
   const fixture = harness(false);
   const checking = fixture.render().checkForUpdates();
-  fixture.options.codeyUpdatePolicy = "experimental";
+  fixture.options.codeyUpdatePolicy = "off";
   fixture.render();
   fixture.requests[0].resolve(available);
   await checking;
   assert.equal(fixture.render().updateCheck, null);
   assert.equal(fixture.window.__codeyUpdateAvailability, null);
   fixture.options.embedded = false;
+  fixture.render();
+  assert.equal(fixture.requests.length, 1);
+  fixture.options.codeyUpdatePolicy = "stable";
   fixture.render();
   assert.equal(fixture.requests.length, 2);
 });

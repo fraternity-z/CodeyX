@@ -51,7 +51,7 @@ test("手动检查、下载与安装分别确认，下载锁定操作，安装�
 
   await page.getByRole("button", { name: "系统设置与偏好", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "系统设置与偏好", exact: true });
-  await settings.getByRole("tab", { name: "不检查", exact: true }).click();
+  await settings.getByRole("switch", { name: "CodeyX 自动更新", exact: true }).press("Space");
   await settings.press("Escape");
   await expect(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
   await page.getByRole("button", { name: "新版本 v1.0.1 已下载，点击检查更新并安装", exact: true }).click();
@@ -84,18 +84,16 @@ test("隐藏配置时后台公告保持待处理，重新打开后只展示一�
   expect(await page.evaluate(() => window.updateBehavior.calls)).toEqual([]);
 });
 
-test("实验版切换保留风险确认，取消不改草稿，确认后仍需保存", async ({ page }) => {
+test("更新开关只有更新和不更新，关闭后仍需保存", async ({ page }) => {
   await openSettings(page);
   await page.getByRole("button", { name: "系统设置与偏好", exact: true }).click();
   const settings = page.getByRole("dialog", { name: "系统设置与偏好", exact: true });
-  await settings.getByRole("tab", { name: "实验版", exact: true }).click();
-  const confirmation = page.getByRole("dialog", { name: "切换到实验版更新？", exact: true });
-  await expect(confirmation).toBeVisible();
-  await confirmation.getByRole("button", { name: "取消", exact: true }).click();
-  await expect(settings.getByRole("tab", { name: "稳定版", exact: true })).toHaveAttribute("aria-selected", "true");
-  await settings.getByRole("tab", { name: "实验版", exact: true }).click();
-  await confirmation.getByRole("button", { name: "了解风险，使用实验版", exact: true }).click();
-  await expect(settings.getByRole("tab", { name: "实验版", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(settings.getByText("实验版", { exact: true })).toHaveCount(0);
+  const toggle = settings.getByRole("switch", { name: "CodeyX 自动更新", exact: true });
+  await expect(toggle).toBeChecked();
+  await toggle.locator("xpath=ancestor::label").click();
+  await expect(toggle).not.toBeChecked();
+  await expect(settings.getByText("不更新", { exact: true })).toBeVisible();
   await settings.press("Escape");
   await expect(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
   expect(await page.evaluate(() => window.updateBehavior.calls)).toEqual([]);

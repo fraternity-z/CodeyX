@@ -1623,7 +1623,6 @@ async fn codey_update_policy_save_persists_explicit_and_legacy_values() {
     for policy in [
         crate::config::CodeyUpdatePolicy::Off,
         crate::config::CodeyUpdatePolicy::Stable,
-        crate::config::CodeyUpdatePolicy::Experimental,
     ] {
         let mut payload = serde_json::to_value(state.config.read().await.clone()).unwrap();
         payload["codeyUpdatePolicy"] = json!(policy);
@@ -2082,6 +2081,13 @@ fn selected_codex_app_path_requires_a_desktop_executable() {
 
     let executable = directory.path().join("Codex.exe");
     fs::write(&executable, []).unwrap();
+    assert!(validate_codex_app_path(directory.path().to_str().unwrap()).is_err());
+    fs::create_dir_all(directory.path().join("resources/app")).unwrap();
+    fs::write(
+        directory.path().join("resources/app/package.json"),
+        r#"{"name":"openai-codex-electron","version":"1.0.0"}"#,
+    )
+    .unwrap();
     assert_eq!(
         validate_codex_app_path(directory.path().to_str().unwrap()).unwrap(),
         directory.path()
@@ -2096,6 +2102,12 @@ fn selected_codex_app_path_accepts_a_custom_install_root() {
     let current = install_root.join("versions").join("current");
     fs::create_dir_all(&current).unwrap();
     fs::write(current.join("ChatGPT.exe"), []).unwrap();
+    fs::create_dir_all(current.join("resources/app")).unwrap();
+    fs::write(
+        current.join("resources/app/package.json"),
+        r#"{"name":"openai-codex-electron","version":"1.0.0"}"#,
+    )
+    .unwrap();
 
     assert_eq!(
         validate_codex_app_path(install_root.to_str().unwrap()).unwrap(),

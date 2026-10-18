@@ -118,12 +118,12 @@ export function App({
 
   const provider = providerStatus?.provider;
   const {
-    pluginMarketplaceStatus, computerUseNotice, configRepairNotice, injectionRepairRequested, diagnosticCleanup,
+    pluginMarketplaceStatus, computerUseNotice, configRepairNotice, codexDirectoryNotice, selectCodexDirectory, injectionRepairRequested, diagnosticCleanup,
     refreshPluginMarketplaceStatus, askRestartCodex, repairPluginMarketplace, prepareComputerUse,
     repairMainProcessInjection, askRepairCodexConfig, analyzeDiagnosticStorage,
   } = useRuntimeMaintenanceController({
     active: !embedded || modalVisible,
-    config, dirty, isBusy: busy !== null, status, restartStatusError, persist, refreshStatus,
+    config, onConfigChange: editConfig, dirty, isBusy: busy !== null, status, restartStatusError, persist, refreshStatus,
     markRestartInProgress, setRestartStatusError, setStatus, setBusy, setNotice, setConfirmation,
   });
   const isBusy = busy !== null || (injectionRepairRequested && !restartStatusError);
@@ -803,6 +803,8 @@ export function App({
         busy={busy}
         onRepairCodexConfig={askRepairCodexConfig}
         configRepairNotice={configRepairNotice}
+        onSelectCodexDirectory={selectCodexDirectory}
+        codexDirectoryNotice={codexDirectoryNotice}
         codeyUpdatePolicy={config.codeyUpdatePolicy}
         onCodeyUpdatePolicyChange={changeUpdatePolicy}
       />

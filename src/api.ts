@@ -57,6 +57,7 @@ export const CODEY_API_COMMANDS = [
   "prepare_computer_use",
   "repair_main_process_injection",
   "repair_codex_config",
+  "select_codex_app_directory",
   "list_codey_plugins",
   "get_codey_plugin_host_info",
   "validate_codey_plugin_config",

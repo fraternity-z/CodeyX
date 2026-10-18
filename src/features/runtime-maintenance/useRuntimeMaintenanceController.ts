@@ -11,6 +11,7 @@ import type { DiagnosticCleanupState } from "./types";
 type Options = {
   active: boolean;
   config: Config | null;
+  onConfigChange: (config: Config) => void;
   dirty: boolean;
   isBusy: boolean;
   status: RuntimeStatus;
@@ -25,12 +26,13 @@ type Options = {
   setConfirmation: (confirmation: Confirmation | null) => void;
 };
 
-export function useRuntimeMaintenanceController({ active, config, dirty, isBusy, status, restartStatusError,
+export function useRuntimeMaintenanceController({ active, config, onConfigChange, dirty, isBusy, status, restartStatusError,
   persist, refreshStatus, markRestartInProgress, setRestartStatusError, setStatus, setBusy, setNotice, setConfirmation,
 }: Options) {
   const [pluginMarketplaceStatus, setPluginMarketplaceStatus] = useState<PluginMarketplaceStatus | null>(null);
   const [computerUseNotice, setComputerUseNotice] = useState<Notice | null>(null);
   const [configRepairNotice, setConfigRepairNotice] = useState<Notice | null>(null);
+  const [codexDirectoryNotice, setCodexDirectoryNotice] = useState<Notice | null>(null);
   const [injectionRepairRequested, setInjectionRepairRequested] = useState(false);
   const [diagnosticCleanup, setDiagnosticCleanup] = useState<DiagnosticCleanupState | null>(null);
   const mounted = useRef(false);
@@ -220,6 +222,24 @@ export function useRuntimeMaintenanceController({ active, config, dirty, isBusy,
     });
   });
 
+  const adoptCodexDirectory = useStableEvent((path: string) => {
+    if (config) onConfigChange({ ...config, codexAppPath: path });
+  });
+  const selectCodexDirectory = useStableEvent(async () => {
+    if (!config) return;
+    await run("select-codex-directory", async current => {
+      setCodexDirectoryNotice(null);
+      try {
+        const path = await runtimeMaintenanceRequests.selectCodexDirectory();
+        if (!current() || !path) return;
+        adoptCodexDirectory(path);
+        setCodexDirectoryNotice({ tone: "success", text: "目录已识别，保存后在下次启动 Codex 时使用。" });
+      } catch (error) {
+        if (current()) setCodexDirectoryNotice({ tone: "error", text: `未更换 Codex 目录，已保留原目录：${errorText(error)}` });
+      }
+    });
+  });
+
   function askRepairCodexConfig() {
     if (!activeRef.current || blocked || pending.current) return;
     setConfirmation({ action: "repair-codex-config", title: "修复 Codex 配置？",
@@ -239,7 +259,7 @@ export function useRuntimeMaintenanceController({ active, config, dirty, isBusy,
     });
   }
 
-  return { pluginMarketplaceStatus, computerUseNotice, configRepairNotice, injectionRepairRequested, diagnosticCleanup,
+  return { pluginMarketplaceStatus, computerUseNotice, configRepairNotice, codexDirectoryNotice, selectCodexDirectory, injectionRepairRequested, diagnosticCleanup,
     refreshPluginMarketplaceStatus, askRestartCodex, repairPluginMarketplace, prepareComputerUse,
     repairMainProcessInjection, askRepairCodexConfig, analyzeDiagnosticStorage };
 }

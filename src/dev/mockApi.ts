@@ -1606,6 +1606,7 @@ if (import.meta.env.DEV) {
         previewInjectionRepairUntil = Date.now() + 8_000;
         return { status: "repairing" };
       }
+      if (command === "select_codex_app_directory") return null;
       if (command === "repair_codex_config") {
         await new Promise((resolve) => setTimeout(resolve, 1800));
         if (configRepairPreview === "failure") throw new Error("预览：无法写入配置目录，已记录错误日志");

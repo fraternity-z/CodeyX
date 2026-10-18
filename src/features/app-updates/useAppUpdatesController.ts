@@ -224,7 +224,7 @@ export function useAppUpdatesController({
     const applyDetectedUpdate = (
       result: UpdateCheck | null | undefined,
     ) => {
-      if (pending.current || policyRef.current === "off" || !updateAvailable(result) || !updateVersionAllowed(result, policyRef.current)) return;
+      if (pending.current || policyRef.current === "off" || !updateAvailable(result) || !updateVersionAllowed(result)) return;
       setUpdateCheck(result);
       setDownloadedUpdate(null);
       setUpdateResult({
@@ -255,7 +255,7 @@ export function useAppUpdatesController({
       const result = window.__codeyPendingUpdatePrompt;
       if (!result || !configLoaded || isBusy || pending.current) return;
       window.__codeyPendingUpdatePrompt = null;
-      if (manualCheckVersion.current > 0 || policyRef.current === "off" || !result.updateAvailable || !result.selectedAsset || !updateVersionAllowed(result, policyRef.current)) return;
+      if (manualCheckVersion.current > 0 || policyRef.current === "off" || !result.updateAvailable || !result.selectedAsset || !updateVersionAllowed(result)) return;
       updateCheckRef.current = result;
       setUpdateCheck(result);
       setUpdateResult({ tone: updateResultTone(result), text: updateCheckText(result) });
@@ -295,7 +295,7 @@ export function useAppUpdatesController({
       try {
         const result = await requestUpdateCheck();
         if (cancelled || manualVersion !== manualCheckVersion.current) return;
-        if (result.updateAvailable && updateVersionAllowed(result, policyRef.current)) {
+        if (result.updateAvailable && updateVersionAllowed(result)) {
           setUpdateCheck(result);
           setDownloadedUpdate(null);
           setUpdateResult({
@@ -350,7 +350,7 @@ export function useAppUpdatesController({
     try {
       const result = await requestUpdateCheck(true, true);
       if (!current()) return;
-      if (result.updateAvailable && !updateVersionAllowed(result, policyRef.current)) {
+      if (result.updateAvailable && !updateVersionAllowed(result)) {
         throw new Error("当前更新策略仅检查稳定版，已忽略实验版更新");
       }
       setUpdateCheck(result);
@@ -420,7 +420,7 @@ export function useAppUpdatesController({
   }
   const askDownloadUpdate = useStableEvent((check?: UpdateCheck | null, background: boolean = false) => {
     const target = check ?? updateCheck;
-    if (canAct() && target?.updateAvailable && target.selectedAsset && updateVersionAllowed(target, policyRef.current)) confirmDownload(target, background);
+    if (canAct() && target?.updateAvailable && target.selectedAsset && updateVersionAllowed(target)) confirmDownload(target, background);
   });
 
   const downloadUpdate = useStableEvent(async (checkOverride?: UpdateCheck | null) => {
@@ -429,7 +429,7 @@ export function useAppUpdatesController({
       !canAct() ||
       !target?.updateAvailable ||
       !target.selectedAsset ||
-      !updateVersionAllowed(target, policyRef.current)
+      !updateVersionAllowed(target)
     )
       return;
     manualCheckVersion.current += 1;
@@ -479,12 +479,12 @@ export function useAppUpdatesController({
   }
   const askInstallDownloadedUpdate = useStableEvent((downloadOverride?: UpdateDownload | null, checkOverride?: UpdateCheck | null) => {
     const target = downloadOverride ?? downloadedUpdate;
-    if (canAct() && target && updateVersionAllowed(target, policyRef.current)) confirmInstall(target, checkOverride ?? updateCheck);
+    if (canAct() && target && updateVersionAllowed(target)) confirmInstall(target, checkOverride ?? updateCheck);
   });
 
   const installDownloadedUpdate = useStableEvent(async (downloadOverride?: UpdateDownload | null) => {
     const target = downloadOverride ?? downloadedUpdate;
-    if (!canAct() || !target || !updateVersionAllowed(target, policyRef.current)) return;
+    if (!canAct() || !target || !updateVersionAllowed(target)) return;
     manualCheckVersion.current += 1;
     let current = currentScope();
     const scope = session.current;
@@ -501,7 +501,7 @@ export function useAppUpdatesController({
         && submittedPolicy !== previousPolicy && policyRef.current === submittedPolicy;
       if (!mounted.current || session.current !== scope || (!current() && !savedPolicy)) return;
       current = currentScope();
-      if (!updateVersionAllowed(target, submittedPolicy) || !updateVersionAllowed(target, policyRef.current)) {
+      if (!updateVersionAllowed(target)) {
         throw new Error("已保存的更新策略不允许安装此版本，请重新检查更新");
       }
       await appUpdateRequests.install(target.filePath);
@@ -523,21 +523,7 @@ export function useAppUpdatesController({
 
   const changeUpdatePolicy = useStableEvent((policy: Config["codeyUpdatePolicy"]) => {
     if (!canAct() || !config || !onConfigChange) return;
-    if (policy !== "experimental" || config.codeyUpdatePolicy === "experimental") {
-      onConfigChange({ ...config, codeyUpdatePolicy: policy });
-      return;
-    }
-    const current = currentScope();
-    setConfirmation({
-      action: "enable-experimental-updates",
-      title: "切换到实验版更新？",
-      description: "实验版尚未经过充分验证，可能出现功能异常、启动失败或数据兼容问题。请先备份重要数据，避免在关键工作环境使用。确认并保存设置后生效；取消会保留原设置。",
-      confirmLabel: "了解风险，使用实验版",
-      run: () => { if (current()) applyExperimentalPolicy(); },
-    });
-  });
-  const applyExperimentalPolicy = useStableEvent(() => {
-    if (canAct() && config) onConfigChange?.({ ...config, codeyUpdatePolicy: "experimental" });
+    onConfigChange({ ...config, codeyUpdatePolicy: policy });
   });
 
   return {

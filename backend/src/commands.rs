@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 mod builtin_tools;
+mod codex_app;
 mod config_repair;
 mod conversation_git;
 mod diagnostics;
@@ -27,10 +28,9 @@ mod updates;
 mod webhooks;
 mod wechat_claw;
 
+use codex_app::{select_codex_app_directory, validate_codex_app_path};
 #[cfg(windows)]
-use codey_runtime_core::app_paths::{
-    build_codex_executable, normalize_codex_app_path, resolve_codex_app_dir_with_saved,
-};
+use codey_runtime_core::app_paths::{build_codex_executable, resolve_codex_app_dir_with_saved};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
@@ -1143,6 +1143,11 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         | "query_route_request_log_stats"
         | "clear_route_request_logs" => request_logs::invoke(state, command, &args).await,
         "restart_codey" => schedule_restart_codey_runtime(state).await,
+        "select_codex_app_directory" => select_codex_app_directory().await.map(|path| {
+            path.map_or(Value::Null, |path| {
+                Value::String(path.to_string_lossy().into_owned())
+            })
+        }),
         "clear_diagnostic_storage" | "repair_codex_config" | "repair_main_process_injection" => {
             diagnostics::invoke(state, command, &args).await
         }
@@ -1422,37 +1427,6 @@ async fn mark_initial_route_import_completed(state: &Arc<AppState>) -> Result<bo
 }
 
 #[cfg(windows)]
-async fn select_codex_app_directory() -> Result<Option<PathBuf>, String> {
-    tokio::task::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .set_title("选择 Codex 桌面应用安装目录（支持任意磁盘）")
-            .pick_folder()
-    })
-    .await
-    .map_err(|error| format!("打开 Codex 目录选择器失败：{error}"))
-}
-
-#[cfg(windows)]
-fn validate_codex_app_path(path: &str) -> Result<PathBuf, String> {
-    let selected = path.trim();
-    if selected.is_empty() {
-        return Err("请先选择 Codex 桌面应用所在目录".to_string());
-    }
-
-    let app_dir = normalize_codex_app_path(Path::new(selected)).ok_or_else(|| {
-        "所选目录不是可启动的 Codex 桌面应用。请选择包含 ChatGPT.exe 或 Codex.exe 的目录，不要选择 codex.exe 命令行程序或第三方 Codex 启动器".to_string()
-    })?;
-    let executable = build_codex_executable(&app_dir);
-    if !executable.is_file() {
-        return Err(format!(
-            "所选目录中没有可启动的 Codex 桌面应用（未找到 {}）",
-            executable.display()
-        ));
-    }
-    Ok(app_dir)
-}
-
-#[cfg(windows)]
 async fn ensure_windows_codex_app_path(state: &Arc<AppState>) -> Result<(), String> {
     let configured_app_path = state.config.read().await.codex_app_path.trim().to_string();
     let configured_path =
@@ -1470,7 +1444,7 @@ async fn ensure_windows_codex_app_path(state: &Arc<AppState>) -> Result<(), Stri
         return Ok(());
     }
 
-    let Some(selected) = select_codex_app_directory().await? else {
+    let Some(app_dir) = select_codex_app_directory().await? else {
         let error = if configured_app_path.is_empty() {
             CODEX_APP_NOT_FOUND_ERROR
         } else {
@@ -1478,7 +1452,6 @@ async fn ensure_windows_codex_app_path(state: &Arc<AppState>) -> Result<(), Stri
         };
         return Err(format!("{error}；已取消选择安装目录"));
     };
-    let app_dir = validate_codex_app_path(&selected.to_string_lossy())?;
     let _config_write_guard = state.config_write_lock.lock().await;
     let mut config = state.config.read().await.clone();
     config.codex_app_path = app_dir.to_string_lossy().to_string();
@@ -1609,6 +1582,17 @@ async fn save_codey_config_locked(
     let previous = state.config.read().await.clone();
     if config_input.settings_revision != previous.settings_revision {
         return Err("Codey 设置已被其他操作更新，请关闭后重新打开设置页面再保存".to_string());
+    }
+    if config_input.codex_app_path != previous.codex_app_path
+        && !config_input.codex_app_path.trim().is_empty()
+    {
+        let selected = config_input.codex_app_path.clone();
+        config_input.codex_app_path =
+            tokio::task::spawn_blocking(move || validate_codex_app_path(&selected))
+                .await
+                .map_err(|error| format!("检查 Codex 目录失败，原目录未更改：{error}"))??
+                .to_string_lossy()
+                .into_owned();
     }
     let mut config = previous.clone();
     config.remember_model_aliases();

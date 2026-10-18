@@ -33,12 +33,10 @@ function updates(t, extra = {}) {
 
 test("更新纯规则区分策略、缺少安装包和完整公告，匹配下载身份的所有字段", () => {
   assert.equal(state.updateAvailable(null), false); assert.equal(state.updateAvailable(update), true);
-  for (const policy of ["stable", "off", "experimental"]) {
-    for (const candidate of [{ ...update, prerelease: true }, { ...update, latestVersion: "1.0.1-beta.1" }]) {
-      assert.equal(state.updateVersionAllowed(candidate, policy), policy === "experimental");
-    }
-    assert.equal(state.updateVersionAllowed({ ...update, latestVersion: "1.0.1+build-test" }, policy), true);
+  for (const candidate of [{ ...update, prerelease: true }, { ...update, latestVersion: "1.0.1-beta.1" }]) {
+    assert.equal(state.updateVersionAllowed(candidate), false);
   }
+  assert.equal(state.updateVersionAllowed({ ...update, latestVersion: "1.0.1+build-test" }), true);
   assert.match(state.updateCheckText(update), /发现 v1.0.1/);
   assert.match(state.updateCheckText({ ...update, selectedAsset: undefined }), /暂无可安装包/);
   assert.match(state.updateCheckText({ ...update, updateAvailable: false }), /当前已是最新/);
@@ -134,7 +132,7 @@ test("下载在隐藏或策略变化后返回时保持防重，不采纳旧结�
   for (const mode of ["hidden", "policy"]) for (const failed of [false, true]) {
     const h = updates(t); const work = h.render().downloadUpdate(update);
     if (mode === "hidden") { h.options.active = false; h.render(); h.options.active = true; }
-    else h.options.codeyUpdatePolicy = "experimental";
+    else h.options.codeyUpdatePolicy = "off";
     await h.render().downloadUpdate(update); assert.equal(h.calls.length, 1);
     if (failed) h.calls[0].reject(new Error("旧下载失败")); else h.calls[0].resolve(downloaded);
     await work; assert.equal(h.busy, null); assert.deepEqual(h.notices, []);
@@ -148,7 +146,7 @@ test("过期下载与安装确认在隐藏重开、策略变化和重新检查�
     if (kind === "download") c.askDownloadUpdate(update); else c.askInstallDownloadedUpdate(downloaded, update);
     const confirmation = h.confirmation;
     if (mode === "hidden") { h.options.active = false; h.render(); h.options.active = true; h.render(); }
-    else if (mode === "policy") { h.options.codeyUpdatePolicy = "experimental"; h.render(); }
+    else if (mode === "policy") { h.options.codeyUpdatePolicy = "off"; h.render(); }
     else { const work = c.checkForUpdates(); h.calls[0].resolve({ ...update, updateAvailable: false }); await work; h.render(); }
     confirmation.run(); confirmation.onDismiss(); await h.flush();
     assert.equal(h.calls.length, mode === "check" ? 1 : 0); h.unmount();
@@ -173,21 +171,20 @@ test("等待保存时隐藏或切换策略，不再继续启动安装器", async
   for (const mode of ["hidden", "policy"]) {
     const saved = deferred(); const h = updates(t, { beforeInstall: () => saved.promise });
     h.render().askInstallDownloadedUpdate(downloaded); h.confirmation.run();
-    if (mode === "hidden") h.options.active = false; else h.options.codeyUpdatePolicy = "experimental";
+    if (mode === "hidden") h.options.active = false; else h.options.codeyUpdatePolicy = "off";
     h.render(); saved.resolve(); await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.busy, null); h.unmount();
   }
 });
 
-test("安装前保存预期策略仍可安装符合策略的版本，稳定版草稿禁止实验版", async t => {
+test("安装前保存更新开关仍可手动安装稳定版，预发布始终拒绝", async t => {
   for (const prerelease of [false, true]) {
-    const h = updates(t, { codeyUpdatePolicy: prerelease ? "experimental" : "stable",
-      config: { codeyUpdatePolicy: prerelease ? "stable" : "off", retained: "draft" } });
+    const h = updates(t, { config: { codeyUpdatePolicy: "off", retained: "draft" } });
     h.options.beforeInstall = async () => { h.options.codeyUpdatePolicy = h.options.config.codeyUpdatePolicy; h.render(); };
     h.render().askInstallDownloadedUpdate({ ...downloaded, prerelease });
-    h.confirmation.run(); await h.flush();
     if (prerelease) {
-      assert.equal(h.calls.length, 0); assert.equal(h.busy, null); assert.match(h.notices.at(-1).text, /不允许安装/);
+      assert.equal(h.confirmation, null); assert.equal(h.calls.length, 0); assert.equal(h.busy, null);
     } else {
+      h.confirmation.run(); await h.flush();
       assert.equal(h.calls[0].command, "install_downloaded_update"); h.calls[0].resolve(); await h.flush();
       assert.equal(h.busy, "install-update");
     }
@@ -202,14 +199,14 @@ test("安装失败保留已下载文件并允许显式重试", async t => {
   h.render().askInstallDownloadedUpdate(); assert.equal(h.confirmation.action, "install-update"); h.unmount();
 });
 
-test("策略确认使用最新共享草稿，隐藏或忙碌时不修改配置", async t => {
-  const h = updates(t); const c = h.render(); c.changeUpdatePolicy("experimental");
-  h.options.config = { ...h.options.config, retained: "new draft" }; h.render(); h.confirmation.run();
-  assert.deepEqual(h.options.config, { codeyUpdatePolicy: "experimental", retained: "new draft" });
-  c.changeUpdatePolicy("stable"); assert.equal(h.options.config.codeyUpdatePolicy, "stable");
-  h.render().changeUpdatePolicy("experimental"); const confirmation = h.confirmation;
-  h.options.active = false; h.render(); h.options.active = true; h.render(); confirmation.run();
+test("更新开关使用最新共享草稿，隐藏或忙碌时不修改配置", async t => {
+  const h = updates(t); const c = h.render();
+  h.options.config = { ...h.options.config, retained: "new draft" }; h.render(); c.changeUpdatePolicy("off");
+  assert.deepEqual(h.options.config, { codeyUpdatePolicy: "off", retained: "new draft" });
+  h.render(); c.changeUpdatePolicy("stable"); assert.equal(h.options.config.codeyUpdatePolicy, "stable");
+  h.options.active = false; h.render().changeUpdatePolicy("off");
   assert.equal(h.options.config.codeyUpdatePolicy, "stable");
+  h.options.active = true;
   h.busy = "save"; h.render().changeUpdatePolicy("off"); assert.equal(h.options.config.codeyUpdatePolicy, "stable"); h.unmount();
 });
 

@@ -1,5 +1,4 @@
 import { memo, useState } from "react";
-import { Tabs } from "@heroui/react";
 import {
   IconCheck,
   IconCopy,
@@ -18,6 +17,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Switch,
   Tooltip,
 } from "./components/ui";
 import type { Config } from "./App.types";
@@ -32,6 +32,8 @@ export type SystemSettingsDialogProps = {
   isBusy: boolean;
   busy: string | null;
   onRepairCodexConfig: () => void;
+  onSelectCodexDirectory: () => void;
+  codexDirectoryNotice?: { tone: "info" | "success" | "error"; text: string } | null;
   configRepairNotice?: { tone: "info" | "success" | "error"; text: string } | null;
   codeyUpdatePolicy: Config["codeyUpdatePolicy"];
   onCodeyUpdatePolicyChange: (policy: Config["codeyUpdatePolicy"]) => void;
@@ -47,6 +49,8 @@ function SystemSettingsDialogComponent({
   isBusy,
   busy,
   onRepairCodexConfig,
+  onSelectCodexDirectory,
+  codexDirectoryNotice,
   configRepairNotice,
   codeyUpdatePolicy,
   onCodeyUpdatePolicyChange,
@@ -113,21 +117,34 @@ function SystemSettingsDialogComponent({
                   <IconFolder size={14} className="shrink-0 text-[var(--codey-muted)]" aria-hidden="true" />
                   <span>Codex 目录</span>
                 </div>
-                <Tooltip content={copied ? "已复制到剪贴板" : "复制路径"}>
+                <div className="flex items-center gap-1">
                   <Button
                     variant="ghost"
-                    size="icon-sm"
-                    className="size-6 min-w-6 shrink-0 text-[var(--codey-muted)] hover:text-[var(--codey-text)]"
-                    aria-label="复制 Codex 路径"
-                    onClick={handleCopyPath}
+                    size="sm"
+                    disabled={isBusy}
+                    aria-label="重新选择 Codex 目录"
+                    onClick={onSelectCodexDirectory}
+                    className="h-6 px-2 text-xs text-[var(--codey-muted)]"
                   >
-                    {copied ? (
-                      <IconCheck size={13} className="text-success" aria-hidden="true" />
-                    ) : (
-                      <IconCopy size={13} aria-hidden="true" />
-                    )}
+                    {busy === "select-codex-directory" && <LoaderCircle className="animate-spin" size={13} aria-hidden="true" />}
+                    {busy === "select-codex-directory" ? "识别中…" : "重新选择"}
                   </Button>
-                </Tooltip>
+                  <Tooltip content={copied ? "已复制到剪贴板" : "复制路径"}>
+                    <Button
+                      variant="ghost"
+                      size="icon-sm"
+                      className="size-6 min-w-6 shrink-0 text-[var(--codey-muted)] hover:text-[var(--codey-text)]"
+                      aria-label="复制 Codex 路径"
+                      onClick={handleCopyPath}
+                    >
+                      {copied ? (
+                        <IconCheck size={13} className="text-success" aria-hidden="true" />
+                      ) : (
+                        <IconCopy size={13} aria-hidden="true" />
+                      )}
+                    </Button>
+                  </Tooltip>
+                </div>
               </div>
               <div className="rounded-lg border border-[var(--codey-border-subtle)] bg-[var(--codey-surface,#fff)] px-2.5 py-1.5">
                 <code
@@ -137,6 +154,11 @@ function SystemSettingsDialogComponent({
                   {resolvedCodexPath}
                 </code>
               </div>
+              {codexDirectoryNotice && (
+                <div role="status" className={`text-xs break-words ${codexDirectoryNotice.tone === "error" ? "text-danger" : "text-[var(--codey-muted)]"}`}>
+                  {codexDirectoryNotice.text}
+                </div>
+              )}
             </div>
           </div>
 
@@ -178,7 +200,7 @@ function SystemSettingsDialogComponent({
           <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--codey-border-subtle)] bg-[var(--codey-surface-muted)] p-3">
             <div className="flex items-center gap-1.5 min-w-0">
               <span className="text-xs font-semibold text-[var(--codey-text)]">CodeyX 更新策略</span>
-              <Tooltip content="从本项目 GitHub Releases 检测更新，保存后生效。不检查仅关闭自动检查，仍可手动检查稳定版。" position="top">
+              <Tooltip content="从本项目 GitHub Releases 检测稳定版更新，保存后生效。不更新仅关闭自动检查，仍可手动检查稳定版。" position="top">
                 <span
                   className="inline-flex shrink-0 cursor-help items-center text-[var(--codey-muted)] transition-colors hover:text-[var(--codey-text)]"
                   aria-label="CodeyX 更新策略说明"
@@ -187,19 +209,15 @@ function SystemSettingsDialogComponent({
                 </span>
               </Tooltip>
             </div>
-            <Tabs
-              selectedKey={codeyUpdatePolicy}
-              onSelectionChange={(key) => onCodeyUpdatePolicyChange(String(key) as Config["codeyUpdatePolicy"])}
-              className="shrink-0"
-            >
-              <Tabs.ListContainer>
-                <Tabs.List aria-label="CodeyX 更新策略">
-                  <Tabs.Tab id="off" isDisabled={isBusy} className="text-xs">不检查<Tabs.Indicator /></Tabs.Tab>
-                  <Tabs.Tab id="stable" isDisabled={isBusy} className="text-xs">稳定版<Tabs.Indicator /></Tabs.Tab>
-                  <Tabs.Tab id="experimental" isDisabled={isBusy} className="text-xs">实验版<Tabs.Indicator /></Tabs.Tab>
-                </Tabs.List>
-              </Tabs.ListContainer>
-            </Tabs>
+            <div className="flex items-center gap-2">
+              <span className="text-xs text-[var(--codey-muted)]">{codeyUpdatePolicy === "off" ? "不更新" : "更新"}</span>
+              <Switch
+                aria-label="CodeyX 自动更新"
+                checked={codeyUpdatePolicy !== "off"}
+                disabled={isBusy}
+                onCheckedChange={(checked) => onCodeyUpdatePolicyChange(checked ? "stable" : "off")}
+              />
+            </div>
           </div>
         </div>
 

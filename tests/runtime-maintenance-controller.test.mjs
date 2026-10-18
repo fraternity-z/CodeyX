@@ -12,6 +12,7 @@ function fixture(extra = {}, repairAllowed = false) {
   let confirmation = null, restarts = 0;
   const options = {
     active: true, config: { retained: "draft" }, dirty: false, isBusy: false,
+    onConfigChange: config => { options.config = config; },
     status: { running: true }, restartStatusError: null,
     persist: async config => { saves.push(config); },
     refreshStatus: async () => options.status,
@@ -152,6 +153,41 @@ test("配置修复可在配置加载失败时确认执行，结果保留路径�
     assert.match(notice.text, result instanceof Error ? /未完成.*disconnected.*连接中断/ : result.repaired ? /重启[\s\S]*备份文件：test\/backup.toml/ : /无需修改/);
   }
   h.unmount();
+});
+
+test("目录选择验证后才更新最新草稿，取消或失败保留原目录且不自动保存重启", async t => {
+  installControllerWindow(t);
+  for (const result of [null, new Error("不是 Codex 桌面应用"), "C:/New Codex"]) {
+    const h = fixture({ config: { codexAppPath: "C:/Old Codex", retained: "draft" } });
+    const c = h.render(); const work = c.selectCodexDirectory();
+    await c.selectCodexDirectory(); assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].command, "select_codex_app_directory");
+    h.options.config = { ...h.options.config, retained: "latest" }; h.render();
+    if (result instanceof Error) h.calls[0].reject(result); else h.calls[0].resolve(result);
+    await work;
+    assert.deepEqual(h.options.config, { codexAppPath: typeof result === "string" ? result : "C:/Old Codex", retained: "latest" });
+    assert.equal(h.saves.length, 0); assert.equal(h.restarts, 0); assert.equal(h.options.isBusy, false);
+    const notice = h.render().codexDirectoryNotice;
+    if (result instanceof Error) assert.match(notice.text, /已保留原目录.*不是 Codex/);
+    else if (result) assert.match(notice.text, /保存后/);
+    else assert.equal(notice, null);
+    h.unmount();
+  }
+});
+
+test("目录选择在隐藏重开或卸载后不采纳迟到结果", async t => {
+  installControllerWindow(t);
+  for (const mode of ["hidden", "unmount"]) for (const failed of [false, true]) {
+    const h = fixture({ config: { codexAppPath: "C:/Old Codex" } });
+    const work = h.render().selectCodexDirectory();
+    if (mode === "unmount") h.unmount();
+    else { h.options.active = false; h.render(); h.options.active = true; h.render(); }
+    if (failed) h.calls[0].reject(new Error("late")); else h.calls[0].resolve("C:/New Codex");
+    await work;
+    assert.equal(h.options.config.codexAppPath, "C:/Old Codex");
+    assert.equal(h.writesAfterUnmount, 0);
+    if (mode === "hidden") { assert.equal(h.render().codexDirectoryNotice, null); h.unmount(); }
+  }
 });
 
 test("注入修复遵守平台能力，支持时区分后端拒绝与连接中断", async t => {

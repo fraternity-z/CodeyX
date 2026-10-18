@@ -235,7 +235,7 @@ async fn update_candidate_with_ttl(
         return Ok(candidate);
     }
 
-    let check = fetch_github_update(state, &releases_url, policy).await?;
+    let check = fetch_github_update(state, &releases_url).await?;
     let check = filter_update_policy(check, policy)?;
     if update_policy(state, mode).await? != policy {
         return Err("更新策略已变化，请重新检查更新".to_string());
@@ -313,11 +313,7 @@ fn github_releases_repository(releases_url: &str) -> Result<String, String> {
     Ok(format!("{}/{}", segments[1], segments[2]))
 }
 
-async fn fetch_github_update(
-    state: &AppState,
-    releases_url: &str,
-    policy: crate::config::CodeyUpdatePolicy,
-) -> Result<UpdateCheck, String> {
+async fn fetch_github_update(state: &AppState, releases_url: &str) -> Result<UpdateCheck, String> {
     let repository = github_releases_repository(releases_url)?;
     let fetch = async {
         let mut releases = Vec::new();
@@ -368,12 +364,7 @@ async fn fetch_github_update(
             let has_more = batch.len() == RELEASES_PER_PAGE;
             releases.append(&mut batch);
             if !has_more {
-                return assess_github_releases(
-                    env!("CARGO_PKG_VERSION"),
-                    &releases,
-                    &repository,
-                    policy,
-                );
+                return assess_github_releases(env!("CARGO_PKG_VERSION"), &releases, &repository);
             }
         }
         Err("GitHub Releases 数量超过检查上限，请从发布页确认最新版本".to_string())
@@ -387,7 +378,6 @@ fn assess_github_releases(
     current_version: &str,
     releases: &[GitHubRelease],
     repository: &str,
-    policy: crate::config::CodeyUpdatePolicy,
 ) -> Result<UpdateCheck, String> {
     let latest = releases
         .iter()
@@ -398,10 +388,7 @@ fn assess_github_releases(
                 .or_else(|| release.tag_name.strip_prefix('V'))
                 .unwrap_or(&release.tag_name);
             let version = Version::parse(tag).ok()?;
-            if release.draft
-                || (policy != crate::config::CodeyUpdatePolicy::Experimental
-                    && (release.prerelease || !version.pre.is_empty()))
-            {
+            if release.draft || release.prerelease || !version.pre.is_empty() {
                 return None;
             }
             Some((version, release))
@@ -654,7 +641,7 @@ async fn resolve_expected_update(
 ) -> Result<UpdateCheck, String> {
     let policy = update_policy(state, mode).await?;
     let releases_url = configured_github_releases_url(state).await?;
-    let check = fetch_github_update(state, &releases_url, policy).await?;
+    let check = fetch_github_update(state, &releases_url).await?;
     if update_policy(state, mode).await? != policy {
         return Err("更新策略已变化，请重新检查更新".to_string());
     }
@@ -1197,28 +1184,21 @@ mod tests {
 
     #[test]
     fn github_release_announcements_keep_the_full_body_and_trusted_source() {
-        let mut release = github_release("2.0.0-beta.1");
+        let mut release = github_release("2.0.0");
         let body = "    保留代码缩进\n\n## 更新亮点\n\n![截图](https://example.test/image.png)\n\n<details><summary>完整变更</summary>正文</details>\n";
         release.body = Some(body.to_string());
-        let check = assess_github_releases(
-            "1.0.0",
-            &[release],
-            REPOSITORY,
-            crate::config::CodeyUpdatePolicy::Experimental,
-        )
-        .unwrap();
+        let check = assess_github_releases("1.0.0", &[release], REPOSITORY).unwrap();
         let value = serde_json::to_value(check).unwrap();
         assert_eq!(value["releaseNotes"], body);
-        assert_eq!(value["releaseTitle"], "CodeyX v2.0.0-beta.1 · 更新公告");
+        assert_eq!(value["releaseTitle"], "CodeyX v2.0.0 · 更新公告");
         assert_eq!(
             value["releaseUrl"],
-            "https://github.com/fraternity-z/CodeyX/releases/tag/v2.0.0-beta.1"
+            "https://github.com/fraternity-z/CodeyX/releases/tag/v2.0.0"
         );
     }
 
     #[test]
     fn github_releases_use_semver_and_filter_drafts_and_prereleases() {
-        use crate::config::CodeyUpdatePolicy::{Experimental, Stable};
         let mut draft = github_release("9.0.0");
         draft.draft = true;
         let mut marked_prerelease = github_release("3.0.0");
@@ -1233,29 +1213,18 @@ mod tests {
             unmarked_prerelease,
             github_release("1.9.0"),
         ];
-        let stable = assess_github_releases("1.0.0", &releases, REPOSITORY, Stable).unwrap();
+        let stable = assess_github_releases("1.0.0", &releases, REPOSITORY).unwrap();
         assert_eq!(stable.latest_version, "1.10.0");
         assert_eq!(stable.release_notes.as_deref(), Some("- Release 发布说明"));
         assert_eq!(stable.release_id.as_deref(), Some("123"));
         assert!(stable.update_available);
         assert!(!stable.prerelease);
-        let experimental =
-            assess_github_releases("1.0.0", &releases, REPOSITORY, Experimental).unwrap();
-        assert_eq!(experimental.latest_version, "4.0.0-beta.1");
-        assert!(experimental.prerelease);
-        let flagged =
-            assess_github_releases("1.0.0", &releases[1..2], REPOSITORY, Experimental).unwrap();
-        assert!(flagged.prerelease);
-        assert!(
-            !filter_update_policy(flagged, Stable)
-                .unwrap()
-                .update_available
-        );
+        let flagged = assess_github_releases("1.0.0", &releases[1..2], REPOSITORY).unwrap();
+        assert!(!flagged.update_available);
     }
 
     #[test]
     fn github_releases_never_downgrade_or_update_only_for_build_metadata() {
-        use crate::config::CodeyUpdatePolicy::Stable;
         for (current, published) in [
             ("2.0.0", "1.9.0"),
             ("2.0.0", "2.0.0"),
@@ -1263,19 +1232,13 @@ mod tests {
             ("2.0.0+one", "2.0.0+two"),
         ] {
             let check =
-                assess_github_releases(current, &[github_release(published)], REPOSITORY, Stable)
-                    .unwrap();
+                assess_github_releases(current, &[github_release(published)], REPOSITORY).unwrap();
             assert!(!check.update_available, "{current} -> {published}");
         }
-        let check = assess_github_releases(
-            "2.0.0-beta.2",
-            &[github_release("2.0.0")],
-            REPOSITORY,
-            Stable,
-        )
-        .unwrap();
+        let check =
+            assess_github_releases("2.0.0-beta.2", &[github_release("2.0.0")], REPOSITORY).unwrap();
         assert!(check.update_available);
-        let empty = assess_github_releases("1.0.0", &[], REPOSITORY, Stable).unwrap();
+        let empty = assess_github_releases("1.0.0", &[], REPOSITORY).unwrap();
         assert!(!empty.update_available);
         assert_eq!(empty.latest_version, "1.0.0");
         assert!(empty.selected_asset.is_none());
@@ -1343,13 +1306,7 @@ mod tests {
         release.assets[0].size = 0;
         assert!(github_release_asset(&release, &version, REPOSITORY, "windows", "x64").is_err());
         release.assets.clear();
-        let check = assess_github_releases(
-            "1.0.0",
-            &[release],
-            REPOSITORY,
-            crate::config::CodeyUpdatePolicy::Stable,
-        )
-        .unwrap();
+        let check = assess_github_releases("1.0.0", &[release], REPOSITORY).unwrap();
         assert!(check.update_available);
         assert!(check.selected_asset.is_none());
     }
@@ -1574,12 +1531,6 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error, "更新地址必须使用 HTTPS");
-        state.config.write().await.codey_update_policy =
-            crate::config::CodeyUpdatePolicy::Experimental;
-        assert_eq!(
-            check_for_updates(&state, false, false).await.unwrap_err(),
-            "更新地址必须使用 HTTPS"
-        );
     }
 
     #[tokio::test]
@@ -1715,27 +1666,13 @@ mod tests {
     }
 
     #[test]
-    fn stable_policy_filters_prereleases_but_experimental_allows_both() {
-        use crate::config::CodeyUpdatePolicy::{Experimental, Stable};
+    fn stable_policy_filters_prereleases() {
+        use crate::config::CodeyUpdatePolicy::Stable;
         let beta = assess_update_manifest("1.0.0", &valid_manifest("2.0.0-beta.1")).unwrap();
-        assert!(
-            !filter_update_policy(beta.clone(), Stable)
-                .unwrap()
-                .update_available
-        );
-        assert!(
-            filter_update_policy(beta, Experimental)
-                .unwrap()
-                .update_available
-        );
+        assert!(!filter_update_policy(beta, Stable).unwrap().update_available);
         let stable = assess_update_manifest("2.0.0-beta.2", &valid_manifest("2.0.0")).unwrap();
         assert!(
-            filter_update_policy(stable.clone(), Stable)
-                .unwrap()
-                .update_available
-        );
-        assert!(
-            filter_update_policy(stable, Experimental)
+            filter_update_policy(stable, Stable)
                 .unwrap()
                 .update_available
         );

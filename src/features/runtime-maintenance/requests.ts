@@ -10,6 +10,7 @@ export const runtimeMaintenanceRequests = {
   restart: () => invoke<void>("restart_codey"),
   repairInjection: () => invoke<void>("repair_main_process_injection"),
   repairConfig: () => invoke<CodexConfigRepairResult>("repair_codex_config"),
+  selectCodexDirectory: () => invoke<string | null>("select_codex_app_directory"),
   clearDiagnosticStorage: (target: DiagnosticStorageTarget) =>
     invoke<DiagnosticStorageCleanup>("clear_diagnostic_storage", { target }),
 };

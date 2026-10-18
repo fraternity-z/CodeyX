@@ -166,9 +166,10 @@ test("Windows source contract: updates use the detached native helper", async ()
 });
 
 test("Windows source contract: missing Codex paths recover before startup", async () => {
-  const [commands, runtime] = await Promise.all([
+  const [commands, runtime, codexApp] = await Promise.all([
     readSource("backend/src/commands.rs"),
     readSource("backend/src/commands/runtime.rs"),
+    readSource("backend/src/commands/codex_app.rs"),
   ]);
   const launch = runtime.slice(
     runtime.indexOf("async fn launch_codey_inner_locked"),
@@ -183,7 +184,7 @@ test("Windows source contract: missing Codex paths recover before startup", asyn
     recoverBeforeLaunch.index < launch.indexOf("CodeyRuntime::start"),
   );
   assert.match(
-    commands,
+    codexApp,
     /FileDialog::new\(\)[\s\S]*选择 Codex 桌面应用安装目录[\s\S]*pick_folder\(\)/,
   );
   const recoverPath = commands.match(

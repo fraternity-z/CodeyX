@@ -243,7 +243,7 @@
 
   const setUpdateAvailability = (result, { dispatch = true } = {}) => {
     window.__codeyUpdateAvailability = codeyUpdatePolicy !== "off"
-      && (codeyUpdatePolicy === "experimental" || (!result?.prerelease && !result?.latestVersion?.split("+")[0].includes("-")))
+      && !result?.prerelease && !result?.latestVersion?.split("+")[0].includes("-")
       && result?.updateAvailable === true
       ? result
       : null;
@@ -347,6 +347,7 @@
   };
 
   const setAutomaticUpdateChecks = (policy) => {
+    policy = policy === "off" ? "off" : "stable";
     if (codeyUpdatePolicy === policy) return;
     const previous = codeyUpdatePolicy;
     codeyUpdatePolicy = policy;
@@ -369,7 +370,7 @@
   };
 
   const checkForUpdatesSilently = async () => {
-    if (!["stable", "experimental"].includes(codeyUpdatePolicy) || updateCheckInFlight || hasInstallableUpdate()) return;
+    if (codeyUpdatePolicy !== "stable" || updateCheckInFlight || hasInstallableUpdate()) return;
     updateCheckInFlight = true;
     const generation = updateCheckGeneration;
     try {
@@ -377,7 +378,7 @@
         callBridge(updateCheckPath, {}, { timeoutMs: updateCheckTimeoutMs }),
         updateCheckTimeoutMs,
       );
-      if (!["stable", "experimental"].includes(codeyUpdatePolicy) || generation !== updateCheckGeneration) return;
+      if (codeyUpdatePolicy !== "stable" || generation !== updateCheckGeneration) return;
       if (result?.status !== "failed" && result?.updateAvailable === true) {
         setUpdateAvailability(result);
         return;
@@ -1277,7 +1278,7 @@
   });
   window.addEventListener?.(configChangedEvent, (event) => {
     const policy = event.detail?.config?.codeyUpdatePolicy;
-    if (["off", "stable", "experimental"].includes(policy) && codeyUpdatePolicy !== policy) {
+    if (["off", "stable"].includes(policy) && codeyUpdatePolicy !== policy) {
       setAutomaticUpdateChecks(policy);
       if (policy !== "off") scheduleUpdateCheck(0);
     }

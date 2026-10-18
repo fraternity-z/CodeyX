@@ -87,7 +87,7 @@ export type ModelReasoningEffort = {
 
 export type Config = {
   settingsRevision: number;
-  codeyUpdatePolicy: "off" | "stable" | "experimental";
+  codeyUpdatePolicy: "off" | "stable";
   localRouterEnabled: boolean;
   routeRequestLog: RouteRequestLogConfig;
   streamMaxRetries: number;
@@ -301,7 +301,6 @@ export type Confirmation = {
     | "install-update"
     | "download-update"
     | "view-update-notes"
-    | "enable-experimental-updates"
     | "discard-settings-changes"
     | "delete-notification-channel"
     | "delete-route"

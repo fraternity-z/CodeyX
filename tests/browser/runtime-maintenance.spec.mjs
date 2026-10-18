@@ -83,3 +83,46 @@ test("系统设置修复须确认，执行时锁定按钮，完成后显示备�
   await expect(page.getByText(/修复成功，请从 CodeyX 重启 Codex 使修改生效。/).first()).toBeVisible();
   await expect(page.getByText(/备份文件：test\/backup.toml/).first()).toBeVisible();
 });
+
+test("重新选择 Codex 目录失败或取消保留原路径，成功后保存新路径", async ({ page }) => {
+  await openSettings(page, "unused");
+  await page.evaluate(() => {
+    const bridge = window.__codexSessionDeleteBridge;
+    window.directorySelection = { calls: 0, result: null, error: null, saved: null };
+    window.__codexSessionDeleteBridge = async (path, args) => {
+      const state = window.directorySelection;
+      if (path.endsWith("/select_codex_app_directory")) {
+        state.calls++;
+        await new Promise(resolve => { state.complete = resolve; });
+        if (state.error) throw new Error(state.error);
+        return state.result;
+      }
+      if (path.endsWith("/save_codey_config")) state.saved = args.config;
+      return bridge(path, args);
+    };
+  });
+  await page.getByRole("button", { name: "系统设置与偏好", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "系统设置与偏好", exact: true });
+  const directory = settings.locator("code");
+  const previous = await directory.innerText();
+  const select = settings.getByRole("button", { name: "重新选择 Codex 目录", exact: true });
+  for (const error of ["所选目录不是 Codex 桌面应用", null]) {
+    await page.evaluate(error => { window.directorySelection.error = error; }, error);
+    await select.click();
+    await expect(select).toBeDisabled();
+    await page.evaluate(() => window.directorySelection.complete());
+    await expect(select).toBeEnabled();
+    await expect(directory).toHaveText(previous);
+    if (error) await expect(settings.getByRole("status")).toContainText("已保留原目录");
+  }
+  await page.evaluate(() => { window.directorySelection.result = "D:\\Apps\\Codex"; });
+  await select.click();
+  await page.evaluate(() => window.directorySelection.complete());
+  await expect(directory).toHaveText("D:\\Apps\\Codex");
+  await expect(settings.getByRole("status")).toContainText("保存后");
+  await settings.getByRole("button", { name: "完成", exact: true }).click();
+  await page.getByRole("button", { name: "保存更改", exact: true }).click();
+  await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => window.directorySelection.saved.codexAppPath)).toBe("D:\\Apps\\Codex");
+  expect(await page.evaluate(() => window.directorySelection.calls)).toBe(3);
+});

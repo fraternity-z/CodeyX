@@ -1066,13 +1066,13 @@ test("Releases without an uploaded installer keep the renderer polling", async (
   assert.equal(fixture.activeTimers().some(entry => entry.delay === 30 * 60 * 1000), false);
 });
 
-for (const [latestVersion, prerelease, expected] of [
+for (const policy of ["stable", "experimental"]) for (const [latestVersion, prerelease, expected] of [
   ["2.0.0", true, false], ["2.0.0-beta.1", false, false], ["2.0.0+build-dev", false, true],
 ]) {
-  test(`stable renderer respects Release prerelease status: ${latestVersion}/${prerelease}`, async () => {
+  test(`renderer only accepts stable releases including legacy policies: ${policy}/${latestVersion}/${prerelease}`, async () => {
     const fixture = createStartupUpdateFixture(async path => {
       if (path === "/backend/status") return {
-        codeyUpdatePolicy: "stable",
+        codeyUpdatePolicy: policy,
         availableUpdate: { latestVersion, prerelease, updateAvailable: true, selectedAsset: { fileName: "setup.exe" } },
       };
       if (path === "/backend/health") return { status: "ok" };

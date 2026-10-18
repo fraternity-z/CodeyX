@@ -44,7 +44,7 @@ Object.defineProperty(globalThis, "navigator", {
 
 function renderDialog(overrides = {}) {
   reset();
-  const calls = { repair: 0, autoCheck: [] };
+  const calls = { repair: 0, select: 0, autoCheck: [] };
   const props = {
     open: true,
     onOpenChange: () => {},
@@ -58,6 +58,7 @@ function renderDialog(overrides = {}) {
       calls.repair += 1;
     },
     configRepairNotice: null,
+    onSelectCodexDirectory: () => { calls.select++; },
     codeyUpdatePolicy: "stable",
     onCodeyUpdatePolicyChange: (checked) => {
       calls.autoCheck.push(checked);
@@ -76,7 +77,7 @@ const byText = (tree, text) =>
       typeof elementProps(element).onClick === "function" &&
       textContent(element).replace(/\s+/g, "") === text,
   );
-const policies = (tree) => collectElements(tree, element => elementType(element) === hero.Tabs);
+const policies = (tree) => byLabel(tree, "CodeyX 自动更新");
 
 test("系统设置不再注册设备或显示广播更新设备号", async () => {
   const calls = [];
@@ -119,20 +120,18 @@ test("复制路径、修复配置与更新策略都接到真实回调", async (t
   assert.equal(elementProps(repairButton).disabled, false);
   elementProps(repairButton).onClick();
   assert.equal(calls.repair, 1, "点击修复必须触发修复回调");
+  elementProps(byLabel(tree, "重新选择 Codex 目录")[0]).onClick();
+  assert.equal(calls.select, 1);
 
   const [slider] = policies(tree);
   assert.ok(slider);
-  assert.equal(elementProps(slider).selectedKey, "stable");
-  assert.equal(elementType(byLabel(tree, "CodeyX 更新策略")[0]), hero.Tabs.List);
-  const tabs = collectElements(slider, element => elementType(element) === hero.Tabs.Tab);
-  assert.deepEqual(tabs.map(element => [elementProps(element).id, textContent(element)]), [
-    ["off", "不检查"], ["stable", "稳定版"], ["experimental", "实验版"],
-  ]);
-  assert.ok(tabs.every(element => elementProps(element).isDisabled === false));
-  assert.equal(collectElements(slider, element => elementType(element) === hero.Tabs.Indicator).length, 3);
-  for (const value of ["off", "stable", "experimental"]) elementProps(slider).onSelectionChange(value);
-  assert.deepEqual(calls.autoCheck, ["off", "stable", "experimental"]);
-  assert.equal(elementProps(slider).selectedKey, "stable");
+  assert.equal(elementType(slider), ui.Switch);
+  assert.equal(elementProps(slider).checked, true);
+  assert.equal(elementProps(slider).disabled, false);
+  assert.doesNotMatch(text, /实验版/);
+  for (const checked of [false, true]) elementProps(slider).onCheckedChange(checked);
+  assert.deepEqual(calls.autoCheck, ["off", "stable"]);
+  assert.equal(elementProps(slider).checked, true);
   assert.ok(
     collectElements(tree, (e) => /仍可手动检查稳定版/.test(elementProps(e).content ?? "")).length > 0 ||
     /仍可手动检查稳定版/.test(textContent(tree)),
@@ -141,13 +140,15 @@ test("复制路径、修复配置与更新策略都接到真实回调", async (t
 
 test("更新策略跟随配置、修复中显示进行态", () => {
   const off = renderDialog({ codeyUpdatePolicy: "off" });
-  assert.equal(elementProps(policies(off.tree)[0]).selectedKey, "off");
+  assert.equal(elementProps(policies(off.tree)[0]).checked, false);
+  assert.match(textContent(off.tree), /不更新/);
 
   const busy = renderDialog({ busy: "repair-codex-config", isBusy: true });
   const [busyButton] = byText(busy.tree, "修复中…");
   assert.ok(busyButton, "修复进行中必须显示进行态");
   assert.equal(elementProps(busyButton).disabled, true);
-  assert.ok(collectElements(policies(busy.tree)[0], element => elementType(element) === hero.Tabs.Tab).every(element => elementProps(element).isDisabled));
+  assert.equal(elementProps(policies(busy.tree)[0]).disabled, true);
+  assert.equal(elementProps(byLabel(busy.tree, "重新选择 Codex 目录")[0]).disabled, true);
   assert.equal(busy.calls.repair, 0);
 });
 
@@ -163,6 +164,7 @@ test("系统设置不出现冗余状态文案", () => {
 
 test("App 把系统设置对话框接到修复命令与自动更新保存入口", () => {
   assert.match(appSource, /onRepairCodexConfig=\{askRepairCodexConfig\}/);
+  assert.match(appSource, /onSelectCodexDirectory=\{selectCodexDirectory\}/);
   assert.match(appSource, /onCodeyUpdatePolicyChange=\{changeUpdatePolicy\}/);
   assert.match(appSource, /codeyUpdatePolicy=\{config\.codeyUpdatePolicy\}/);
   assert.match(appSource, /useRuntimeMaintenanceController\(/);
@@ -177,7 +179,7 @@ test("App 把系统设置对话框接到修复命令与自动更新保存入口"
   assert.match(appSource, /<SystemSettingsDialog[\s\S]*open=\{systemSettingsOpen\}/);
 });
 
-test("实验版必须先确认，取消不改设置，切回稳定版无需确认", async t => {
+test("更新开关直接修改草稿，无需实验版风险确认", async t => {
   installControllerWindow(t);
   let confirmation = null;
   const options = { active: true, embedded: true, configLoaded: true, codeyUpdatePolicy: "stable", isBusy: false,
@@ -187,21 +189,25 @@ test("实验版必须先确认，取消不改设置，切回稳定版无需确�
     "../../api": { invoke: async () => null },
   });
   const change = h.render(options).changeUpdatePolicy;
-  change("experimental");
-  assert.equal(options.config.codeyUpdatePolicy, "stable");
-  assert.match(confirmation.description, /尚未经过充分验证/);
-  assert.match(confirmation.description, /备份/);
-  confirmation = null;
-  assert.equal(options.config.codeyUpdatePolicy, "stable");
-  change("experimental");
-  confirmation.run();
-  assert.equal(options.config.codeyUpdatePolicy, "experimental");
+  change("off");
+  assert.equal(options.config.codeyUpdatePolicy, "off");
+  assert.equal(confirmation, null);
   h.render(options);
   confirmation = null;
   change("stable");
   assert.equal(options.config.codeyUpdatePolicy, "stable");
   assert.equal(confirmation, null);
   h.unmount();
+});
+
+test("目录重新选择显示忙碌和保留原目录的错误反馈", () => {
+  const busy = renderDialog({ isBusy: true, busy: "select-codex-directory" });
+  const button = byLabel(busy.tree, "重新选择 Codex 目录")[0];
+  assert.equal(elementProps(button).disabled, true);
+  assert.match(textContent(button), /识别中/);
+  const failed = renderDialog({ codexDirectoryNotice: { tone: "error", text: "识别失败，已保留原目录" } });
+  assert.match(textContent(failed.tree), /识别失败，已保留原目录/);
+  assert.match(textContent(failed.tree), /\/Applications\/ChatGPT.app/);
 });
 
 test("styles define sidebar footer layout and responsive behavior", () => {

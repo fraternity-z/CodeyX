@@ -1,10 +1,10 @@
-import type { Config, InlineResult, UpdateCheck, UpdateDownload, UpdateInstallReport } from "../../App.types";
+import type { InlineResult, UpdateCheck, UpdateDownload, UpdateInstallReport } from "../../App.types";
 
 export const updateAvailable = (check: UpdateCheck | null | undefined): check is UpdateCheck =>
   check?.updateAvailable === true;
 
-export function updateVersionAllowed(update: Pick<UpdateCheck, "latestVersion" | "prerelease">, policy: Config["codeyUpdatePolicy"]): boolean {
-  return policy === "experimental" || (!update.prerelease && !update.latestVersion.split("+")[0].includes("-"));
+export function updateVersionAllowed(update: Pick<UpdateCheck, "latestVersion" | "prerelease">): boolean {
+  return !update.prerelease && !update.latestVersion.split("+")[0].includes("-");
 }
 
 export function updatePromptKey(result: Pick<UpdateCheck, "latestVersion">): string {

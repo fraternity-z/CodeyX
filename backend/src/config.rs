@@ -787,7 +787,6 @@ pub enum CodeyUpdatePolicy {
     Off,
     #[default]
     Stable,
-    Experimental,
 }
 
 impl<'de> Deserialize<'de> for CodeyUpdatePolicy {
@@ -798,8 +797,7 @@ impl<'de> Deserialize<'de> for CodeyUpdatePolicy {
             serde_json::Value::Bool(true) => Ok(Self::Stable),
             serde_json::Value::String(value) => match value.as_str() {
                 "off" => Ok(Self::Off),
-                "stable" => Ok(Self::Stable),
-                "experimental" => Ok(Self::Experimental),
+                "stable" | "experimental" => Ok(Self::Stable),
                 _ => Err(serde::de::Error::custom("Codey 更新策略无效")),
             },
             _ => Err(serde::de::Error::custom("Codey 更新策略无效")),
@@ -812,7 +810,6 @@ impl CodeyUpdatePolicy {
         match self {
             Self::Off => "off",
             Self::Stable => "stable",
-            Self::Experimental => "experimental",
         }
     }
 }
@@ -4897,7 +4894,7 @@ mod tests {
     }
 
     #[test]
-    fn codey_update_policy_migrates_legacy_and_preserves_channels() {
+    fn codey_update_policy_migrates_legacy_to_stable() {
         assert_eq!(
             CodeyConfig::default().codey_update_policy,
             CodeyUpdatePolicy::Stable
@@ -4928,7 +4925,14 @@ mod tests {
             let config: CodeyConfig =
                 serde_json::from_value(serde_json::json!({"codeyUpdatePolicy": policy})).unwrap();
             let serialized = serde_json::to_value(config).unwrap();
-            assert_eq!(serialized["codeyUpdatePolicy"], policy);
+            assert_eq!(
+                serialized["codeyUpdatePolicy"],
+                if policy == "experimental" {
+                    "stable"
+                } else {
+                    policy
+                }
+            );
             assert!(serialized.get("autoCheckCodeyUpdates").is_none());
         }
         assert!(
