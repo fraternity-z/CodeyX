@@ -2,33 +2,6 @@ use super::{AppState, argument};
 use serde_json::Value;
 use std::sync::{Arc, atomic::Ordering};
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn conversation_stats_bridge_rejects_invalid_session_ids() {
-        let directory = tempfile::tempdir().unwrap();
-        let state = Arc::new(AppState {
-            store: crate::config::ConfigStore::new(directory.path().join("config.json")),
-            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
-            ..AppState::default()
-        });
-        for payload in [
-            serde_json::json!({}),
-            serde_json::json!({"sessionId": 42}),
-            serde_json::json!({"sessionId": "../../outside"}),
-            serde_json::json!({"sessionId": "local:invalid"}),
-        ] {
-            let result = state.bridge_request("/session/stats".into(), payload).await;
-            assert_eq!(
-                result,
-                serde_json::json!({"status": "failed", "message": "会话 ID 无效"})
-            );
-        }
-    }
-}
-
 pub(super) async fn stats(state: &Arc<AppState>, args: &Value) -> Value {
     let session_id = super::bridge_string(args, "sessionId");
     let session_id = session_id
@@ -87,4 +60,31 @@ pub(super) async fn invoke(
     .await
     .map_err(|_| "会话管理任务异常退出，请刷新确认清理结果".to_string())?
     .map_err(|error| format!("{error:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn conversation_stats_bridge_rejects_invalid_session_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState {
+            store: crate::config::ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
+            ..AppState::default()
+        });
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"sessionId": 42}),
+            serde_json::json!({"sessionId": "../../outside"}),
+            serde_json::json!({"sessionId": "local:invalid"}),
+        ] {
+            let result = state.bridge_request("/session/stats".into(), payload).await;
+            assert_eq!(
+                result,
+                serde_json::json!({"status": "failed", "message": "会话 ID 无效"})
+            );
+        }
+    }
 }

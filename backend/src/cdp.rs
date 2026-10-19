@@ -3048,7 +3048,12 @@ const run = async (patch) => {
         assert!(prepared.scripts[1].contains("用户脚本 1 injection failed"));
         assert_eq!(prepared.descriptors.len(), 14);
         assert!(core.contains("__codeyConversationStats"));
-        assert!(prepared.descriptors.iter().any(|descriptor| descriptor.id == "conversation-stats"));
+        assert!(
+            prepared
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.id == "conversation-stats")
+        );
         assert!(
             prepared
                 .descriptors

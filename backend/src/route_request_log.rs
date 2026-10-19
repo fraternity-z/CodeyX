@@ -29,7 +29,9 @@ mod stats_tests;
 use crate::conversation_stats::LiveSpeedSample;
 pub(crate) use session::{SessionGenerationTotals, last_turn_recorded_stats};
 #[cfg(test)]
-pub(crate) use session::{SessionRecordedTiming, session_recorded_average, session_recorded_timing};
+pub(crate) use session::{
+    SessionRecordedTiming, session_recorded_average, session_recorded_timing,
+};
 
 const SCHEMA_VERSION: u8 = 12;
 const MAX_LOG_STRING_BYTES: usize = 512;
@@ -1782,7 +1784,8 @@ impl RouteRequestLogController {
     }
 
     pub(crate) fn with_root(root: PathBuf) -> Self {
-        let session_stats = Arc::new(crate::conversation_stats::ConversationStatsRegistry::default());
+        let session_stats =
+            Arc::new(crate::conversation_stats::ConversationStatsRegistry::default());
         let stats_producer = Arc::new(RouteRequestLogProducer {
             sender: None,
             accepting: Arc::new(AtomicBool::new(true)),
@@ -1805,7 +1808,9 @@ impl RouteRequestLogController {
         &self.root
     }
 
-    pub(crate) fn session_stats(&self) -> Arc<crate::conversation_stats::ConversationStatsRegistry> {
+    pub(crate) fn session_stats(
+        &self,
+    ) -> Arc<crate::conversation_stats::ConversationStatsRegistry> {
         Arc::clone(&self.session_stats)
     }
 
@@ -1814,7 +1819,10 @@ impl RouteRequestLogController {
         &self,
         begin: impl FnOnce(&RouteRequestLogProducer) -> Option<RouteRequestLogProbe>,
     ) -> Option<RouteRequestLogProbe> {
-        let producer = self.active.load_full().unwrap_or_else(|| Arc::clone(&self.stats_producer));
+        let producer = self
+            .active
+            .load_full()
+            .unwrap_or_else(|| Arc::clone(&self.stats_producer));
         begin(&producer)
     }
 
