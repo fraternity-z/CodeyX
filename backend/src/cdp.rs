@@ -20,6 +20,9 @@ pub(crate) use runtime_optimizations::refresh_auxiliary_renderers;
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";
 const CDP_INJECTION_TIMEOUT: Duration = Duration::from_secs(30);
+// Desktop 创建主窗口前会先读取启动策略；WSL 模式需在发行版内冷启动 app-server，
+// 官方为准备与策略读取分别预留 120 秒和 60 秒。只在 CDP 端点仍有响应时沿用此上限。
+const CDP_WINDOW_WAIT_TIMEOUT: Duration = Duration::from_secs(180);
 const INITIAL_RETRY_INTERVAL: Duration = Duration::from_millis(100);
 // 发现与选择阶段的失败只付一次 loopback 请求的代价，既不触碰 renderer，也不
 // 留下 CDP 副作用，因此可以用更密的节奏跟随 renderer 就绪。校验阶段的失败
@@ -588,7 +591,7 @@ pub async fn retry_inject_with_scripts(
     // enough budget for the bridge commands after discovery while retaining a
     // hard startup deadline.
     let started = tokio::time::Instant::now();
-    let deadline = started + CDP_INJECTION_TIMEOUT;
+    let mut deadline = InjectionDeadline::new(started, source);
     let mut delay = INITIAL_RETRY_INTERVAL;
     let phase = Arc::new(AtomicU8::new(InjectionPhase::DiscoverTargets as u8));
     let mut previous_error = None;
@@ -601,7 +604,7 @@ pub async fn retry_inject_with_scripts(
         stats.attempts += 1;
         let attempt_started = tokio::time::Instant::now();
         match tokio::time::timeout_at(
-            deadline,
+            deadline.at(),
             run_injection_attempt(
                 retained_bridge.take(),
                 debug_port,
@@ -613,12 +616,17 @@ pub async fn retry_inject_with_scripts(
         .await
         {
             Ok(AttemptOutcome::Injected(target)) => {
+                deadline.observe(InjectionPhase::ReadStatuses, attempt_started);
+                stats.page_discovered = deadline.page_discovered();
                 stats.report(source, "injected", started.elapsed(), None);
                 return Ok(target);
             }
             Ok(AttemptOutcome::Retry { error, retained }) => {
                 retained_bridge = retained;
                 let current_phase = InjectionPhase::from_raw(phase.load(Ordering::Acquire));
+                // 发现阶段在尝试开始后的一次回环请求内完成，用开始时刻记录端点与页面。
+                deadline.observe(current_phase, attempt_started);
+                stats.page_discovered = deadline.page_discovered();
                 let failure_cost = attempt_started.elapsed();
                 stats.record_failure(current_phase, failure_cost);
                 stats.last_protocol_failure = error.downcast_ref::<ProtocolFailure>().cloned();
@@ -640,7 +648,7 @@ pub async fn retry_inject_with_scripts(
                         current_phase.label()
                     ));
                 }
-                if tokio::time::Instant::now() + delay > deadline {
+                if tokio::time::Instant::now() + delay > deadline.at() {
                     stats.report(
                         source,
                         "noRetryBudget",
@@ -669,9 +677,16 @@ pub async fn retry_inject_with_scripts(
                     .as_deref()
                     .map(|error| format!("；最近一次失败：{error}"))
                     .unwrap_or_default();
+                if deadline.awaiting_window() {
+                    break anyhow::anyhow!(
+                        "等待 Codex 主窗口超时（{} ms，Codex 仍在启动但未创建可注入页面{}）",
+                        started.elapsed().as_millis(),
+                        previous_error
+                    );
+                }
                 break anyhow::anyhow!(
                     "等待 Codex CDP bridge 注入超时（{} ms，阶段：{}{}）",
-                    CDP_INJECTION_TIMEOUT.as_millis(),
+                    started.elapsed().as_millis(),
                     current_phase.label(),
                     previous_error
                 );
@@ -682,6 +697,60 @@ pub async fn retry_inject_with_scripts(
         error: last_error,
         detail: previous_detail,
     })
+}
+
+/// 启动注入的截止时间。主窗口出现前，CDP 端点每次响应都把截止时间顺延一个注入
+/// 预算，但不超过窗口等待上限；端点停止响应时按最后一次响应计，避免 Codex 退出后
+/// 长时间空等。发现 Codex 页面后，注入预算从该时刻计起。看门狗重建沿用固定预算。
+struct InjectionDeadline {
+    started: tokio::time::Instant,
+    wait_for_window: bool,
+    endpoint_responded: Option<tokio::time::Instant>,
+    page_discovered: Option<tokio::time::Instant>,
+}
+
+impl InjectionDeadline {
+    fn new(started: tokio::time::Instant, source: InjectionRetrySource) -> Self {
+        Self {
+            started,
+            wait_for_window: matches!(source, InjectionRetrySource::Startup),
+            endpoint_responded: None,
+            page_discovered: None,
+        }
+    }
+
+    /// 记录一次尝试到达的阶段：进入选择阶段说明端点已返回页面列表，进入安装阶段
+    /// 说明已找到 Codex 页面。
+    fn observe(&mut self, phase: InjectionPhase, attempt_started: tokio::time::Instant) {
+        if phase as u8 >= InjectionPhase::InstallBridge as u8 {
+            self.page_discovered.get_or_insert(attempt_started);
+        } else if phase as u8 == InjectionPhase::SelectTarget as u8 {
+            self.endpoint_responded = Some(attempt_started);
+        }
+    }
+
+    fn at(&self) -> tokio::time::Instant {
+        let fixed = self.started + CDP_INJECTION_TIMEOUT;
+        if !self.wait_for_window {
+            return fixed;
+        }
+        match (self.page_discovered, self.endpoint_responded) {
+            (Some(page), _) => fixed.max(page + CDP_INJECTION_TIMEOUT),
+            (None, Some(responded)) => fixed
+                .max(responded + CDP_INJECTION_TIMEOUT)
+                .min(self.started + CDP_WINDOW_WAIT_TIMEOUT),
+            (None, None) => fixed,
+        }
+    }
+
+    fn awaiting_window(&self) -> bool {
+        self.wait_for_window && self.page_discovered.is_none() && self.endpoint_responded.is_some()
+    }
+
+    fn page_discovered(&self) -> Option<Duration> {
+        self.page_discovered
+            .map(|page| page.saturating_duration_since(self.started))
+    }
 }
 
 /// 下一次重试前的等待时长。发现与选择阶段的失败通常只付一次 loopback 请求的
@@ -711,6 +780,7 @@ struct InjectionRetryStats {
     failure_expense_ms: u64,
     last_failure_phase: Option<InjectionPhase>,
     last_protocol_failure: Option<ProtocolFailure>,
+    page_discovered: Option<Duration>,
 }
 
 impl InjectionRetryStats {
@@ -760,6 +830,7 @@ impl InjectionRetryStats {
             "failureExpenseMs": self.failure_expense_ms,
             "lastFailurePhase": self.last_failure_phase.map(InjectionPhase::key),
             "totalMs": elapsed.as_millis() as u64,
+            "pageDiscoveredMs": self.page_discovered.map(|elapsed| elapsed.as_millis() as u64),
             "codexAppVersion": error_log::cached_codex_app_version(),
             "protocolFailure": self.last_protocol_failure,
         });
@@ -2417,6 +2488,60 @@ assert.equal(nextPage.window.attempts, 1);
     #[test]
     fn injection_deadline_leaves_time_for_slow_windows_renderer_startup() {
         assert_eq!(CDP_INJECTION_TIMEOUT, Duration::from_secs(30));
+        assert_eq!(CDP_WINDOW_WAIT_TIMEOUT, Duration::from_secs(180));
+    }
+
+    #[test]
+    fn startup_deadline_waits_for_a_late_window_only_while_cdp_responds() {
+        let started = tokio::time::Instant::now();
+        let at = |seconds: u64| started + Duration::from_secs(seconds);
+        let mut deadline = InjectionDeadline::new(started, InjectionRetrySource::Startup);
+        deadline.observe(InjectionPhase::DiscoverTargets, at(10));
+        assert_eq!(deadline.at(), at(30));
+        assert!(!deadline.awaiting_window());
+
+        // WSL 启动策略读取期间端点返回空列表：每次响应都顺延，但有窗口等待上限。
+        deadline.observe(InjectionPhase::SelectTarget, at(29));
+        assert_eq!(deadline.at(), at(59));
+        assert!(deadline.awaiting_window());
+        deadline.observe(InjectionPhase::SelectTarget, at(170));
+        assert_eq!(deadline.at(), at(180));
+        // 端点不再响应时不刷新，按最后一次响应计。
+        deadline.observe(InjectionPhase::DiscoverTargets, at(175));
+        assert_eq!(deadline.at(), at(180));
+
+        let mut deadline = InjectionDeadline::new(started, InjectionRetrySource::Startup);
+        deadline.observe(InjectionPhase::SelectTarget, at(28));
+        deadline.observe(InjectionPhase::InstallBridge, at(29));
+        assert_eq!(deadline.at(), at(59));
+        assert!(!deadline.awaiting_window());
+        assert_eq!(deadline.page_discovered(), Some(Duration::from_secs(29)));
+        // 页面发现时刻只记录一次，之后的端点响应不再延长注入预算。
+        deadline.observe(InjectionPhase::VerifyRequestGate, at(50));
+        deadline.observe(InjectionPhase::SelectTarget, at(55));
+        assert_eq!(deadline.at(), at(59));
+
+        let mut early = InjectionDeadline::new(started, InjectionRetrySource::Startup);
+        early.observe(InjectionPhase::VerifyRequestGate, at(2));
+        assert_eq!(early.at(), at(32));
+    }
+
+    #[test]
+    fn watchdog_reinjection_keeps_the_fixed_deadline() {
+        let started = tokio::time::Instant::now();
+        let mut deadline = InjectionDeadline::new(started, InjectionRetrySource::Watchdog);
+        deadline.observe(
+            InjectionPhase::SelectTarget,
+            started + Duration::from_secs(29),
+        );
+        assert_eq!(deadline.at(), started + CDP_INJECTION_TIMEOUT);
+        assert!(!deadline.awaiting_window());
+        deadline.observe(
+            InjectionPhase::InstallBridge,
+            started + Duration::from_secs(29),
+        );
+        assert_eq!(deadline.at(), started + CDP_INJECTION_TIMEOUT);
+        assert_eq!(deadline.page_discovered(), Some(Duration::from_secs(29)));
     }
 
     #[test]

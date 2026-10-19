@@ -36,7 +36,7 @@ test("Windows source contract: fatal startup failures remain visible", async () 
 
   const failureBranch = library.slice(failureStart, shutdownCleanup);
   assert.match(failureBranch, /commands::launch_codey_runtime\(&state\)\.await/);
-  assert.match(failureBranch, /stop_runtime_with_retry\(&state\)\.await/);
+  assert.match(failureBranch, /cleanup_failed_startup_with_retry\(&state\)\.await/);
   assert.match(failureBranch, /finish_failed_startup\(/);
   assert.match(
     failureBranch,
@@ -59,6 +59,35 @@ test("Windows source contract: fatal startup failures remain visible", async () 
   assert.match(library, /tokio::task::spawn_blocking/);
   assert.match(library, /\.set_title\("Codey 启动失败"\)/);
   assert.match(library, /Codey 将退出。处理上述问题后，请重新启动 Codey。/);
+});
+
+test("WSL startup recovery cleans without terminal shutdown and retries only after confirmation", async () => {
+  const [library, commands, windows, preferences, nativeUi] = await Promise.all([
+    readSource("backend/src/lib.rs"),
+    readSource("backend/src/commands/runtime.rs"),
+    readSource("backend/src/wsl/windows.rs"),
+    readSource("backend/src/wsl/preferences.rs"),
+    readSource("backend/src/native_update_ui.rs"),
+  ]);
+  const cleanup = library.slice(
+    library.indexOf("async fn cleanup_failed_startup_with_retry"),
+    library.indexOf("async fn stop_runtime_with_retry"),
+  );
+  assert.equal(cleanup.match(/commands::cleanup_failed_runtime_start\(state\)/g)?.length, 2);
+  assert.doesNotMatch(cleanup, /stop_codey_runtime|begin_shutdown|request_shutdown/);
+  const recoverableStop = commands.slice(
+    commands.indexOf("pub(crate) async fn cleanup_failed_runtime_start"),
+    commands.indexOf("pub async fn begin_shutdown"),
+  );
+  assert.match(recoverableStop, /stop_codey_runtime_locked\(state\)\.await/);
+  assert.doesNotMatch(recoverableStop, /begin_shutdown|request_shutdown/);
+  assert.match(library, /if cleanup\.is_ok\(\) && !context_recovery \{\s*match wsl::windows::recover_startup/);
+  assert.match(library, /Ok\(Some\(true\)\) => continue/);
+  assert.match(library, /Ok\(Some\(false\)\) => return Err\(anyhow::Error::msg\(error\)\)/);
+  assert.match(windows, /super::preferences::recover\([\s\S]*?ui\.confirm_wsl_recovery\(error\)/);
+  assert.match(preferences, /ConfigManager::for_home\(home\)/);
+  assert.match(preferences, /Some\(self\.snapshot\.revision\(\)\)/);
+  assert.match(nativeUi, /confirm_wsl_recovery[\s\S]*?DialogKind::Recovery[\s\S]*?切换 Windows 并重试/);
 });
 
 test("Windows source contract: background helpers request no-window execution", async () => {

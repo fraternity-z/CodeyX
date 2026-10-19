@@ -2,6 +2,7 @@ mod account_usage;
 mod appserver_call;
 mod backup;
 mod cdp;
+mod codegraph_runtime;
 mod codex_config;
 mod codex_config_guidance;
 mod codex_extensions;
@@ -59,6 +60,8 @@ mod task_activity;
 mod trace_log_guard;
 mod trace_log_stats;
 mod update_helper;
+#[cfg(any(windows, target_os = "linux"))]
+mod wsl;
 
 use std::sync::Arc;
 
@@ -87,6 +90,10 @@ pub fn run_plugin_log_terminal_if_requested() -> Result<bool> {
 }
 
 pub fn run_codex_cli_wrapper_if_requested() -> Result<bool> {
+    #[cfg(any(windows, target_os = "linux"))]
+    if wsl::run_if_requested()? {
+        return Ok(true);
+    }
     codex_startup_patch::run_cli_wrapper_if_requested()
 }
 
@@ -232,13 +239,7 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
                 eprintln!("Codey 自动启动 Codex 失败：{error:#}");
                 let context_recovery = error.is::<model_catalog::ContextBudgetCatalogError>();
                 let mut error = format!("{error:#}");
-                let cleanup = if context_recovery {
-                    commands::cleanup_failed_runtime_start(&state)
-                        .await
-                        .map(|_| ())
-                } else {
-                    stop_runtime_with_retry(&state).await
-                };
+                let cleanup = cleanup_failed_startup_with_retry(&state).await;
                 if let Err(cleanup_error) = &cleanup {
                     error_log::record_failure(
                         "restore_failed",
@@ -254,6 +255,17 @@ async fn run(ui: NativeUpdateUi) -> Result<()> {
                         Ok(false) => {}
                         Err(recovery_error) => {
                             error = format!("{error}；恢复默认上下文预算失败：{recovery_error}");
+                        }
+                    }
+                }
+                #[cfg(windows)]
+                if cleanup.is_ok() && !context_recovery {
+                    match wsl::windows::recover_startup(&ui, &error).await {
+                        Ok(Some(true)) => continue,
+                        Ok(Some(false)) => return Err(anyhow::Error::msg(error)),
+                        Ok(None) => {}
+                        Err(recovery_error) => {
+                            error = format!("{error}；切换 Windows 后端失败：{recovery_error:#}");
                         }
                     }
                 }
@@ -356,6 +368,21 @@ async fn wait_for_runtime_shutdown(
                     return ShutdownReason::InstallUpdate;
                 }
             }
+        }
+    }
+}
+
+async fn cleanup_failed_startup_with_retry(state: &Arc<AppState>) -> Result<(), String> {
+    // Recovery can relaunch in this process; terminal shutdown would reject
+    // the retry even after the user has corrected the backend selection.
+    match commands::cleanup_failed_runtime_start(state).await {
+        Ok(_) => Ok(()),
+        Err(first_error) => {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            commands::cleanup_failed_runtime_start(state)
+                .await
+                .map(|_| ())
+                .map_err(|retry_error| format!("{first_error}；重试恢复失败：{retry_error}"))
         }
     }
 }

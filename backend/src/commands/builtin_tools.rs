@@ -1,6 +1,6 @@
 //! 内置工具入口：开关接入用户 MCP，项目由 MCP 启动钩子自动识别和维护。
 mod ponytail;
-mod runtime;
+use crate::codegraph_runtime as runtime;
 
 use super::{AppState, argument, string_argument};
 use anyhow::{Context, Result, ensure};

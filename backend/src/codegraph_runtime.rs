@@ -50,7 +50,7 @@ pub(super) fn legacy_mcp_args(root: &Path) -> Value {
 pub(super) fn prepare_launcher(root: &Path) -> Result<()> {
     crate::fs_util::atomic_write_private_with_parent(
         &root.join("auto-mcp-v1.cjs"),
-        include_bytes!("auto_mcp.cjs"),
+        include_bytes!("commands/builtin_tools/auto_mcp.cjs"),
     )
 }
 
@@ -456,7 +456,7 @@ mod tests {
             child
                 .args([
                     "--exact",
-                    "commands::builtin_tools::runtime::tests::mock_runtime_child",
+                    "codegraph_runtime::tests::mock_runtime_child",
                     "--ignored",
                     "--nocapture",
                 ])
