@@ -4,7 +4,6 @@ import {
   IconCheck,
   IconCircleArrowUp,
   IconDeviceFloppy as Save,
-  IconGitBranch as GitBranch,
   IconLayoutDashboard,
   IconLoader2 as LoaderCircle,
   IconRefresh as RefreshCw,
@@ -386,31 +385,33 @@ export function App({
   if (!config || !provider) {
     const loadingContent = (
       <main className="app-shell loading-shell">
-        <div className="loading-mark">
-          <GitBranch size={17} />
-        </div>
-        <div>
-          <strong>{loadFailed ? "CodeyX 加载失败" : "正在载入 CodeyX"}</strong>
-          <p>
-            <NoticeLoadingText controller={noticeController} />
-          </p>
-          {loadFailed && (
-            <div className="flex flex-wrap gap-2 mt-3">
-              <Button variant="outline" size="sm" disabled={isBusy} onClick={askRepairCodexConfig}>
-                {busy === "repair-codex-config" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
-                {busy === "repair-codex-config" ? "检查修复中…" : "修复 Codex 配置"}
-              </Button>
-              <Button variant="secondary" size="sm" disabled={isBusy} onClick={() => void load()}>
-                重新检查
-              </Button>
+        <div className="codey-card loading-card">
+          <div className="loading-mark"><CodeyBrandMark /></div>
+          <div className="loading-copy">
+            <div role="status" aria-live="polite" aria-atomic="true">
+              <strong>{loadFailed ? "CodeyX 加载失败" : "正在载入 CodeyX"}</strong>
+              <p>
+                <NoticeLoadingText controller={noticeController} />
+              </p>
             </div>
-          )}
+            {loadFailed && (
+              <div className="flex flex-wrap gap-2 mt-3">
+                <Button variant="outline" size="sm" disabled={isBusy} onClick={askRepairCodexConfig}>
+                  {busy === "repair-codex-config" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <RefreshCw aria-hidden="true" />}
+                  {busy === "repair-codex-config" ? "检查修复中…" : "修复 Codex 配置"}
+                </Button>
+                <Button variant="secondary" size="sm" disabled={isBusy} onClick={() => void load()}>
+                  重新检查
+                </Button>
+              </div>
+            )}
+          </div>
+          {!loadFailed && <LoaderCircle
+            className="animate-spin motion-reduce:animate-none loading-animate-spin"
+            size={16}
+            aria-hidden="true"
+          />}
         </div>
-        {!loadFailed && <LoaderCircle
-          className="animate-spin loading-animate-spin"
-          size={16}
-          aria-hidden="true"
-        />}
         <ConfirmationDialogHost
           container={popupContainer}
           controller={confirmationController}

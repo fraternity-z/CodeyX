@@ -161,6 +161,51 @@ button,
   isolation: isolate;
 }
 
+.loading-shell {
+  align-items: center;
+  overflow-y: auto;
+  padding: 24px;
+}
+
+.loading-card {
+  display: flex;
+  width: min(100%, 420px);
+  flex: none;
+  align-items: center;
+  gap: 16px;
+  margin-block: auto;
+  padding: 24px;
+}
+
+.loading-mark,
+.loading-animate-spin {
+  flex: none;
+}
+
+.loading-copy {
+  min-width: 0;
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+
+.loading-copy strong {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.5;
+  letter-spacing: -0.01em;
+}
+
+.loading-copy p {
+  margin: 5px 0 0;
+  color: var(--codey-muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+.loading-animate-spin {
+  color: var(--codey-blue);
+}
+
 .sr-only {
   position: absolute;
   width: 1px;
