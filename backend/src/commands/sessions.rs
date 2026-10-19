@@ -44,13 +44,17 @@ pub(super) async fn stats(state: &Arc<AppState>, args: &Value) -> Value {
         .await
         .as_ref()
         .and_then(|runtime| runtime.conversation_stats_registry());
-    let snapshot = crate::conversation_stats::snapshot_with_history(
-        crate::codex_config::codex_home().to_path_buf(),
-        session_id.to_owned(),
-        registry,
-    )
-    .await;
-    serde_json::json!({ "status": "ok", "stats": snapshot })
+    let (snapshot, codegraph) = tokio::join!(
+        crate::conversation_stats::snapshot_with_history(
+            crate::codex_config::codex_home().to_path_buf(),
+            session_id.to_owned(),
+            registry,
+        ),
+        super::builtin_tools::session_status(state, session_id)
+    );
+    // 项目状态读取失败不影响统计，也不把旧索引状态误报为仍然生效。
+    let codegraph = codegraph.unwrap_or_else(|_| Some(serde_json::json!({"phase":"unavailable"})));
+    serde_json::json!({ "status": "ok", "stats": snapshot, "codegraph": codegraph })
 }
 
 pub(super) async fn invoke(

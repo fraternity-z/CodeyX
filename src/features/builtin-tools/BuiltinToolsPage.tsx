@@ -58,13 +58,6 @@ export function BuiltinToolsPage({ active, config, fastContextToolsStatus, isBus
             {userManaged && <small>已检测到你配置的 CodeGraph。请在 MCP 管理中使用或调整，内置版本不会重复接入。</small>}
             {status?.mcp.managed && !status.mcp.automatic && <small>开启自动索引后，已有接入将升级为随聊天项目自动运行。</small>}
             <small>首次启用会下载官方运行包，下一轮项目聊天生效。无需填写路径或执行命令；首次索引期间可继续聊天，关闭后保留已有索引。</small>
-            {status?.mcp.automatic && status.mcp.enabled && !status.projects.length && <p role="status" className="m-0 text-xs text-muted">等待项目聊天，索引将自动开始。</p>}
-            {Boolean(status?.projects.length) && <div className="flex flex-col gap-2 text-xs" aria-label="最近自动接入的项目">
-              {status!.projects.map(project => <div key={project.projectPath} className="rounded-lg border border-default p-3 min-w-0">
-                <div className="font-medium break-all">{project.projectPath}</div>
-                <div className={`mt-1 ${project.phase === "failed" ? "text-danger" : "text-muted"}`}>{project.message}</div>
-              </div>)}
-            </div>}
             <div className="flex flex-wrap gap-2">
               {status?.job?.phase === "failed" && <Button size="sm" disabled={blocked || userManaged} onClick={() => void setEnabled(true)}>重试启用</Button>}
               <Button size="sm" variant="outline" disabled={busy || isBusy} onClick={refresh}>

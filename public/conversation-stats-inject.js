@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 7;
+  const VERSION = 8;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -33,6 +33,7 @@
   let statsElement = null;
   let currentSessionId = "";
   let stats = null;
+  let codegraph = null;
   let pollTimer = 0;
   let rescanTimer = 0;
   let fetchInFlight = false;
@@ -179,6 +180,7 @@
       const paths = {
         activity: ["M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0", "M11 12a1 1 0 1 0 2 0a1 1 0 1 0 -2 0", "M13.41 10.59l2.59 -2.59", "M7 12a5 5 0 0 1 5 -5"],
         tokens: ["M4 6a8 3 0 1 0 16 0a8 3 0 1 0 -16 0", "M4 6v6a8 3 0 0 0 16 0v-6", "M4 12v6a8 3 0 0 0 16 0v-6"],
+        codegraph: ["M10 3h4v4h-4z", "M3 17h4v4h-4z", "M17 17h4v4h-4z", "M12 7v5", "M5 17v-5h14v5"],
       };
       const icon = (kind, parent) => {
         const element = make("span", "codey-cs-icon", "", parent);
@@ -189,6 +191,7 @@
       for (const [kind, title, fields] of [
         ["activity", "最近一轮统计", [["modelDurationMs", "模型用时"], ["toolDurationMs", "工具调用用时"], ["averageTtftMs", "首 token 平均（TTFT）"], ["speed", "平均速度（TPS）"]]],
         ["tokens", "Token 用量", [["cacheRate", "缓存命中"], ["uncachedInputTokens", "未缓存输入"], ["cachedInputTokens", "缓存读取"], ["outputTokens", "输出"]]],
+        ["codegraph", "CodeGraph 代码索引", []],
       ]) {
         const button = make("button", `codey-cs-summary codey-cs-${kind}-summary`, "", groups);
         button.type = "button";
@@ -200,11 +203,14 @@
           refs.activity.title = "轮数为会话总轮数，步骤和速度为最近一轮统计。";
           make("span", "", "·", button).setAttribute("aria-hidden", "true");
           refs.speed = make("span", "codey-cs-metric codey-cs-speed", "—", button);
-        } else {
+        } else if (kind === "tokens") {
           refs.total = make("span", "codey-cs-metric codey-cs-total", "—", button);
           make("span", "", "·", button).setAttribute("aria-hidden", "true");
           const cache = make("span", "codey-cs-metric", "缓存命中 ", button);
           refs["cache-rate"] = make("span", "codey-cs-cache-rate", "—", cache);
+        } else {
+          refs.codegraph = make("span", "codey-cs-metric", "", button);
+          button.hidden = true;
         }
         const panel = make("section", "codey-cs-details", "", overlay);
         panel.id = `${barId}-${kind}`;
@@ -224,6 +230,11 @@
           make("dt", "", label, row);
           refs.fields[key] = make("dd", "", "—", row);
           refs.fields[key].setAttribute("data-field", key);
+        }
+        if (kind === "codegraph") {
+          const row = make("div", "codey-cs-detail-row", "", list);
+          make("dt", "", "当前项目", row);
+          refs.projectPath = make("dd", "", "", row);
         }
         refs.notes[kind] = make("p", `codey-cs-note codey-cs-${kind}-note`, "", panel);
         refs.buttons[kind] = button;
@@ -326,6 +337,7 @@
     currentSessionId = sessionId;
     sessionGeneration += 1;
     stats = null;
+    codegraph = null;
     lastResult = null;
     lastFetchOk = false;
     fetchAttempted = false;
@@ -391,6 +403,17 @@
       : `本轮总输出 Token ÷ 本轮生成耗时，工具间隔不计；${coverageNote}${estimatedSpeed && speedKnown ? "；含生成中的 Token 估算" : ""}`;
     const rate = cacheRatePercent(data.inputTokens, data.cachedInputTokens) || "—";
     const refs = bar.__codeyCs;
+    const projectVisible = typeof codegraph?.projectPath === "string" && Boolean(codegraph.projectPath);
+    refs.buttons.codegraph.hidden = !projectVisible;
+    if (!projectVisible && refs.active === "codegraph") setExpanded(false);
+    const graphPhase = stale ? "unavailable" : codegraph?.phase;
+    const graphLabels = { watching: "已接入", indexing: "索引中", failed: "索引失败", waiting: "待索引", disabled: "未启用", uninstalled: "待安装", external: "MCP 管理" };
+    const graphLabel = typeof graphLabels[graphPhase] === "string" ? graphLabels[graphPhase] : "状态未知";
+    const graphMessage = graphLabel === "状态未知" ? "暂时无法读取当前项目的索引状态，将自动重试。" : codegraph?.message || "";
+    setText(refs.codegraph, projectVisible ? `CodeGraph ${graphLabel}` : "");
+    setText(refs.projectPath, projectVisible ? codegraph.projectPath : "");
+    setText(refs.notes.codegraph, projectVisible ? graphMessage : "");
+    refs.buttons.codegraph.setAttribute("aria-label", `CodeGraph ${graphLabel}，查看当前项目索引状态`);
     setText(refs.speed, speedText);
     refs.speed.title = speedNote;
     setText(refs["cache-rate"], rate);
@@ -471,6 +494,9 @@
         if (result?.status === "ok") {
           lastFetchOk = true;
           stats = result.stats ?? null;
+          codegraph = result.codegraph?.phase === "unavailable"
+            ? codegraph && { ...codegraph, phase: "unavailable" }
+            : result.codegraph ?? null;
         } else {
           lastFetchOk = false;
         }
@@ -605,6 +631,7 @@
         mounted: statsElement?.isConnected === true,
         hidden: statsElement?.hidden !== false,
         stats,
+        codegraph,
         lastFetchOk,
         lastResult,
       }),

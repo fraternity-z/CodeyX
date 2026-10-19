@@ -5,6 +5,7 @@ mod runtime;
 use super::{AppState, argument, string_argument};
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -102,44 +103,100 @@ fn workspace_roots(home: &Path, codex_home: &Path) -> Result<Vec<PathBuf>> {
     Ok(roots)
 }
 
-// 每个项目单独原子写入；展示时核对当前工作区，保留磁盘上的历史记录和索引。
-fn projects(root: &Path, home: &Path, codex_home: &Path) -> Result<Vec<Value>> {
-    let entries = match std::fs::read_dir(root.join("projects")) {
-        Ok(entries) => entries,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(error).context("无法读取 CodeGraph 项目状态"),
+fn project_record_path(root: &Path, project: &Path) -> PathBuf {
+    let path = super::file_manager_path(project)
+        .to_string_lossy()
+        .into_owned();
+    // 与 auto_mcp.cjs 的 writeRecord 保持相同的路径哈希。
+    let key = if cfg!(windows) {
+        path.to_lowercase()
+    } else {
+        path
     };
-    let allowed = workspace_roots(home, codex_home)?;
-    let mut records = Vec::new();
-    for entry in entries.take(1000) {
-        let entry = entry?;
-        if entry.path().extension().and_then(|value| value.to_str()) != Some("json")
-            || !entry.file_type()?.is_file()
-        {
-            continue;
-        }
-        let Ok(bytes) = crate::fs_util::read_bounded(&entry.path(), 16 * 1024) else {
-            continue;
-        };
-        let Ok(record) = serde_json::from_slice::<Value>(&bytes) else {
-            continue;
-        };
-        if record["projectPath"]
+    root.join("projects")
+        .join(format!("{:x}.json", Sha256::digest(key.as_bytes())))
+}
+
+// 与自动接入一致，子目录归属最深的已添加项目；不从最近项目列表回退。
+fn project(root: &Path, home: &Path, codex_home: &Path, session_id: &str) -> Result<Option<Value>> {
+    ensure!(uuid::Uuid::parse_str(session_id).is_ok(), "会话 ID 无效");
+    let Some((thread, _)) = crate::session_transfer::find_thread(codex_home, session_id)? else {
+        return Ok(None);
+    };
+    let Some(cwd) = thread
+        .get("cwd")
+        .and_then(Value::as_str)
+        .and_then(|cwd| canonical_directory(Path::new(cwd)))
+    else {
+        return Ok(None);
+    };
+    let Some(project_path) = workspace_roots(home, codex_home)?
+        .into_iter()
+        .filter(|path| cwd.starts_with(path))
+        .max_by_key(|path| path.components().count())
+    else {
+        return Ok(None);
+    };
+    let record_path = project_record_path(root, &project_path);
+    if !record_path
+        .try_exists()
+        .context("无法读取 CodeGraph 项目状态")?
+    {
+        return Ok(Some(
+            json!({"projectPath":super::file_manager_path(&project_path),"phase":"waiting",
+            "message":"等待项目聊天，索引将自动开始。"}),
+        ));
+    }
+    let bytes = crate::fs_util::read_bounded(&record_path, 16 * 1024)?;
+    let record: Value = serde_json::from_slice(&bytes).context("CodeGraph 项目状态格式无效")?;
+    ensure!(
+        record["projectPath"]
             .as_str()
             .and_then(|path| canonical_directory(Path::new(path)))
-            .is_some_and(|path| allowed.contains(&path))
+            .is_some_and(|path| path == project_path)
             && record["updatedAt"].is_u64()
             && matches!(
                 record["phase"].as_str(),
                 Some("indexing" | "watching" | "failed")
-            )
-        {
-            records.push(record);
-        }
+            ),
+        "CodeGraph 项目状态与当前目录不匹配或格式无效"
+    );
+    Ok(Some(record))
+}
+
+pub(super) async fn session_status(
+    state: &Arc<AppState>,
+    session_id: &str,
+) -> Result<Option<Value>> {
+    let root = root(state)?;
+    let home = crate::codex_config::codex_home().to_path_buf();
+    let session_id = session_id.to_owned();
+    let installed = runtime::installed(&root);
+    let current = tokio::task::spawn_blocking(move || {
+        let user = directories::BaseDirs::new().context("无法确定当前用户目录")?;
+        project(&root, user.home_dir(), &home, &session_id)
+    })
+    .await??;
+    let Some(mut current) = current else {
+        return Ok(None);
+    };
+    let (mcp, _) = mcp_status(state).await?;
+    if let Some((phase, message)) = if mcp["enabled"] != true {
+        Some(("disabled", "CodeGraph 未启用，可在内置工具设置中开启。"))
+    } else if mcp["managed"] != true || mcp["automatic"] != true {
+        Some((
+            "external",
+            "当前 CodeGraph 由 MCP 配置管理，无法确认本项目的自动索引状态。",
+        ))
+    } else if !installed {
+        Some(("uninstalled", "CodeGraph 运行包尚未安装完成。"))
+    } else {
+        None
+    } {
+        current["phase"] = json!(phase);
+        current["message"] = json!(message);
     }
-    records.sort_by_key(|record| std::cmp::Reverse(record["updatedAt"].as_u64()));
-    records.truncate(10);
-    Ok(records)
+    Ok(Some(current))
 }
 
 async fn extension(state: &Arc<AppState>, request: Value) -> Result<Value> {
@@ -197,13 +254,8 @@ async fn status(state: &Arc<AppState>) -> Result<Value> {
     let root = root(state)?;
     let (mcp, _) = mcp_status(state).await?;
     let installed = runtime::installed(&root);
-    let projects = tokio::task::spawn_blocking(move || {
-        let user = directories::BaseDirs::new().context("无法确定当前用户目录")?;
-        projects(&root, user.home_dir(), crate::codex_config::codex_home())
-    })
-    .await??;
     Ok(
-        json!({"installed":installed,"version":runtime::VERSION,"projects":projects,"mcp":mcp,
+        json!({"installed":installed,"version":runtime::VERSION,"mcp":mcp,
         "job":state.builtin_tools.job.lock().await.clone()}),
     )
 }
@@ -352,27 +404,36 @@ mod tests {
     }
 
     #[test]
-    fn project_records_are_sorted_bounded_and_tolerate_one_damaged_record() {
+    fn project_status_follows_the_session_directory_and_ignores_other_records() {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("home");
         let codex_home = home.join(".codex");
         std::fs::create_dir_all(&codex_home).unwrap();
-        assert!(projects(dir.path(), &home, &codex_home).unwrap().is_empty());
+        let session = "11111111-1111-4111-8111-111111111111";
+        assert!(
+            project(dir.path(), &home, &codex_home, session)
+                .unwrap()
+                .is_none()
+        );
+        assert!(project(dir.path(), &home, &codex_home, "../invalid").is_err());
+        let db = rusqlite::Connection::open(codex_home.join("state_5.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE threads (id TEXT PRIMARY KEY, cwd TEXT)")
+            .unwrap();
         let records = dir.path().join("projects");
         std::fs::create_dir(&records).unwrap();
         let mut roots = Vec::new();
         for index in 0..12 {
-            let project = dir.path().join(format!("project-{index}"));
-            std::fs::create_dir(&project).unwrap();
+            let path = dir.path().join(format!("project-{index}"));
+            std::fs::create_dir(&path).unwrap();
             std::fs::write(
-                records.join(format!("{index}.json")),
+                project_record_path(dir.path(), &path.canonicalize().unwrap()),
                 serde_json::to_vec(&json!({
-                    "projectPath":project,"updatedAt":index,"phase":"watching"
+                    "projectPath":path,"updatedAt":index,"phase":"watching","message":"已接入"
                 }))
                 .unwrap(),
             )
             .unwrap();
-            roots.push(project);
+            roots.push(path);
         }
         let state_path = codex_home.join(".codex-global-state.json");
         std::fs::write(
@@ -381,35 +442,82 @@ mod tests {
         )
         .unwrap();
         std::fs::write(records.join("broken.json"), b"{").unwrap();
-        // 旧版误收录的聊天目录不能占用最近项目名额，即使已有索引。
-        for (index, path) in [
-            codex_home.clone(),
-            home.join("Documents/Codex/chat"),
-            home.join("AppData/Local/Programs/Codex"),
-        ]
-        .iter()
-        .enumerate()
-        {
-            std::fs::create_dir_all(path.join(".codegraph")).unwrap();
-            std::fs::write(
-                records.join(format!("unlisted-{index}.json")),
-                json!({"projectPath":path,"updatedAt":100 + index,"phase":"failed"}).to_string(),
+        let set_cwd = |path: &Path| {
+            db.execute(
+                "INSERT OR REPLACE INTO threads VALUES (?1, ?2)",
+                rusqlite::params![session, path.to_str().unwrap()],
             )
             .unwrap();
+        };
+        // 当前项目即使排在最近十个以外，也必须返回自己的状态。
+        set_cwd(&roots[0]);
+        let current = project(dir.path(), &home, &codex_home, session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current["projectPath"], json!(roots[0]));
+        assert_eq!(current["phase"], "watching");
+        let selected_record = project_record_path(dir.path(), &roots[0].canonicalize().unwrap());
+        for invalid in [
+            json!({"projectPath":roots[1],"updatedAt":100,"phase":"watching"}),
+            json!({"projectPath":roots[0],"updatedAt":100,"phase":"invalid"}),
+            json!({"projectPath":roots[0],"phase":"watching"}),
+        ] {
+            std::fs::write(&selected_record, invalid.to_string()).unwrap();
+            assert!(project(dir.path(), &home, &codex_home, session).is_err());
         }
-        let list = projects(dir.path(), &home, &codex_home).unwrap();
-        assert_eq!(list.len(), 10);
-        assert_eq!(list[0]["projectPath"], json!(roots[11]));
-        roots.pop();
+        std::fs::write(&selected_record, vec![b' '; 16 * 1024 + 1]).unwrap();
+        assert!(project(dir.path(), &home, &codex_home, session).is_err());
+        std::fs::write(&selected_record, current.to_string()).unwrap();
+        let child = roots[0].join("child");
+        std::fs::create_dir(&child).unwrap();
+        set_cwd(&child);
+        assert_eq!(
+            project(dir.path(), &home, &codex_home, session)
+                .unwrap()
+                .unwrap(),
+            current
+        );
+        roots.push(child.clone());
         std::fs::write(
             &state_path,
             json!({"local-projects":{"p":{"rootPaths":roots}}}).to_string(),
         )
         .unwrap();
-        let list = projects(dir.path(), &home, &codex_home).unwrap();
-        assert_eq!(list[0]["projectPath"], json!(roots[10]));
-        assert!(records.join("11.json").is_file());
-        assert!(codex_home.join(".codegraph").is_dir());
+        let nested = project(dir.path(), &home, &codex_home, session)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            nested["projectPath"],
+            json!(super::super::file_manager_path(
+                &child.canonicalize().unwrap()
+            ))
+        );
+        assert_eq!(nested["phase"], "waiting");
+        set_cwd(&roots[1]);
+        std::fs::write(
+            project_record_path(dir.path(), &roots[1].canonicalize().unwrap()),
+            b"{",
+        )
+        .unwrap();
+        assert!(project(dir.path(), &home, &codex_home, session).is_err());
+        for cwd in [&home, &codex_home, dir.path(), &dir.path().join("missing")] {
+            set_cwd(cwd);
+            assert!(
+                project(dir.path(), &home, &codex_home, session)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        set_cwd(&roots[0]);
+        std::fs::write(&state_path, r#"{"local-projects":{}}"#).unwrap();
+        assert!(
+            project(dir.path(), &home, &codex_home, session)
+                .unwrap()
+                .is_none()
+        );
+        assert!(project_record_path(dir.path(), &roots[0].canonicalize().unwrap()).is_file());
+        std::fs::write(&state_path, "{").unwrap();
+        assert!(project(dir.path(), &home, &codex_home, session).is_err());
     }
 
     #[test]

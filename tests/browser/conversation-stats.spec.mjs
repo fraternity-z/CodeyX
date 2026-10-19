@@ -15,13 +15,14 @@ for (const theme of ["light", "dark"]) {
         lastTurn: { id: "turn-a", status: "completed", stepCount: 3,
           modelDurationMs: 24500, toolDurationMs: 8000, averageTtftMs: 700,
           averageOutputTokensPerSecond: 85, coverage: "runtime", speedIsEstimate: false },
-      } });
+      }, codegraph: { projectPath: "E:/projects/current-project", phase: "watching", message: "项目索引已接入，代码变化会自动同步。" } });
     });
     await page.addScriptTag({ path: script });
     const bar = page.locator("#codey-conversation-stats");
     await expect(bar).toContainText("8 轮 · 3 步");
     await expect(bar).toContainText("125k tok");
     await expect(bar).toContainText("75%");
+    await expect(bar).toContainText("CodeGraph 已接入");
     const activity = bar.locator(".codey-cs-activity-summary");
     await activity.focus();
     await activity.press("Enter");
@@ -41,6 +42,20 @@ for (const theme of ["light", "dark"]) {
     expect(box.x + box.width).toBeLessThanOrEqual(375);
     await expect(tokens.locator('[data-field="uncachedInputTokens"]')).toHaveText("25,000 tok");
     await page.screenshot({ path: `output/playwright/conversation-stats-${theme}-narrow.png` });
+    const codegraph = bar.locator(".codey-cs-codegraph-summary");
+    await codegraph.focus();
+    await codegraph.press("Enter");
+    const project = page.getByRole("region", { name: "CodeGraph 代码索引", exact: true });
+    await expect(project).toBeVisible();
+    await expect(project).toContainText("E:/projects/current-project");
+    await expect(project).toContainText("代码变化会自动同步");
+    const projectBox = await project.boundingBox();
+    expect(projectBox.x).toBeGreaterThanOrEqual(0);
+    expect(projectBox.x + projectBox.width).toBeLessThanOrEqual(375);
+    await page.screenshot({ path: `output/playwright/conversation-codegraph-${theme}-narrow.png` });
+    await page.keyboard.press("Escape");
+    await expect(project).not.toBeVisible();
+    await expect(codegraph).toBeFocused();
     await page.evaluate(() => window.__codeyConversationStats.dispose());
     await expect(bar).toHaveCount(0);
     expect(errors).toEqual([]);

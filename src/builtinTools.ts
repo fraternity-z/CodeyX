@@ -13,7 +13,6 @@ export type BuiltinToolsStatus = {
   installed: boolean;
   message?: string;
   version: string;
-  projects: { projectPath: string; phase: "indexing" | "watching" | "failed"; message: string; updatedAt: number }[];
   mcp: { id?: string; enabled: boolean; managed: boolean; automatic: boolean };
   job: { id: string; phase: "running" | "succeeded" | "failed"; message: string } | null;
 };

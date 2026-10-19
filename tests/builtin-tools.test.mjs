@@ -31,7 +31,7 @@ test("enabling needs no project path and waits for project chat after installati
   assert.equal(finished.job.phase, "succeeded");
   assert.equal(finished.mcp.enabled, true);
   assert.equal(finished.mcp.automatic, true);
-  assert.deepEqual(finished.projects, []);
+  assert.equal(Object.hasOwn(finished, "projects"), false);
   await request({ action: "set_enabled", enabled: false });
   assert.equal((await request({ action: "status" })).mcp.enabled, false);
   assert.equal((await request({ action: "status" })).job, null);

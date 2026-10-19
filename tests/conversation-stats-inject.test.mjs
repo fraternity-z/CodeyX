@@ -978,7 +978,7 @@ test("shows reference activity rows and computes uncached input without double c
   assert.equal(field(env.bar(), "toolDurationMs"), "9分 33秒");
   assert.equal(field(env.bar(), "averageTtftMs"), "2.8秒");
   assert.equal(field(env.bar(), "uncachedInputTokens"), "8,400 tok");
-  assert.equal(env.bar().querySelectorAll(".codey-cs-summary").length, 2);
+  assert.equal(env.bar().querySelectorAll(".codey-cs-summary").filter(button => !button.hidden).length, 2);
 });
 
 test("renders merged timing of one turn without accumulating again or restoring another session response", async () => {
@@ -1076,4 +1076,91 @@ test("explains turn boundaries and accumulated tool timing", async () => {
   assert.match(note, /一次提问为一轮，步数为该轮模型生成次数/);
   assert.match(note, /有有效计时的记录/);
   assert.match(note, /工具用时为本轮累计值，并行调用可能重叠/);
+});
+
+test("shows only the current project's CodeGraph phase and clears it when no project is associated", async () => {
+  const project = { projectPath: "E:/projects/current", phase: "watching", message: "项目索引已接入，代码变化会自动同步。" };
+  let response = { status: "ok", stats: STATS, codegraph: project };
+  const env = createEnvironment({ request: () => response });
+  try {
+    await flushTimers(30);
+    const refs = env.bar().__codeyCs;
+    for (const [phase, label] of [["watching", "已接入"], ["indexing", "索引中"], ["failed", "索引失败"],
+      ["waiting", "待索引"], ["disabled", "未启用"], ["uninstalled", "待安装"], ["external", "MCP 管理"]]) {
+      response = { status: "ok", codegraph: { ...project, phase } };
+      env.refresh();
+      await flushTimers(30);
+      assert.equal(refs.buttons.codegraph.hidden, false);
+      assert.equal(refs.codegraph.textContent, `CodeGraph ${label}`);
+      assert.equal(refs.projectPath.textContent, project.projectPath);
+    }
+    click(refs.buttons.codegraph);
+    assert.equal(refs.panels.codegraph.hidden, false);
+    response = { status: "ok", codegraph: null };
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(refs.buttons.codegraph.hidden, true);
+    assert.equal(refs.panels.codegraph.hidden, true);
+    assert.equal(refs.projectPath.textContent, "");
+    assert.equal(refs.notes.codegraph.textContent, "");
+  } finally { env.dispose(); }
+});
+
+test("CodeGraph read and transport failures never keep claiming that indexing is active", async () => {
+  const project = { projectPath: "E:/projects/current", phase: "watching", message: "已接入" };
+  let response = { status: "ok", stats: STATS, codegraph: project };
+  const env = createEnvironment({ request: () => { if (response instanceof Error) throw response; return response; } });
+  try {
+    await flushTimers(30);
+    const refs = env.bar().__codeyCs;
+    for (const failure of [{ status: "ok", stats: STATS, codegraph: { phase: "unavailable" } }, { status: "failed" }, new Error("offline")]) {
+      response = failure;
+      env.refresh();
+      await flushTimers(30);
+      assert.equal(refs.codegraph.textContent, "CodeGraph 状态未知");
+      assert.match(refs.notes.codegraph.textContent, /自动重试/);
+      assert.equal(metric(env.bar(), "total"), "132k tok");
+    }
+    response = { status: "ok", stats: STATS, codegraph: project };
+    env.refresh();
+    await flushTimers(30);
+    assert.equal(refs.codegraph.textContent, "CodeGraph 已接入");
+  } finally { env.dispose(); }
+});
+
+test("CodeGraph drops late responses across conversation switches and never falls back to the previous folder", async () => {
+  const pending = [];
+  let defer = false;
+  const project = { projectPath: "E:/projects/first", phase: "watching", message: "已接入" };
+  const env = createEnvironment({ request: sessionId => defer
+    ? new Promise(resolve => pending.push({ sessionId, resolve }))
+    : { status: "ok", codegraph: project } });
+  try {
+    await flushTimers(30);
+    const refs = env.bar().__codeyCs;
+    click(refs.buttons.codegraph);
+    defer = true;
+    env.refresh();
+    await flushTimers(30);
+    env.setConversation("conversation-2");
+    env.emitAnchorMutation();
+    await flushTimers(160);
+    assert.equal(refs.buttons.codegraph.hidden, true);
+    assert.equal(refs.panels.codegraph.hidden, true);
+    assert.equal(refs.projectPath.textContent, "");
+    pending[0].resolve({ status: "ok", codegraph: project });
+    await flushTimers(30);
+    assert.equal(refs.buttons.codegraph.hidden, true);
+    assert.equal(pending[1].sessionId, "conversation-2");
+    pending[1].resolve({ status: "ok", codegraph: { ...project, projectPath: "E:/projects/second", phase: "indexing" } });
+    await flushTimers(30);
+    assert.equal(refs.projectPath.textContent, "E:/projects/second");
+    assert.equal(refs.codegraph.textContent, "CodeGraph 索引中");
+    env.setConversation("");
+    env.emitAnchorMutation();
+    await flushTimers(160);
+    assert.equal(refs.buttons.codegraph.hidden, true);
+    assert.equal(refs.projectPath.textContent, "");
+    assert.equal(env.calls.length, 3);
+  } finally { env.dispose(); }
 });

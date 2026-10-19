@@ -2,7 +2,7 @@ import type { BuiltinToolsStatus } from "../builtinTools";
 import type { PonytailStatus } from "../features/builtin-tools";
 
 export function createBuiltinToolsPreview() {
-  const state: BuiltinToolsStatus = { installed: false, version: "1.6.2", projects: [], mcp: { enabled: false, managed: false, automatic: false }, job: null };
+  const state: BuiltinToolsStatus = { installed: false, version: "1.6.2", mcp: { enabled: false, managed: false, automatic: false }, job: null };
   let finishAt = 0;
   const ponytail: PonytailStatus = { installed: false, enabled: false, version: null, conflict: null, job: null,
     settings: { defaultMode: "full", effectiveMode: "full", environmentOverride: null, revision: "missing", configPath: "C:/Users/Preview/AppData/Roaming/ponytail/config.json" } };
