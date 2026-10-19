@@ -1,5 +1,5 @@
 import { useEffect, useRef, type Dispatch, type SetStateAction } from "react";
-import type { Config, Confirmation, ModelContextConfig, Notice, OfficialAccountsResult, Profile, ProviderStatus, RuntimeStatus } from "../../App.types";
+import type { Config, ConfigSaveResult, Confirmation, ModelContextConfig, Notice, OfficialAccountsResult, Profile, ProviderStatus, RuntimeStatus } from "../../App.types";
 import type { useDraftConfig } from "../../useDraftConfig";
 import type { useModelSelectionController } from "../model-selection";
 import { SETTINGS_OPENED_EVENT } from "../runtime-status";
@@ -23,7 +23,7 @@ type Options = Pick<ReturnType<typeof useDraftConfig>,
   setNotice: (notice: Notice) => void;
   setConfirmation: (confirmation: Confirmation | null) => void;
   runOperation: (name: string, action: () => Promise<void>) => Promise<void>;
-  persist: (config: Config) => Promise<RouteResult>;
+  persist: (config: Config) => Promise<ConfigSaveResult>;
 };
 
 export function useRoutesController({ active, config, dirty, isBusy, provider, setConfig, setDirty,
@@ -150,7 +150,9 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
         : [...config.profiles, route] });
       saved = true;
       if (!mounted.current) return;
-      setNotice({ tone: result.restartRequired ? "info" : "success", text: result.restartRequired
+      setNotice({ tone: result.configApply || result.restartRequired ? "info" : "success", text: result.configApply
+        ? `线路「${route.name}」已保存，正在后台应用`
+        : result.restartRequired
         ? `线路「${route.name}」已保存，重启 Codex 后注册新的接入配置`
         : `线路「${route.name}」已保存，模型选择器已刷新` });
     });

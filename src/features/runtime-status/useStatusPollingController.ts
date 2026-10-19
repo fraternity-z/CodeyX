@@ -1,6 +1,6 @@
 import { useEffect, useRef } from "react";
 import type { RuntimeStatus } from "../../App.types";
-import { createStatusPollTask, hasPendingBuiltinInjection, INJECTION_PROBE_DELAYS_MS,
+import { createStatusPollTask, hasPendingBuiltinInjection, hasPendingConfigApply, INJECTION_PROBE_DELAYS_MS,
   INJECTION_PROBE_MAX_DURATION_MS, STATUS_POLL_MAX_CONSECUTIVE_ERRORS, STATUS_POLL_MAX_DURATION_MS } from "./state";
 import type { StatusPollClock, StatusPollScheduler, StatusPollTask } from "./types";
 
@@ -18,6 +18,7 @@ export function useStatusPollingController({ active, revision, status, restartSt
   if (schedulerRef.current === null) schedulerRef.current = createStatusPollScheduler(requestRuntimeStatus);
   const scheduler = schedulerRef.current;
   const builtinInjectionProbePending = hasPendingBuiltinInjection(status);
+  const configApplyPending = hasPendingConfigApply(status);
 
   useEffect(() => () => scheduler.clear(), [active, revision, scheduler]);
   useEffect(() => {
@@ -40,6 +41,19 @@ export function useStatusPollingController({ active, revision, status, restartSt
     scheduler.add(task);
     return () => scheduler.remove(task);
   }, [active, revision, status.restartInProgress, restartStatusError, scheduler]);
+
+  useEffect(() => {
+    if (!active || !configApplyPending || !status.configApply || restartStatusError) return;
+    const settingsRevision = status.configApply.settingsRevision;
+    const task = createStatusPollTask({
+      kind: "config", delays: [500, 1_000, 2_000],
+      pending: next => !next.configApply || next.configApply.settingsRevision < settingsRevision || hasPendingConfigApply(next),
+      refreshesInjectionStatus: false,
+      onExhausted: () => setRestartStatusError("配置已保存，暂时无法确认后台应用结果，请重新查询状态"),
+    }, STATUS_POLL_MAX_DURATION_MS, Date.now());
+    scheduler.add(task);
+    return () => scheduler.remove(task);
+  }, [active, revision, configApplyPending, status.configApply?.settingsRevision, restartStatusError, scheduler]);
 
   return scheduler;
 }

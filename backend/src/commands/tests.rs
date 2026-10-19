@@ -1461,7 +1461,10 @@ async fn stale_concurrent_config_saves_are_rejected_without_diverging_disk_and_m
 #[tokio::test]
 async fn request_log_save_without_a_running_router_reports_not_applicable_without_restart() {
     let directory = tempfile::tempdir().unwrap();
-    let initial = CodeyConfig::default();
+    let initial = CodeyConfig {
+        protect_crashpad_pending: false,
+        ..CodeyConfig::default()
+    };
     let state = Arc::new(AppState {
         store: ConfigStore::new(directory.path().join("config.json")),
         config: RwLock::new(initial.clone()),
@@ -1474,6 +1477,18 @@ async fn request_log_save_without_a_running_router_reports_not_applicable_withou
     let response = save_codey_config(&state, input).await.unwrap();
 
     assert_eq!(response["status"], "ok");
+    assert_eq!(response["configApply"]["phase"], "pending");
+    let response = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let result = serde_json::to_value(config_apply::status(&state)).unwrap();
+            if result["phase"] == "applied" {
+                break result;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
     assert_eq!(response["restartRequired"], false);
     assert_eq!(response["routeRequestLogHotReloaded"], false);
     assert_eq!(response["routeRequestLogHealth"], "not_applicable");
@@ -2012,8 +2027,13 @@ async fn watcher_join_does_not_hold_the_config_write_lock() {
             .await
             .expect("watcher join must happen after releasing the config write lock");
     drop(config_guard);
+    let response = tokio::time::timeout(Duration::from_millis(100), save_task)
+        .await
+        .expect("watcher join must not delay the save response")
+        .unwrap()
+        .unwrap();
+    assert_eq!(response["configApply"]["phase"], "pending");
     release.notify_one();
-    save_task.await.unwrap().unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

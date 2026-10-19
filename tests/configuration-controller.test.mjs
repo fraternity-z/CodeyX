@@ -33,6 +33,7 @@ function fixture(t, extra = {}) {
     "../../api": { invoke(command, args) { const call = { command, args, ...deferred() }; calls.push(call); return call.promise; } },
   });
   const render = () => {
+    options.status = runtimeStatus;
     const draft = owner.render();
     for (const key of ["config", "persistedConfigRef", "adoptRouteConfig", "adoptSavedConfig", "setDirty"]) options[key] = draft[key];
     return h.render(options);
@@ -269,4 +270,53 @@ test("保存提示保留热更新、生效失败、被新设置取代和重启�
 
 test("配置功能只公开 controller，传输和纯规则留在功能内部", () => {
   assert.deepEqual(Object.keys(createModuleGraph(new URL("index.ts", feature), { stubs: { "../subagents": subagents } }).exports), ["useConfigurationController"]);
+});
+
+test("后台应用不占用保存按钮，连续保存拒绝旧应用结果并保留新草稿", async t => {
+  const h = fixture(t); await h.ready();
+  h.options.setStatus({ running: true, restartRequired: true });
+  const first = h.edit({ retained: "first" }).saveCurrent();
+  h.saveResult({ configApply: { settingsRevision: 2, phase: "pending" } });
+  await first; await h.flush();
+  assert.equal(h.busy, null);
+  assert.equal(h.owner.render().dirty, false);
+  assert.equal(h.runtimeStatus.restartRequired, false);
+  assert.match(h.notices.at(-1).text, /已保存.*后台应用/);
+  const second = h.edit({ retained: "second" }).saveCurrent();
+  h.saveResult({ configApply: { settingsRevision: 3, phase: "pending" } });
+  await second; await h.flush();
+  h.edit({ retained: "new draft" });
+  const notices = h.notices.length;
+  h.options.setStatus({ running: true, configApply: { settingsRevision: 2, phase: "failed", applyError: "旧错误" } }); h.render();
+  assert.equal(h.notices.length, notices);
+  h.options.setStatus({ running: true, configApply: { settingsRevision: 3, phase: "failed", applyError: "应用失败" } }); h.render();
+  assert.equal(h.notices.at(-1).tone, "error");
+  assert.match(h.notices.at(-1).text, /已保存.*应用失败/);
+  assert.equal(h.owner.render().config.retained, "new draft");
+  assert.equal(h.owner.render().persistedConfigRef.current.retained, "second");
+  assert.equal(h.calls.filter(call => call.command === "save_codey_config").length, 2);
+});
+
+test("后台应用完成只更新附属状态，隐藏期间保持静默，重开后补齐结果", async t => {
+  const h = fixture(t); await h.ready();
+  const work = h.edit({ retained: "saved" }).saveCurrent();
+  h.saveResult({ configApply: { settingsRevision: 2, phase: "pending" } }); await work; await h.flush();
+  h.options.active = false; h.render();
+  const notices = h.notices.length;
+  const nextModels = { ...models, defaultModel: "new" };
+  h.options.setStatus({ running: true, configApply: { settingsRevision: 2, phase: "applied", modelState: nextModels } }); h.render();
+  assert.equal(h.notices.length, notices);
+  h.options.active = true; h.render();
+  assert.equal(h.modelState, nextModels);
+  assert.equal(h.notices.at(-1).text, "CodeyX 设置已保存并应用");
+  h.render(); assert.equal(h.notices.length, notices + 1);
+});
+
+test("应用状态提示区分等待、成功、失败与需重启，重新加载保留后台状态", () => {
+  for (const phase of ["pending", "applying", "applied", "failed", "restart_required"]) {
+    const application = { settingsRevision: 1, phase, restartRequired: phase === "restart_required", modelHotReloadError: phase === "failed" ? "测试失败" : undefined };
+    const notice = state.configApplyNotice(application);
+    assert.equal(notice.tone, phase === "failed" ? "error" : phase === "applied" ? "success" : "info");
+    assert.deepEqual(state.configLoadNotice(loadResult(), { running: true, configApply: application }), notice);
+  }
 });

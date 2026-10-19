@@ -21,6 +21,10 @@ async function openSettings(page, mode = "normal") {
       state.changes.push(structuredClone(event.detail.config));
     });
     window.__codexSessionDeleteBridge = async (path, args) => {
+      if (path.endsWith("/runtime_status") && state.application) {
+        return { ...await bridge(path, args), configApply: state.application,
+          restartRequired: state.application.phase === "restart_required" };
+      }
       if (path.endsWith("/load_codey_config") && state.deferNextRead) {
         state.deferNextRead = false;
         const result = await bridge(path, args);
@@ -40,6 +44,10 @@ async function openSettings(page, mode = "normal") {
         return { status: "failed", message: "Codey 设置已被其他操作更新，请关闭后重新打开设置页面再保存" };
       }
       const result = await bridge(path, args);
+      if (state.mode === "background") {
+        state.application = { settingsRevision: result.config.settingsRevision, phase: "pending" };
+        return { config: result.config, fastContextToolsStatus: result.fastContextToolsStatus, configApply: state.application };
+      }
       if (state.mode === "apply-failed") {
         return { ...result, routeRequestLogHealth: "failed", routeRequestLogHotReloadError: "测试：日志写入器暂时不可用" };
       }
@@ -161,4 +169,41 @@ test("重新打开时迟到的配置刷新合并新草稿，不覆盖用户刚�
   await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeDisabled();
   expect(await page.evaluate(() => window.settingsBehavior.saves.at(-1).settingsRevision)).toBe(before.revision + 1);
   expect(await storedConfig(page)).toEqual({ revision: before.revision + 2, logging: false, retries: before.retries + 1 });
+});
+
+test("后台应用期间可以连续保存和关闭，重开后显示应用失败且不丢失草稿", async ({ page }) => {
+  const toggle = await openSettings(page, "background");
+  const before = await storedConfig(page);
+  await toggle.press("Space");
+  await page.getByRole("button", { name: "保存更改", exact: true }).click();
+  await expect(page.getByText("CodeyX 设置已保存，正在后台应用，可继续修改", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "关闭配置", exact: true })).toBeEnabled();
+  await toggle.press("Space");
+  await page.getByRole("button", { name: "保存更改", exact: true }).click();
+  await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeDisabled();
+  expect(await storedConfig(page)).toEqual({ ...before, revision: before.revision + 2 });
+  await page.getByRole("button", { name: "关闭配置", exact: true }).click();
+  await page.evaluate(() => {
+    window.settingsBehavior.application = { ...window.settingsBehavior.application,
+      phase: "failed", applyError: "测试：后台应用失败，配置仍已保存" };
+  });
+  await reopenSettings(page);
+  await expect(page.getByText("CodeyX 设置已保存；测试：后台应用失败，配置仍已保存", { exact: true })).toBeVisible();
+  await expect(toggle).toBeChecked();
+  await toggle.press("Space");
+  await expect(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
+  expect(await storedConfig(page)).toEqual({ ...before, revision: before.revision + 2 });
+  expect(await page.evaluate(() => window.settingsBehavior.saves.length)).toBe(2);
+});
+
+test("后台应用完成后更新需重启提示", async ({ page }) => {
+  const toggle = await openSettings(page, "background");
+  await toggle.press("Space");
+  await page.getByRole("button", { name: "保存更改", exact: true }).click();
+  await expect(page.getByText("CodeyX 设置已保存，正在后台应用，可继续修改", { exact: true })).toBeVisible();
+  await page.evaluate(() => {
+    window.settingsBehavior.application = { ...window.settingsBehavior.application, phase: "restart_required", restartRequired: true };
+  });
+  await expect(page.getByText("CodeyX 设置已保存，启动参数将在重启 Codex 后生效", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeDisabled();
 });

@@ -54,7 +54,9 @@ export function useNotificationsController({ active, config, isBusy, onSaved, se
       const result = await notificationRequests.save({ ...base, webhook: { ...base.webhook, channels } });
       if (!current()) { reconcile.current = { submitted: base }; return false; }
       if (!adopt(result, base)) return false;
-      setNotice({ tone: "success", text: successText });
+      setNotice(result.configApply
+        ? { tone: "info", text: "通知设置已保存，正在后台应用" }
+        : { tone: "success", text: successText });
       return true;
     } catch (cause) {
       if (current()) setNotice({ tone: "error", text: errorText(cause) });

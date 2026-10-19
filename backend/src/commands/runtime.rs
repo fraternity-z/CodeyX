@@ -145,6 +145,8 @@ pub(super) async fn runtime_status_with_options(
         .trace_log_write_protection_active
         .load(Ordering::Acquire);
     drop(config);
+    let (config_apply, restart_required) =
+        super::config_apply::runtime_status(state, runtime.is_some(), restart_required);
     let notification_watcher_active = runtime.is_some()
         && state
             .waiting_watcher_task
@@ -167,6 +169,7 @@ pub(super) async fn runtime_status_with_options(
         "officialAccountAvailable": official_account_available,
         "officialAccountStatus": official_account_status,
         "restartRequired": restart_required,
+        "configApply": config_apply,
         "remoteCompaction": remote_compaction,
         "restartInProgress": state.restart_in_progress.load(Ordering::Acquire),
     });

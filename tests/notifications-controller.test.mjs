@@ -101,6 +101,19 @@ test("渠道更新固定身份，删除确认使用最新配置且失败保留�
   assert.equal(h.owner.render().dirty, false); h.unmount();
 });
 
+test("通知保存返回后台应用状态时释放表单，不提前宣称通知已生效", async t => {
+  installControllerWindow(t);
+  const h = notifications();
+  const work = h.render().addNotificationChannel(channel());
+  h.calls[0].resolve({ config: { ...h.calls[0].args.config, settingsRevision: 2 },
+    configApply: { settingsRevision: 2, phase: "pending" } });
+  assert.equal(await work, true);
+  assert.equal(h.busy, null);
+  assert.equal(h.owner.render().dirty, false);
+  assert.deepEqual(h.notices.at(-1), { tone: "info", text: "通知设置已保存，正在后台应用" });
+  h.unmount();
+});
+
 test("无效、重复、超限和缺失渠道不提交，隐藏及忙碌时不执行动作", async t => {
   installControllerWindow(t);
   for (const mode of ["hidden", "busy", "duplicate", "limit", "invalid"]) {

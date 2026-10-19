@@ -127,7 +127,7 @@ export function useBackupController({ active, isBusy, dirty, remote = false, set
           setPreview(null);
           if (!onSaved(result)) { refreshConfig.current = true; await reload(); }
           const warnings = [result.warning, result.modelHotReloadError, result.subagentConfigHotReloadError, result.routeRequestLogHotReloadError].filter(Boolean);
-          setNotice(`配置已恢复${result.restartRequired ? "，请重启 Codex 使启动设置生效" : ""}。恢复前备份：${result.recoveryPath}${warnings.length ? `；${warnings.join("；")}` : ""}`);
+          setNotice(`配置已恢复${result.configApply ? "，正在后台应用" : result.restartRequired ? "，请重启 Codex 使启动设置生效" : ""}。恢复前备份：${result.recoveryPath}${warnings.length ? `；${warnings.join("；")}` : ""}`);
         } catch (cause) {
           refreshConfig.current = true;
           if (current()) setPreview(null);

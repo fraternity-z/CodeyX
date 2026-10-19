@@ -12,6 +12,7 @@ use std::time::Duration;
 mod backup;
 mod builtin_tools;
 mod codex_app;
+mod config_apply;
 mod config_repair;
 mod conversation_git;
 mod diagnostics;
@@ -32,6 +33,9 @@ mod wechat_claw;
 use codex_app::{select_codex_app_directory, validate_codex_app_path};
 #[cfg(windows)]
 use codey_runtime_core::app_paths::{build_codex_executable, resolve_codex_app_dir_with_saved};
+use config_apply::finish_codey_config_save;
+#[cfg(test)]
+use config_apply::finish_committed_config_save;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, Notify, RwLock, oneshot, watch};
@@ -124,6 +128,7 @@ pub struct AppState {
     pub store: ConfigStore,
     pub config: RwLock<CodeyConfig>,
     config_write_lock: Mutex<()>,
+    config_apply: BlockingMutex<config_apply::ConfigApplyQueue>,
     provider_model_sync_lock: Mutex<()>,
     plugin_route_reload_lock: Mutex<()>,
     model_delivery_lock: Mutex<()>,
@@ -263,6 +268,7 @@ impl Default for AppState {
             store,
             config: RwLock::new(config),
             config_write_lock: Mutex::new(()),
+            config_apply: BlockingMutex::new(config_apply::ConfigApplyQueue::default()),
             provider_model_sync_lock: Mutex::new(()),
             plugin_route_reload_lock: Mutex::new(()),
             model_delivery_lock: Mutex::new(()),
@@ -2175,75 +2181,6 @@ async fn rollback_trace_log_guard(
             format!("{primary_error}；回滚 Trace 日志保护也失败：{rollback_error}")
         }
     }
-}
-
-async fn finish_codey_config_save(
-    state: &Arc<AppState>,
-    saved: SavedCodeyConfig,
-) -> Result<Value, String> {
-    let model_state = current_model_state_async(&saved.config).await;
-    let provider_status = current_provider_status_async(&saved.config).await;
-    Ok(finish_committed_config_save(state, saved, model_state, provider_status).await)
-}
-
-// 提交之后的状态查询失败只降低响应完整性，不再改变已保存结果。
-async fn finish_committed_config_save(
-    state: &Arc<AppState>,
-    saved: SavedCodeyConfig,
-    model_state: Result<model_catalog::ModelSelectionState, String>,
-    provider_status: Result<codex_provider::ProviderStatus, String>,
-) -> Value {
-    sync_waiting_webhook_watcher(state).await;
-    sync_wechat_claw_service(state).await;
-    if let Some(runtime) = state.runtime.lock().await.clone() {
-        runtime.set_crashpad_pending_protection(saved.config.protect_crashpad_pending);
-    }
-    schedule_crashpad_pending_refresh(state, saved.config.protect_crashpad_pending);
-    let model_hot_reload = hot_reload_runtime_models(state).await;
-    let route_request_log_hot_reload = hot_reload_runtime_request_log(state, &saved.config).await;
-    let subagent_hot_reload = if saved.reconcile_subagent_config {
-        hot_reload_runtime_subagent_config(state, &saved.config).await
-    } else {
-        SubagentHotReloadOutcome::default()
-    };
-    let restart_required = subagent_hot_reload.requires_restart()
-        || runtime_config_requires_restart(state, &saved.config).await;
-    let subagent_config_hot_reloaded = subagent_hot_reload.reloaded();
-    let subagent_config_repaired = subagent_hot_reload.repaired();
-    let subagent_config_health = subagent_hot_reload.health();
-    let subagent_config_repair_reasons = subagent_hot_reload.repair_reasons();
-    let subagent_config_hot_reload_error = subagent_hot_reload.error();
-    let warnings = [
-        model_state
-            .as_ref()
-            .err()
-            .map(|error| format!("模型状态未刷新：{error}")),
-        provider_status
-            .as_ref()
-            .err()
-            .map(|error| format!("当前线路状态未刷新：{error}")),
-    ]
-    .into_iter()
-    .flatten()
-    .collect::<Vec<_>>();
-    let public_config = redacted_config(&saved.config);
-    model_hot_reload.add_to_response(json!({
-        "status":"ok",
-        "config":public_config,
-        "providerStatus":provider_status.ok(),
-        "modelState":model_state.ok(),
-        "warning": if warnings.is_empty() { None } else { Some(warnings.join("；")) },
-        "fastContextToolsStatus":saved.fast_context_tools_status,
-        "restartRequired":restart_required,
-        "routeRequestLogHotReloaded":route_request_log_hot_reload.reloaded(),
-        "routeRequestLogHealth":route_request_log_hot_reload.health(),
-        "routeRequestLogHotReloadError":route_request_log_hot_reload.error(),
-        "subagentConfigHotReloaded":subagent_config_hot_reloaded,
-        "subagentConfigRepaired":subagent_config_repaired,
-        "subagentConfigHealth":subagent_config_health,
-        "subagentConfigRepairReasons":subagent_config_repair_reasons,
-        "subagentConfigHotReloadError":subagent_config_hot_reload_error,
-    }))
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

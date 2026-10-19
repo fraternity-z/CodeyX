@@ -1,4 +1,4 @@
-import type { ConfigSaveResult, FastContextToolsStatus, Notice, RuntimeStatus } from "../../App.types";
+import type { ConfigApplyResult, ConfigApplyStatus, ConfigSaveResult, FastContextToolsStatus, Notice, RuntimeStatus } from "../../App.types";
 import { subagentUpdateNote } from "../../modelSelectionNotice";
 import type { ConfigLoadResult } from "./types";
 
@@ -11,12 +11,25 @@ export function configLoadNotice(result: ConfigLoadResult, status: RuntimeStatus
   const startupError = status?.startupError || result.startupError;
   const errors = [startupError && `自动启动失败：${startupError}`, result.configLoadError].filter(Boolean);
   if (errors.length > 0) return { tone: "error", text: errors.join("；") };
+  if (status?.configApply && status.configApply.settingsRevision >= result.config.settingsRevision) return configApplyNotice(status.configApply);
   if (status?.restartRequired) return { tone: "info", text: "已保存的配置需重启 Codex 后生效" };
   if (status && !status.running) return { tone: "info", text: "CodeyX 运行时已就绪" };
   return null;
 }
 
-export function configSaveNotice(result: ConfigSaveResult, retryCountChanged: boolean): Notice {
+export function configApplyNotice(status: ConfigApplyStatus): Notice {
+  if (status.phase === "pending" || status.phase === "applying") {
+    return { tone: "info", text: "CodeyX 设置已保存，正在后台应用，可继续修改" };
+  }
+  if (status.applyError) return { tone: "error", text: `CodeyX 设置已保存；${status.applyError}` };
+  const notice = configSaveNotice(status, false);
+  if (status.phase === "failed") return { ...notice, tone: "error" };
+  if (status.phase === "applied" && notice.text === "CodeyX 设置已保存") return { ...notice, text: "CodeyX 设置已保存并应用" };
+  return notice;
+}
+
+export function configSaveNotice(result: ConfigApplyResult & Pick<Partial<ConfigSaveResult>, "configApply">, retryCountChanged: boolean): Notice {
+  if (result.configApply) return configApplyNotice(result.configApply);
   const subagentNote = subagentUpdateNote(result);
   const requestLogHealth = result.routeRequestLogHealth;
   const restartSuffix = result.restartRequired ? "；其他启动参数将在重启 Codex 后生效" : "";

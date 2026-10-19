@@ -13,6 +13,10 @@ export function hasPendingBuiltinInjection(status: RuntimeStatus): boolean {
   ) ?? false;
 }
 
+export function hasPendingConfigApply(status: RuntimeStatus): boolean {
+  return status.configApply?.phase === "pending" || status.configApply?.phase === "applying";
+}
+
 export function createStatusPollTask(
   task: Omit<StatusPollTask, "deadline" | "delayIndex" | "errors" | "nextAt">,
   duration: number,
@@ -64,6 +68,12 @@ export function reconcileRuntimeStatus(
   if (valuesEqual(current, next)) return current;
 
   const reconciled = { ...next };
+  if (current.configApply && (!next.configApply || next.configApply.settingsRevision < current.configApply.settingsRevision
+    || (next.configApply.settingsRevision === current.configApply.settingsRevision
+      && !hasPendingConfigApply(current) && hasPendingConfigApply(next)))) {
+    reconciled.configApply = current.configApply;
+    reconciled.restartRequired = current.restartRequired;
+  }
   if (next.maintenance !== undefined) {
     reconciled.maintenance = reuseEqualValue(
       current.maintenance,

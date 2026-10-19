@@ -282,3 +282,40 @@ test("旧 hook 入口保持兼容，功能公开入口不暴露内部调度或�
   assert.equal(typeof legacy.exports.useRuntimeStatus, "function");
   assert.equal(legacy.exports.SETTINGS_OPENED_EVENT, state.SETTINGS_OPENED_EVENT);
 });
+
+test("后台配置应用复用状态轮询，旧读取不会提前结束，新版本完成后停止", async t => {
+  const h = fixture(t); await h.settle();
+  const application = { settingsRevision: 2, phase: "pending" };
+  h.render().setStatus({ running: true, configApply: application, restartRequired: false }); h.render();
+  await h.advance(500);
+  await h.settle({ running: true, configApply: { settingsRevision: 1, phase: "restart_required" }, restartRequired: true });
+  assert.deepEqual(h.render().status.configApply, application);
+  assert.equal(h.render().status.restartRequired, false);
+  await h.advance(1_000);
+  assert.equal(h.requests.length, 3);
+  await h.settle({ running: true, configApply: { settingsRevision: 2, phase: "applying" } });
+  h.render({ active: false }); assert.equal(h.timers.size, 0);
+  h.render({ active: true });
+  await h.settle({ running: true, configApply: { settingsRevision: 2, phase: "failed", applyError: "测试" } });
+  assert.equal(h.timers.size, 0);
+  assert.equal(h.render().status.configApply.phase, "failed");
+});
+
+test("配置状态不接受同版本倒退，轮询失败有界并保留已保存状态", async t => {
+  const settled = { running: true, configApply: { settingsRevision: 2, phase: "applied" } };
+  assert.deepEqual(state.reconcileRuntimeStatus(settled, { running: true, configApply: { settingsRevision: 2, phase: "pending" } }).configApply, settled.configApply);
+  const h = fixture(t);
+  await h.settle({ running: true, configApply: { settingsRevision: 3, phase: "pending" } });
+  for (const delay of [500, 1_000, 2_000, 2_000, 2_000]) {
+    await h.advance(delay); h.requests.at(-1).reject(new Error("offline")); await h.flush();
+  }
+  assert.match(h.render().restartStatusError, /配置已保存.*无法确认/);
+  assert.equal(h.render().status.configApply.settingsRevision, 3);
+  assert.equal(h.timers.size, 0);
+  const retry = h.render().refreshStatus();
+  await h.settle({ running: true, configApply: { settingsRevision: 3, phase: "applying" } }); await retry;
+  assert.equal(h.render().restartStatusError, null);
+  await h.advance(500);
+  await h.settle({ running: true, configApply: { settingsRevision: 3, phase: "applied" } });
+  assert.equal(h.timers.size, 0);
+});

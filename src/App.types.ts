@@ -158,8 +158,7 @@ export type FastContextToolsStatus = {
   serverId?: string;
 };
 
-export type ConfigSaveResult = {
-  config: Config;
+export type ConfigApplyResult = {
   warning?: string;
   providerStatus?: ProviderStatus;
   modelState?: ModelState;
@@ -175,6 +174,17 @@ export type ConfigSaveResult = {
   subagentConfigRepairReasons?: string[];
   subagentConfigHotReloadError?: string;
   fastContextToolsStatus?: FastContextToolsStatus;
+};
+
+export type ConfigApplyStatus = ConfigApplyResult & {
+  settingsRevision: number;
+  phase: "pending" | "applying" | "applied" | "failed" | "restart_required";
+  applyError?: string;
+};
+
+export type ConfigSaveResult = ConfigApplyResult & {
+  config: Config;
+  configApply?: ConfigApplyStatus | null;
 };
 
 export type Maintenance = {
@@ -232,6 +242,7 @@ export type OfficialAccountsResult = {
 
 export type RuntimeStatus = {
   running: boolean;
+  configApply?: ConfigApplyStatus | null;
   remoteCompaction?: {
     configured: boolean;
     active: boolean | null;

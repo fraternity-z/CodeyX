@@ -231,6 +231,7 @@ export function App({
   });
   const configuration = useConfigurationController({
     active: !embedded || modalVisible,
+    status,
     config, isBusy, persistedConfigRef, adoptRouteConfig, adoptSavedConfig, setDirty,
     setBusy, setNotice, setProviderStatus, setModelState, setStatus,
     refreshStatus, refreshStatusForLoad, refreshPluginMarketplaceStatus,

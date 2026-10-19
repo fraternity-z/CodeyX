@@ -4,7 +4,7 @@ import { errorText } from "../../appUtils";
 import type { useDraftConfig } from "../../useDraftConfig";
 import { useStableEvent } from "../../useStableEvent";
 import { configurationRequests } from "./requests";
-import { configLoadNotice, configSaveNotice, UNKNOWN_FAST_CONTEXT_TOOLS_STATUS } from "./state";
+import { configApplyNotice, configLoadNotice, configSaveNotice, UNKNOWN_FAST_CONTEXT_TOOLS_STATUS } from "./state";
 import { validateSubagents } from "../subagents";
 import type { ConfigLoadResult } from "./types";
 
@@ -14,6 +14,7 @@ type Options = Pick<ReturnType<typeof useDraftConfig>,
   "config" | "persistedConfigRef" | "adoptRouteConfig" | "adoptSavedConfig" | "setDirty"
 > & {
   active: boolean;
+  status: RuntimeStatus;
   isBusy: boolean;
   setBusy: Dispatch<SetStateAction<string | null>>;
   setNotice: (notice: Notice) => void;
@@ -25,7 +26,7 @@ type Options = Pick<ReturnType<typeof useDraftConfig>,
   refreshPluginMarketplaceStatus: (isCurrent: () => boolean) => Promise<void>;
 };
 
-export function useConfigurationController({ active, config, isBusy, persistedConfigRef,
+export function useConfigurationController({ active, status, config, isBusy, persistedConfigRef,
   adoptRouteConfig, adoptSavedConfig, setDirty, setBusy, setNotice, setProviderStatus,
   setModelState, setStatus, refreshStatus, refreshStatusForLoad, refreshPluginMarketplaceStatus,
 }: Options) {
@@ -40,6 +41,7 @@ export function useConfigurationController({ active, config, isBusy, persistedCo
   const pending = useRef(false);
   const reconcile = useRef<{ submitted?: Config } | null>(null);
   const refreshPending = useRef(false);
+  const observedApply = useRef("");
 
   const invalidateReads = useCallback(() => {
     readGeneration.current++;
@@ -113,6 +115,21 @@ export function useConfigurationController({ active, config, isBusy, persistedCo
     if (active && (!loaded.current || reconcile.current || refreshPending.current)) void load();
   }, [active, revision, load]);
 
+  useEffect(() => {
+    const application = status.configApply;
+    if (!active || !application || pending.current || !persistedConfigRef.current
+      || application.settingsRevision < persistedConfigRef.current.settingsRevision) return;
+    const key = `${application.settingsRevision}:${application.phase}`;
+    if (observedApply.current === key) return;
+    observedApply.current = key;
+    if (application.phase === "pending" || application.phase === "applying") return;
+    if (application.settingsRevision === persistedConfigRef.current.settingsRevision) {
+      if (application.providerStatus) setProviderStatus(application.providerStatus);
+      if (application.modelState) setModelState(application.modelState);
+    }
+    setNotice(configApplyNotice(application));
+  }, [active, status.configApply, config, persistedConfigRef, setProviderStatus, setModelState, setNotice]);
+
   const applySavedConfig = useStableEvent((result: ConfigSaveResult, submitted?: Config) => {
     if (!mounted.current || !active || !session.current) return false;
     const merged = submitted ? adoptSavedConfig(result.config, submitted) : adoptRouteConfig(result.config);
@@ -126,7 +143,11 @@ export function useConfigurationController({ active, config, isBusy, persistedCo
     if (typeof result.restartRequired === "boolean") {
       setStatus(previous => ({ ...previous, restartRequired: result.restartRequired }));
     }
-    // 保存结果已包含配置、模型和重启状态；其余运行状态在后台补充。
+    if (result.configApply) {
+      const application = result.configApply;
+      setStatus(previous => ({ ...previous, configApply: application, restartRequired: application.restartRequired ?? false }));
+    }
+    // 保存先确认持久化，应用进度沿用运行状态轮询。
     void refreshStatus().catch(() => undefined);
     return true;
   });
