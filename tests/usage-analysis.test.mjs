@@ -137,6 +137,67 @@ const panelStats = {
 };
 
 const uiStubs = autoStubModule("ui");
+const heatmapGraph = createModuleGraph(new URL("../src/features/usage-analysis/UsageHeatmap.tsx", import.meta.url), {
+  stubs: { "../../components/ui": uiStubs },
+});
+const withClass = (tree, name) => collectElements(tree, (element) => elementProps(element).className?.split(" ").includes(name));
+
+test("近7天、近30天和全年统一按周排列，日期与月份按UTC对齐", () => {
+  for (const days of [7, 30, 366]) {
+    heatmapGraph.reset();
+    const fromUnixMs = Date.UTC(2024, 0, 1);
+    const tree = heatmapGraph.exports.UsageHeatmap({ stats: {
+      fromUnixMs, toUnixMs: fromUnixMs + days * 86400000, dailyTrend: [],
+    } });
+    assert.equal(withClass(tree, "usage-heatmap-calendar").length, 1);
+    assert.equal(withClass(tree, "usage-heatmap-compact").length, 0);
+    assert.equal(withClass(tree, "usage-heatmap-spacer").length, 1, "周一放在第二行，首格为周日占位");
+    assert.equal(elementProps(withClass(tree, "usage-heatmap-days")[0]).style.gridTemplateColumns, `repeat(${Math.ceil((days + 1) / 7)}, 12px)`);
+    const cells = withClass(tree, "usage-heatmap-cell");
+    assert.equal(cells.length, days, "范围外的日期只占位，不伪造用量按钮");
+    assert.match(elementProps(cells[0])["aria-label"], /^2024-01-01 UTC/);
+    assert.equal(textContent(cells[0]), "", "格子不再显示单行模式的日期数字");
+    const months = withClass(tree, "usage-heatmap-month");
+    assert.equal(textContent(months[0]), "1月");
+    if (days === 366) {
+      assert.equal(months.length, 12);
+      assert.equal(elementProps(months[1]).style.left, "64px", "2月与其首日所在周对齐");
+    }
+  }
+});
+
+test("短区间跨月时月份标签不会挤在同一周，周日起始无需占位", () => {
+  heatmapGraph.reset();
+  const tree = heatmapGraph.exports.UsageHeatmap({ stats: {
+    fromUnixMs: Date.UTC(2024, 0, 31), toUnixMs: Date.UTC(2024, 1, 7), dailyTrend: [],
+  } });
+  assert.deepEqual(withClass(tree, "usage-heatmap-month").map(textContent), ["2月"]);
+  assert.equal(elementProps(withClass(tree, "usage-heatmap-month")[0]).style.left, "0px");
+  const sunday = heatmapGraph.exports.UsageHeatmap({ stats: {
+    fromUnixMs: Date.UTC(2024, 1, 4), toUnixMs: Date.UTC(2024, 1, 5), dailyTrend: [],
+  } });
+  assert.equal(withClass(sunday, "usage-heatmap-spacer").length, 0);
+});
+
+test("日历方向键按周移动并限制首尾，点击仍可保留每日用量", () => {
+  heatmapGraph.reset();
+  const stats = { fromUnixMs: Date.UTC(2024, 0, 1), toUnixMs: Date.UTC(2024, 1, 1), dailyTrend: [] };
+  const render = () => { heatmapGraph.restart(); return heatmapGraph.exports.UsageHeatmap({ stats }); };
+  let tree = render();
+  for (const [key, index] of [["ArrowRight", 7], ["ArrowDown", 8], ["ArrowLeft", 1], ["ArrowUp", 0], ["ArrowLeft", 0], ["End", 30], ["ArrowRight", 30], ["Home", 0]]) {
+    let prevented = false;
+    elementProps(withClass(tree, "usage-heatmap-days")[0]).onKeyDown({ key, preventDefault() { prevented = true; } });
+    tree = render();
+    assert.ok(prevented);
+    assert.equal(elementProps(withClass(tree, "usage-heatmap-cell")[index]).excludeFromTabOrder, false);
+  }
+  elementProps(withClass(tree, "usage-heatmap-cell")[2]).onPress();
+  tree = render();
+  assert.match(textContent(withClass(tree, "usage-heatmap-selection")[0]), /^2024-01-03 UTC/);
+  const unavailable = heatmapGraph.exports.UsageHeatmap({ stats: { ...stats, dailyTrend: undefined } });
+  assert.match(textContent(unavailable), /暂无每日数据/);
+});
+
 const panelGraph = createModuleGraph(new URL("../src/UsageAnalysisPanel.tsx", import.meta.url), {
   autoStub: true,
   stubs: {

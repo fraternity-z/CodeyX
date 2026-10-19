@@ -40,6 +40,46 @@ async function changeRange(page, label) {
   await page.getByRole("option", { name: label, exact: true }).click();
 }
 
+for (const theme of ["light", "dark"]) test(`日历热力图在${theme}主题下保持七行，支持键盘、年份和窄屏滚动`, async ({ page }) => {
+  await page.setViewportSize({ width: 1120, height: 900 });
+  await page.goto(`/codey/tests/ui-browser.html?view=usage&state=calendar&theme=${theme}`);
+  const cells = page.locator(".usage-heatmap-cell");
+  const rows = () => cells.evaluateAll(elements => new Set(elements.map(element => Math.round(element.getBoundingClientRect().y))).size);
+  await expect(cells).toHaveCount(8);
+  expect(await rows()).toBe(7);
+  await expect(page.locator(".usage-heatmap-month").first()).toBeVisible();
+  await changeRange(page, "近 30 天");
+  await expect(cells).toHaveCount(31);
+  expect(await rows()).toBe(7);
+  await cells.first().focus();
+  await cells.first().press("ArrowRight");
+  await expect(cells.nth(7)).toBeFocused();
+  await cells.nth(7).press("ArrowDown");
+  await expect(cells.nth(8)).toBeFocused();
+  await cells.nth(8).press("Enter");
+  await expect(cells.nth(8)).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".usage-heatmap-selection")).toContainText("UTC");
+  await changeRange(page, "全部历史");
+  const year = page.getByRole("button", { name: /热力图年份/ });
+  await year.click();
+  await page.getByRole("option").nth(1).click();
+  await expect.poll(() => cells.count()).toBeGreaterThanOrEqual(365);
+  expect(await rows()).toBe(7);
+  expect(await page.locator(".usage-heatmap-scroll").evaluate(element => element.scrollWidth <= element.clientWidth)).toBe(true);
+  await page.mouse.move(0, 0);
+  await expect(page.getByRole("tooltip")).toHaveCount(0);
+  await page.locator(".usage-heatmap").screenshot({ path: `output/playwright/usage-heatmap-${theme}.png` });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await rows()).toBe(7);
+  const scroll = page.locator(".usage-heatmap-scroll");
+  await scroll.scrollIntoViewIfNeeded();
+  expect(await scroll.evaluate(element => element.scrollWidth > element.clientWidth)).toBe(true);
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true);
+  await scroll.evaluate(element => { element.scrollLeft = element.scrollWidth; });
+  await expect(cells.last()).toBeInViewport();
+  await page.locator(".usage-heatmap").screenshot({ path: `output/playwright/usage-heatmap-${theme}-narrow.png` });
+});
+
 test("范围切换忽略旧结果，失败可重试，刷新与图表接线保持正常", async ({ page }) => {
   await openUsage(page);
   await expect(page.getByRole("heading", { name: "用量分析", exact: true })).toBeFocused();

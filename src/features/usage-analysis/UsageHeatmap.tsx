@@ -11,29 +11,31 @@ export function UsageHeatmap({ stats }: { stats: LogAnalytics }) {
   const [focusIndex, setFocusIndex] = useState(0);
   const grid = useRef<HTMLDivElement>(null);
   const map = usageHeatmap(stats, selectedYear);
-  const compact = map.days.length <= 35;
-  const offset = map.days.length ? (new Date(map.days[0].timestampUnixMs).getUTCDay() + 6) % 7 : 0;
+  const offset = map.days.length ? new Date(map.days[0].timestampUnixMs).getUTCDay() : 0;
+  const months = map.days.flatMap((day, index) => {
+    const date = new Date(day.timestampUnixMs);
+    return index === 0 || date.getUTCDate() === 1 ? [{ label: `${date.getUTCMonth() + 1}月`, column: Math.floor((offset + index) / 7) }] : [];
+  }).filter((month, index, labels) => index === labels.length - 1 || labels[index + 1].column - month.column > 1);
   const describe = (day: typeof map.days[number]) => `${dateLabel(day.timestampUnixMs)} UTC · ${day.total === 0 ? "无请求" : `${formatUsageNumber(day.totalTokensSum)} Token · ${formatUsageNumber(day.total)} 次请求${day.totalTokensKnownCount < day.total ? ` · ${formatUsageNumber(day.total - day.totalTokensKnownCount)} 次未上报` : ""}`}${day.partial ? " · 仅含所选时间范围" : ""}`;
   const selected = map.days.find((day) => day.timestampUnixMs === selectedDay);
   if (!map.available) return <p className="usage-scope">暂无每日数据，请刷新或切换到直方图查看趋势。</p>;
   return <div className="usage-heatmap">
     <div className="usage-heatmap-heading"><span>每日用量 <small>UTC · 颜色越深，用量越高</small></span>{map.years.length > 1 && <Select className="usage-heatmap-year" aria-label="热力图年份" value={map.year} optionList={map.years.map((year) => ({ value: year, label: `${year} 年` }))} onChange={(year) => { setSelectedYear(Number(year)); setSelectedDay(undefined); }} />}</div>
-    <div className="usage-heatmap-scroll" tabIndex={compact ? undefined : 0} aria-label={compact ? undefined : "每日用量日历，可横向滚动"}>
-      <div className={compact ? "usage-heatmap-compact" : "usage-heatmap-calendar"}>
-        {!compact && <div className="usage-heatmap-weekdays" aria-hidden="true">{["一", "", "三", "", "五", "", "日"].map((label, index) => <span key={index}>{label}</span>)}</div>}
-        <div ref={grid} className="usage-heatmap-days" style={compact ? undefined : { gridTemplateColumns: `repeat(${Math.ceil((offset + map.days.length) / 7)}, 14px)` }} onKeyDown={(event) => {
-          const step = event.key === "ArrowRight" ? (compact ? 1 : 7) : event.key === "ArrowLeft" ? (compact ? -1 : -7) : event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    <div className="usage-heatmap-scroll" tabIndex={0} aria-label="每日用量日历，可横向滚动">
+      <div className="usage-heatmap-calendar">
+        <div className="usage-heatmap-weekdays" aria-hidden="true">{["", "一", "", "三", "", "五", ""].map((label, index) => <span key={index}>{label}</span>)}</div>
+        <div ref={grid} className="usage-heatmap-days" style={{ gridTemplateColumns: `repeat(${Math.ceil((offset + map.days.length) / 7)}, 12px)` }} onKeyDown={(event) => {
+          const step = event.key === "ArrowRight" ? 7 : event.key === "ArrowLeft" ? -7 : event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
           if (!step && event.key !== "Home" && event.key !== "End") return;
           event.preventDefault();
           const next = event.key === "Home" ? 0 : event.key === "End" ? map.days.length - 1 : Math.max(0, Math.min(map.days.length - 1, focusIndex + step));
           setFocusIndex(next);
           grid.current?.querySelectorAll<HTMLButtonElement>(".usage-heatmap-cell")[next]?.focus();
         }}>
-          {!compact && Array.from({ length: offset }, (_, index) => <span className="usage-heatmap-spacer" key={`empty-${index}`} />)}
+          {months.map((month, index) => <span className="usage-heatmap-month" aria-hidden="true" key={index} style={{ left: `${month.column * 16}px` }}>{month.label}</span>)}
+          {Array.from({ length: offset }, (_, index) => <span className="usage-heatmap-spacer" aria-hidden="true" key={`empty-${index}`} />)}
           {map.days.map((day, index) => <div className="usage-heatmap-day" key={day.timestampUnixMs}>
-            {!compact && (new Date(day.timestampUnixMs).getUTCDate() === 1 || index === 0) && <span className="usage-heatmap-month" aria-hidden="true" style={{ top: `${-24 - (index + offset) % 7 * 19}px` }}>{new Date(day.timestampUnixMs).getUTCMonth() + 1}月</span>}
-            <Tooltip delay={100} content={<span>{describe(day)}</span>}><Button variant="ghost" className={`usage-heatmap-cell usage-heat-${day.level}`} aria-label={describe(day)} aria-pressed={selectedDay === day.timestampUnixMs} excludeFromTabOrder={index !== Math.min(focusIndex, map.days.length - 1)} onFocus={() => setFocusIndex(index)} onPress={() => setSelectedDay(day.timestampUnixMs)}>{compact ? <span aria-hidden="true">{new Date(day.timestampUnixMs).getUTCDate()}</span> : null}</Button></Tooltip>
-            {compact && <span className="usage-heatmap-date" aria-hidden="true">{new Date(day.timestampUnixMs).getUTCMonth() + 1}/{new Date(day.timestampUnixMs).getUTCDate()}</span>}
+            <Tooltip delay={100} content={<span>{describe(day)}</span>}><Button variant="ghost" className={`usage-heatmap-cell usage-heat-${day.level}`} aria-label={describe(day)} aria-pressed={selectedDay === day.timestampUnixMs} excludeFromTabOrder={index !== Math.min(focusIndex, map.days.length - 1)} onFocus={() => setFocusIndex(index)} onPress={() => setSelectedDay(day.timestampUnixMs)} /></Tooltip>
           </div>)}
         </div>
       </div>
