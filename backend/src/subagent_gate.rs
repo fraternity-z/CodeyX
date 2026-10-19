@@ -262,7 +262,7 @@ pub(crate) fn hook_commands_for(argument: &str) -> Result<HookCommands> {
     })
 }
 
-#[cfg(any(windows, target_os = "linux", test))]
+#[cfg(any(windows, target_os = "linux"))]
 pub(crate) fn windows_posix_hook_command(executable: &Path, argument: &str) -> String {
     wsl_hook_command(&format!("{} {argument}", quote_posix(executable)), argument)
 }
