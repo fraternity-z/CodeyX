@@ -20,9 +20,9 @@ const SETTINGS_PAGES = [
   { id: "network", title: "网络代理", icon: IconNetwork, group: "核心配置" },
   { id: "prompt", title: "提示词优化", icon: IconSparkles, group: "核心配置" },
   { id: "subagents", title: "子代理优化", icon: IconUsersGroup, group: "核心配置" },
-  { id: "remote", title: "远程控制", icon: IconDeviceMobile, group: "核心配置" },
-  { id: "sessions", title: "会话管理", icon: IconMessages, group: "核心配置" },
-  { id: "backup", title: "备份与恢复", icon: IconDatabaseExport, group: "核心配置" },
+  { id: "remote", title: "远程控制", icon: IconDeviceMobile, group: "运行管理" },
+  { id: "sessions", title: "会话管理", icon: IconMessages, group: "运行管理" },
+  { id: "backup", title: "备份与恢复", icon: IconDatabaseExport, group: "运行管理" },
   { id: "tools", title: "内置工具", icon: IconTools, group: "扩展生态" },
   { id: "plugins", title: "CodeyX 插件", icon: IconPlugConnected, group: "扩展生态" },
   { id: "mcp", title: "MCP 管理", icon: IconServer, group: "扩展生态" },
@@ -51,54 +51,32 @@ export function SettingsLayout({ hidden = false, sections, sidebarFooter, conten
     setActivePage(page);
   }
 
-  const corePages = SETTINGS_PAGES.filter((p) => p.group === "核心配置");
-  const extensionPages = SETTINGS_PAGES.filter((p) => p.group === "扩展生态");
-
   return (
     <div className="settings-layout" hidden={hidden}>
       <nav className="settings-sidebar" aria-label="配置功能菜单">
         <div className="settings-sidebar-menu">
-        <div className="settings-nav-group">
-          <div className="settings-nav-group-title">核心配置</div>
-          {corePages.map((page) => {
-            const Icon = page.icon;
-            return (
-              <button
-                key={page.id}
-                id={`${id}-menu-${page.id}`}
-                type="button"
-                className="settings-nav-item"
-                aria-current={activePage === page.id ? "page" : undefined}
-                aria-controls={`${id}-page-${page.id}`}
-                onClick={() => selectPage(page.id)}
-              >
-                <Icon size={16} stroke={1.8} aria-hidden="true" />
-                <span>{page.title}</span>
-              </button>
-            );
-          })}
-        </div>
-
-        <div className="settings-nav-group">
-          <div className="settings-nav-group-title">扩展生态</div>
-          {extensionPages.map((page) => {
-            const Icon = page.icon;
-            return (
-              <button
-                key={page.id}
-                id={`${id}-menu-${page.id}`}
-                type="button"
-                className="settings-nav-item"
-                aria-current={activePage === page.id ? "page" : undefined}
-                aria-controls={`${id}-page-${page.id}`}
-                onClick={() => selectPage(page.id)}
-              >
-                <Icon size={16} stroke={1.8} aria-hidden="true" />
-                <span>{page.title}</span>
-              </button>
-            );
-          })}
-        </div>
+          {["核心配置", "运行管理", "扩展生态"].map((group) => (
+            <div className="settings-nav-group" key={group}>
+              <div className="settings-nav-group-title">{group}</div>
+              {SETTINGS_PAGES.filter((page) => page.group === group).map((page) => {
+                const Icon = page.icon;
+                return (
+                  <button
+                    key={page.id}
+                    id={`${id}-menu-${page.id}`}
+                    type="button"
+                    className="settings-nav-item"
+                    aria-current={activePage === page.id ? "page" : undefined}
+                    aria-controls={`${id}-page-${page.id}`}
+                    onClick={() => selectPage(page.id)}
+                  >
+                    <Icon size={16} stroke={1.8} aria-hidden="true" />
+                    <span>{page.title}</span>
+                  </button>
+                );
+              })}
+            </div>
+          ))}
         </div>
         {sidebarFooter && <div className="settings-sidebar-footer">{sidebarFooter}</div>}
       </nav>
