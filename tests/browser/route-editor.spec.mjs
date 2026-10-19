@@ -64,6 +64,31 @@ test("线路编辑校验聚焦、保存防重和失败保留草稿，成功关�
   await expect(shortName).toHaveValue("验");
 });
 
+test("New API 导入仅填充新增线路草稿，保留手填名称并经正常保存", async ({ page }) => {
+  await openRoutes(page);
+  await page.getByRole("button", { name: "新增线路", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "新增线路", exact: true });
+  await dialog.getByRole("textbox", { name: "线路名", exact: true }).fill("导入验证");
+  await dialog.getByRole("button", { name: "New API 快速导入", exact: true }).click();
+  const input = dialog.getByRole("textbox", { name: "New API 连接串", exact: true });
+  await input.fill("invalid");
+  await dialog.getByRole("button", { name: "填入线路", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("无法识别连接串");
+  await input.fill(JSON.stringify({ _type: "newapi_channel_conn", url: "https://api.example.com/v1", key: "fixture-import-key" }));
+  await dialog.getByRole("button", { name: "填入线路", exact: true }).click();
+  await expect(input).not.toBeVisible();
+  await expect(dialog.getByRole("textbox", { name: "线路名", exact: true })).toHaveValue("导入验证");
+  await expect(dialog.getByRole("textbox", { name: "URL", exact: true })).toHaveValue("https://api.example.com/v1");
+  await expect(dialog.locator("#route-key-input")).toHaveAttribute("type", "password");
+  await expect(dialog.locator("#route-key-input")).toHaveValue("fixture-import-key");
+  expect(await page.evaluate(() => window.routeEditorBehavior.saves)).toBe(0);
+  await dialog.getByRole("button", { name: "保存线路", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  expect(await page.evaluate(() => window.routeEditorBehavior.saves)).toBe(1);
+  await page.getByLabel("编辑线路 导入验证", { exact: true }).click();
+  await expect(page.getByRole("button", { name: "New API 快速导入", exact: true })).toHaveCount(0);
+});
+
 test("请求头编辑拒绝非法 JSON，保存空值删除标记并可重新读取", async ({ page }) => {
   const route = await openRoutes(page);
   await page.getByLabel(`编辑线路 ${route.name} 的请求头`, { exact: true }).click();

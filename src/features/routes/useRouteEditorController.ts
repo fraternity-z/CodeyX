@@ -10,6 +10,7 @@ import { useOperationScope } from "../../useOperationScope";
 import { useStableEvent } from "../../useStableEvent";
 import { accountForRoute, officialRouteModelDraft } from "./catalog";
 import { createRouteDraft, routeProtocolPatch, validateRouteDraft } from "./draft";
+import { importNewApiConnection } from "./connectionImport";
 import type { OfficialRouteDialogScope, RouteEditorActions } from "./types";
 
 type Options = RouteEditorActions & {
@@ -80,6 +81,14 @@ export function useRouteEditorController(options: Options) {
     if (!routeDraft) return;
     const patch = routeProtocolPatch(routeDraft, value);
     if (patch) updateRouteDraft(patch);
+  }
+  function importConnection(text: string): string | null {
+    if (!available() || !routeDraft || routeDraft.authMode === "officialAccount"
+      || config.profiles.some(profile => profile.id === routeDraft.id)) return "请在新增线路中导入连接串";
+    try {
+      updateRouteDraft(importNewApiConnection(text, routeDraft));
+      return null;
+    } catch (cause) { return errorText(cause); }
   }
   function updateOfficialRouteDraft(patch: Partial<OfficialRouteSettingsDraft>) {
     if (available()) setOfficialRouteDraft(current => current ? { ...current, ...patch } : current);
@@ -157,7 +166,7 @@ export function useRouteEditorController(options: Options) {
   return { routeDraft, routeDialogOpen: routeDraft !== null, routeValidationAttempted, routeDraftErrors, routeDraftHasErrors,
     officialRouteDraft, officialRouteDraftErrors, officialDialogScope, officialModelDraft, officialModelDraftKeys,
     officialModelContextDraft, draftOfficialAccount, headerDialogProfile, routeHeadersText, headerError, saving,
-    openNewRouteDialog, openRouteDialog, updateRouteDraft, changeProtocol, updateOfficialRouteDraft,
+    openNewRouteDialog, openRouteDialog, updateRouteDraft, changeProtocol, importConnection, updateOfficialRouteDraft,
     toggleOfficialModel, updateOfficialModelContext, openHeadersDialog, changeHeaders, saveHeaders, saveRouteDraft,
     closeRouteDialog: () => { if (!options.isBusy && !scope.pending) clearRoute(); },
     closeHeadersDialog: () => { if (!options.isBusy && !scope.pending) setHeaderDialogProfile(null); } };

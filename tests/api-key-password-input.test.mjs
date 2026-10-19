@@ -48,6 +48,7 @@ const modelSection = createModuleGraph(
       "./components/ModelCombobox": autoStubModule("combobox"),
       "./components/ModelSettingsFields": autoStubModule("model-settings"),
       "./components/ui": ui,
+      "../../components/ui": ui,
       "./OfficialAccountsPanel": autoStubModule("official-accounts"),
       "./overlayTheme": { readHostTheme: () => "light" },
       "./SettingsPageHeader": autoStubModule("settings-header"),

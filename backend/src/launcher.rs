@@ -2034,6 +2034,12 @@ impl CodeyRuntime {
         self.local_router.as_ref().map(LocalRouter::endpoint)
     }
 
+    pub(crate) fn conversation_stats_registry(
+        &self,
+    ) -> Option<Arc<crate::conversation_stats::ConversationStatsRegistry>> {
+        Some(self.local_router.as_ref()?.request_log.session_stats())
+    }
+
     pub async fn applied_subagent_config(&self) -> Arc<RuntimeSubagentConfig> {
         Arc::clone(&*self.applied_subagent_config.read().await)
     }

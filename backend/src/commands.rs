@@ -497,6 +497,7 @@ impl AppState {
                     Err(error) => api_error_message(error),
                 }
             }
+            "/session/stats" => sessions::stats(self, &payload).await,
             "/session/export/start" => {
                 let session_id = bridge_string(&payload, "sessionId");
                 let home = codex_home();

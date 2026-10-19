@@ -34,6 +34,30 @@ test("新线路校验先于写入，协议切换清理能力且未知协议不�
   assert.deepEqual(h.render().routeDraft, draft);
 });
 
+test("New API 导入只允许新建线路，失败保留草稿，填充后仍须显式保存", async t => {
+  const { h, options, writes } = setup(t);
+  const payload = JSON.stringify({ _type: "newapi_channel_conn", key: "fixture-key", url: "https://api.demo.test/v1" });
+  assert.ok(h.render().importConnection(payload));
+  h.render().openRouteDialog(route());
+  assert.ok(h.render().importConnection(payload));
+  h.render().closeRouteDialog();
+  h.render().openNewRouteDialog();
+  const draft = h.render().routeDraft;
+  assert.ok(h.render().importConnection("invalid"));
+  assert.deepEqual(h.render().routeDraft, draft);
+  assert.equal(h.render().importConnection(payload), null);
+  assert.equal(h.render().routeDraft.apiKey, "fixture-key");
+  assert.equal(h.render().routeDraft.shortName, "demo");
+  assert.equal(writes.length, 0);
+  h.render({ ...options, active: false });
+  assert.ok(h.render().importConnection(payload));
+  h.render(options);
+  const save = h.render().saveRouteDraft();
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].profile.baseUrl, "https://api.demo.test/v1");
+  writes[0].resolve(true); await save;
+});
+
 test("第三方保存合并请求头，重复提交与保存期间改稿被阻止，失败保留草稿", async t => {
   const { h, writes, notices } = setup(t);
   h.render().openRouteDialog(route());

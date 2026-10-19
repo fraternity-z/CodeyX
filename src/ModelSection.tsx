@@ -56,7 +56,7 @@ import {
   MAX_ROUTE_SHORT_NAME_CHARACTERS,
   prefixedRouteName,
 } from "./routeShortNames";
-import { accountForRoute as findRouteAccount, useRouteCatalogController, useRouteEditorController, useRoutePanelController, type RouteEditorActions } from "./features/routes";
+import { accountForRoute as findRouteAccount, NewApiImport, useRouteCatalogController, useRouteEditorController, useRoutePanelController, type RouteEditorActions } from "./features/routes";
 import { readHostTheme } from "./overlayTheme";
 import { getRouteCompactionStatus } from "./remoteCompactionStatus";
 
@@ -180,7 +180,7 @@ function ModelSectionComponent({
   const { routeDraft, routeDialogOpen, routeValidationAttempted, routeDraftErrors, routeDraftHasErrors,
     officialRouteDraft, officialRouteDraftErrors, officialDialogScope, officialModelDraft, officialModelDraftKeys,
     officialModelContextDraft, draftOfficialAccount, headerDialogProfile, routeHeadersText, headerError, saving,
-    openNewRouteDialog, openRouteDialog, updateRouteDraft, changeProtocol, updateOfficialRouteDraft,
+    openNewRouteDialog, openRouteDialog, updateRouteDraft, changeProtocol, importConnection, updateOfficialRouteDraft,
     toggleOfficialModel, updateOfficialModelContext, openHeadersDialog, changeHeaders, saveHeaders, saveRouteDraft,
     closeRouteDialog, closeHeadersDialog } = useRouteEditorController({
       active, config, isBusy: externalBusy, officialAccounts, officialCatalog, showAccountUsageInHeader,
@@ -1085,6 +1085,8 @@ function ModelSectionComponent({
               </div>
             ) : (
               <div className="route-editor-form">
+                {active && !config.profiles.some(profile => profile.id === routeDraft.id) &&
+                  <NewApiImport key={routeDraft.id} disabled={isBusy} onImport={importConnection} />}
                 <div className="route-editor-row route-editor-row-names">
                   <label className="route-field">
                     <span>短名称 {REQUIRED_FIELD_MARKER}</span>

@@ -2,6 +2,57 @@ use super::{AppState, argument};
 use serde_json::Value;
 use std::sync::{Arc, atomic::Ordering};
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn conversation_stats_bridge_rejects_invalid_session_ids() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState {
+            store: crate::config::ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(crate::config::CodeyConfig::default()),
+            ..AppState::default()
+        });
+        for payload in [
+            serde_json::json!({}),
+            serde_json::json!({"sessionId": 42}),
+            serde_json::json!({"sessionId": "../../outside"}),
+            serde_json::json!({"sessionId": "local:invalid"}),
+        ] {
+            let result = state.bridge_request("/session/stats".into(), payload).await;
+            assert_eq!(
+                result,
+                serde_json::json!({"status": "failed", "message": "会话 ID 无效"})
+            );
+        }
+    }
+}
+
+pub(super) async fn stats(state: &Arc<AppState>, args: &Value) -> Value {
+    let session_id = super::bridge_string(args, "sessionId");
+    let session_id = session_id
+        .strip_prefix("local:")
+        .unwrap_or(&session_id)
+        .trim();
+    if uuid::Uuid::parse_str(session_id).is_err() {
+        return super::api_error_message("会话 ID 无效");
+    }
+    let registry = state
+        .runtime
+        .lock()
+        .await
+        .as_ref()
+        .and_then(|runtime| runtime.conversation_stats_registry());
+    let snapshot = crate::conversation_stats::snapshot_with_history(
+        crate::codex_config::codex_home().to_path_buf(),
+        session_id.to_owned(),
+        registry,
+    )
+    .await;
+    serde_json::json!({ "status": "ok", "stats": snapshot })
+}
+
 pub(super) async fn invoke(
     state: &Arc<AppState>,
     command: &str,

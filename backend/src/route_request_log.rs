@@ -23,6 +23,14 @@ use tokio::sync::oneshot;
 use crate::config::{RouteRequestLogBackend, RouteRequestLogConfig};
 use crate::sqlite_util::table_columns;
 
+mod session;
+#[cfg(test)]
+mod stats_tests;
+use crate::conversation_stats::LiveSpeedSample;
+pub(crate) use session::{SessionGenerationTotals, last_turn_recorded_stats};
+#[cfg(test)]
+pub(crate) use session::{SessionRecordedTiming, session_recorded_average, session_recorded_timing};
+
 const SCHEMA_VERSION: u8 = 12;
 const MAX_LOG_STRING_BYTES: usize = 512;
 const MAX_LOG_HEADERS_BYTES: usize = 16 * 1024;
@@ -209,7 +217,7 @@ pub(crate) enum RequestStatus {
 }
 
 impl RequestStatus {
-    fn as_str(self) -> &'static str {
+    pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",
             Self::Failed => "failed",
@@ -777,12 +785,15 @@ impl RouteRequestLogStats {
 
 #[derive(Clone)]
 pub(crate) struct RouteRequestLogProducer {
-    sender: SyncSender<QueuedEntry>,
+    /// 落盘 producer 持有 writer 队列；会话统计 producer 为 None，只向
+    /// `session_stats` 注册表写聚合结果。
+    sender: Option<SyncSender<QueuedEntry>>,
     accepting: Arc<AtomicBool>,
     submitting: Arc<AtomicU64>,
     sample_rate_per_million: u32,
     sample_sequence: Arc<AtomicU64>,
     stats: Arc<RouteRequestLogStats>,
+    session_stats: Option<Arc<crate::conversation_stats::ConversationStatsRegistry>>,
 }
 
 impl RouteRequestLogProducer {
@@ -796,11 +807,33 @@ impl RouteRequestLogProducer {
             self.stats.dropped_closed.fetch_add(1, Ordering::Relaxed);
             return None;
         }
-        if !self.should_sample() {
-            self.stats.sampled_out.fetch_add(1, Ordering::Relaxed);
+        // 纯统计 producer 不关心无会话标识的请求（如模型列表），直接短路，
+        // 让这些请求保持与日志关闭时相同的零开销路径。
+        if self.sender.is_none() && start.codex_session_id.is_none() {
             return None;
         }
+        let sampled = self.should_sample();
+        if !sampled {
+            self.stats.sampled_out.fetch_add(1, Ordering::Relaxed);
+            if self.session_stats.is_none() || start.codex_session_id.is_none() {
+                return None;
+            }
+        }
         let request_id = bounded_string(start.request_id);
+        let timestamp_unix_ms = unix_timestamp_ms_at(start.started_at);
+        let session_request = start
+            .codex_session_id
+            .filter(|_| {
+                start.request_kind == crate::conversation_stats::CONVERSATION_REQUEST_KIND
+                    && !start.codex_session_is_parent
+                    && self.session_stats.is_some()
+            })
+            .map(|session_id| (bounded_string(session_id), request_id.clone()));
+        if let (Some(registry), Some((session_id, request_id))) =
+            (&self.session_stats, &session_request)
+        {
+            registry.begin_request(session_id, request_id, timestamp_unix_ms);
+        }
         let entry = PendingEntry {
             requested_service_tier: None,
             service_tier: None,
@@ -808,7 +841,7 @@ impl RouteRequestLogProducer {
             upstream_body: None,
             request_id: request_id.clone(),
             trace_id: request_id,
-            timestamp_unix_ms: unix_timestamp_ms_at(start.started_at),
+            timestamp_unix_ms,
             provider: None,
             provider_name: None,
             official_account_id: None,
@@ -843,9 +876,14 @@ impl RouteRequestLogProducer {
             codex_session_id: start.codex_session_id.map(bounded_string),
             codex_session_is_parent: start.codex_session_is_parent,
         };
+        // 日志采样只控制落盘，页面会话统计始终采集；未采样探针没有 writer 队列。
+        let mut producer = self.clone();
+        if !sampled {
+            producer.sender = None;
+        }
         Some(RouteRequestLogProbe {
             shared: Arc::new(ProbeShared {
-                producer: self.clone(),
+                producer,
                 started_at: start.started_at,
                 upstream_started_at: OnceLock::new(),
                 first_byte_micros: AtomicU64::new(0),
@@ -854,6 +892,8 @@ impl RouteRequestLogProducer {
                 upstream_header_micros: AtomicU64::new(0),
                 finished: AtomicBool::new(false),
                 finish_gate: Mutex::new(ProbeFinishGate::default()),
+                session_request,
+                live_output: Mutex::new(LiveOutputProgress::default()),
                 entry: Mutex::new(entry),
             }),
         })
@@ -882,10 +922,18 @@ impl RouteRequestLogProducer {
     }
 
     fn submit(&self, entry: RouteRequestLogEntry) {
+        // 会话统计先于队列开关检查记录：writer 停收时收尾请求仍会走 submit，
+        // 必须结清在途计数，否则页面会一直显示“生成中”。
+        if let Some(registry) = &self.session_stats {
+            registry.finish_request(&entry);
+        }
         if !self.accepting.load(Ordering::Acquire) {
             self.stats.dropped_closed.fetch_add(1, Ordering::Relaxed);
             return;
         }
+        let Some(sender) = &self.sender else {
+            return;
+        };
         self.submitting.fetch_add(1, Ordering::AcqRel);
         if !self.accepting.load(Ordering::Acquire) {
             self.submitting.fetch_sub(1, Ordering::AcqRel);
@@ -896,7 +944,7 @@ impl RouteRequestLogProducer {
             entry,
             enqueued_at: Instant::now(),
         };
-        let result = self.sender.try_send(queued);
+        let result = sender.try_send(queued);
         self.submitting.fetch_sub(1, Ordering::AcqRel);
         match result {
             Ok(()) => {
@@ -928,7 +976,86 @@ struct ProbeShared {
     upstream_header_micros: AtomicU64,
     finished: AtomicBool,
     finish_gate: Mutex<ProbeFinishGate>,
+    session_request: Option<(String, String)>,
+    live_output: Mutex<LiveOutputProgress>,
     entry: Mutex<PendingEntry>,
+}
+
+const LIVE_SPEED_INTERVAL: Duration = Duration::from_millis(250);
+
+/// 只保留计数和单调时间。字符估算不进入计费 Token，也不持久化。
+#[derive(Default)]
+struct LiveOutputProgress {
+    first_output_at: Option<Instant>,
+    last_published_at: Option<Instant>,
+    estimated_quarters: u64,
+    reported_baseline: Option<(u64, u64)>,
+}
+
+impl LiveOutputProgress {
+    fn observe(
+        &mut self,
+        quarters: u64,
+        reported_tokens: Option<u64>,
+        observed_at: Instant,
+        upstream_first_byte_at: Option<Instant>,
+    ) -> Option<LiveSpeedSample> {
+        let reported_tokens = reported_tokens.filter(|tokens| *tokens > 0);
+        if quarters == 0 && reported_tokens.is_none() {
+            return None;
+        }
+        self.first_output_at.get_or_insert(observed_at);
+        self.estimated_quarters = self.estimated_quarters.saturating_add(quarters);
+        if let Some(tokens) = reported_tokens
+            && self
+                .reported_baseline
+                .is_none_or(|(previous, _)| tokens > previous)
+        {
+            self.reported_baseline = Some((tokens, self.estimated_quarters));
+        }
+        if self
+            .last_published_at
+            .is_some_and(|last| observed_at.saturating_duration_since(last) < LIVE_SPEED_INTERVAL)
+        {
+            return None;
+        }
+        self.last_published_at = Some(observed_at);
+        let start = upstream_first_byte_at.or(self.first_output_at)?;
+        let (tokens, estimated) = match self.reported_baseline {
+            Some((tokens, baseline)) => {
+                let additional = self.estimated_quarters.saturating_sub(baseline);
+                (
+                    tokens as f64 + additional as f64 / 4.0,
+                    additional > 0 || upstream_first_byte_at.is_none(),
+                )
+            }
+            None => (self.estimated_quarters as f64 / 4.0, true),
+        };
+        Some(LiveSpeedSample {
+            output_tokens: tokens,
+            generation_started_at: start,
+            is_estimate: estimated,
+        })
+    }
+}
+
+pub(crate) fn is_output_delta_event(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "response.output_text.delta"
+            | "response.refusal.delta"
+            | "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.function_call_arguments.delta"
+            | "response.custom_tool_call_input.delta"
+    )
+}
+
+/// ASCII 约四字符一个 Token，其他 Unicode 码点约一个；只用于标明的估算速度。
+fn estimated_token_quarters(text: &str) -> u64 {
+    text.chars().fold(0_u64, |total, ch| {
+        total.saturating_add(if ch.is_ascii() { 1 } else { 4 })
+    })
 }
 
 #[derive(Default)]
@@ -1072,7 +1199,8 @@ impl RouteRequestLogProbe {
     pub(crate) fn detached_test_probe() -> Self {
         let (sender, _receiver) = mpsc::sync_channel(1);
         RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
@@ -1198,7 +1326,13 @@ impl RouteRequestLogProbe {
                 &self.shared.router_pre_upstream_micros,
                 self.shared.started_at,
             );
-            let _ = self.shared.upstream_started_at.set(Instant::now());
+            let started = *self.shared.upstream_started_at.get_or_init(Instant::now);
+            if let (Some(registry), Some((session, request))) = (
+                &self.shared.producer.session_stats,
+                &self.shared.session_request,
+            ) {
+                registry.mark_request_upstream_started(session, request, started);
+            }
             lock_unpoisoned(&self.shared.entry).upstream_transport = Some(transport);
         });
     }
@@ -1359,8 +1493,28 @@ impl RouteRequestLogProbe {
     }
 
     pub(crate) fn observe_event(&self, event: &Value) {
+        self.observe_event_at(event, Instant::now());
+    }
+
+    pub(crate) fn observe_event_at(&self, event: &Value, observed_at: Instant) {
         self.shield(|| {
             let event_type = event.get("type").and_then(Value::as_str);
+            if self.shared.session_request.is_some()
+                && !self.shared.finished.load(Ordering::Acquire)
+            {
+                let quarters = event_type
+                    .filter(|kind| is_output_delta_event(kind))
+                    .and_then(|_| event.get("delta").and_then(Value::as_str))
+                    .map(estimated_token_quarters)
+                    .unwrap_or(0);
+                let reported_output = usage_value(event).and_then(|usage| {
+                    first_u64(
+                        usage,
+                        &["/output_tokens", "/completion_tokens", "/outputTokens"],
+                    )
+                });
+                self.observe_live_output(quarters, reported_output, observed_at);
+            }
             let contains_usage = usage_value(event).is_some();
             if !contains_usage
                 && response_service_tier(event).is_none()
@@ -1381,6 +1535,51 @@ impl RouteRequestLogProbe {
             }
             observe_terminal_value(&mut entry, event);
         });
+    }
+
+    /// 原始 SSE 投影只传数字；written_at 保留真实接收时间，排除后台解析排队。
+    pub(crate) fn observe_output_delta_estimate(&self, quarters: u64, written_at: Instant) {
+        self.shield(|| self.observe_live_output(quarters, None, written_at));
+    }
+
+    fn observe_live_output(
+        &self,
+        quarters: u64,
+        reported_tokens: Option<u64>,
+        observed_at: Instant,
+    ) {
+        let Some((session_id, request_id)) = &self.shared.session_request else {
+            return;
+        };
+        if self.shared.finished.load(Ordering::Acquire) {
+            return;
+        }
+        let Some(registry) = &self.shared.producer.session_stats else {
+            return;
+        };
+        let first_byte = self.shared.first_byte_micros.load(Ordering::Relaxed);
+        let upstream_first_byte_at = self
+            .shared
+            .upstream_started_at
+            .get()
+            .filter(|_| first_byte != 0)
+            .and_then(|start| {
+                start.checked_add(Duration::from_micros(first_byte.saturating_sub(1)))
+            });
+        let mut progress = lock_unpoisoned(&self.shared.live_output);
+        if let Some(sample) = progress.observe(
+            quarters,
+            reported_tokens,
+            observed_at,
+            upstream_first_byte_at,
+        ) {
+            registry.update_request_speed(
+                session_id,
+                request_id,
+                sample,
+                unix_timestamp_ms_at(observed_at),
+            );
+        }
     }
 
     /// Applies the small terminal metadata projection produced by the raw
@@ -1558,6 +1757,8 @@ impl Drop for RouteRequestLogGuard {
 
 pub(crate) struct RouteRequestLogController {
     active: ArcSwapOption<RouteRequestLogProducer>,
+    stats_producer: Arc<RouteRequestLogProducer>,
+    session_stats: Arc<crate::conversation_stats::ConversationStatsRegistry>,
     state: AsyncMutex<RouteRequestLogControllerState>,
     root: PathBuf,
 }
@@ -1581,8 +1782,20 @@ impl RouteRequestLogController {
     }
 
     pub(crate) fn with_root(root: PathBuf) -> Self {
+        let session_stats = Arc::new(crate::conversation_stats::ConversationStatsRegistry::default());
+        let stats_producer = Arc::new(RouteRequestLogProducer {
+            sender: None,
+            accepting: Arc::new(AtomicBool::new(true)),
+            submitting: Arc::new(AtomicU64::new(0)),
+            sample_rate_per_million: PARTS_PER_MILLION as u32,
+            sample_sequence: Arc::new(AtomicU64::new(0)),
+            stats: Arc::new(RouteRequestLogStats::default()),
+            session_stats: Some(Arc::clone(&session_stats)),
+        });
         Self {
             active: ArcSwapOption::empty(),
+            stats_producer,
+            session_stats,
             state: AsyncMutex::new(RouteRequestLogControllerState::default()),
             root,
         }
@@ -1592,14 +1805,16 @@ impl RouteRequestLogController {
         &self.root
     }
 
-    /// The disabled fast path is a single atomic load. The start closure is
-    /// deliberately lazy so extracting optional observation fields is skipped
-    /// entirely while logging is off.
+    pub(crate) fn session_stats(&self) -> Arc<crate::conversation_stats::ConversationStatsRegistry> {
+        Arc::clone(&self.session_stats)
+    }
+
+    /// 关闭日志时仅聚合会话统计，不启动 writer 或持久化请求。
     pub(crate) fn begin(
         &self,
         begin: impl FnOnce(&RouteRequestLogProducer) -> Option<RouteRequestLogProbe>,
     ) -> Option<RouteRequestLogProbe> {
-        let producer = self.active.load_full()?;
+        let producer = self.active.load_full().unwrap_or_else(|| Arc::clone(&self.stats_producer));
         begin(&producer)
     }
 
@@ -1647,7 +1862,8 @@ impl RouteRequestLogController {
         .await
         .map_err(|error| anyhow::anyhow!("请求日志 writer 启动任务异常退出：{error}"))??
         .ok_or_else(|| anyhow::anyhow!("请求日志配置未启用 writer"))?;
-        let (producer, runtime) = started;
+        let (mut producer, runtime) = started;
+        producer.session_stats = Some(Arc::clone(&self.session_stats));
 
         // Publish only after the worker has opened and initialized its sink.
         self.active.store(Some(Arc::new(producer)));
@@ -1698,7 +1914,8 @@ impl RouteRequestLogController {
             })
             .await
             {
-                Ok(Ok(Some((producer, runtime)))) => {
+                Ok(Ok(Some((mut producer, runtime)))) => {
+                    producer.session_stats = Some(Arc::clone(&self.session_stats));
                     self.active.store(Some(Arc::new(producer)));
                     state.runtime = Some(runtime);
                     result.recording_active = true;
@@ -1787,7 +2004,8 @@ impl RouteRequestLogRuntime {
         let accepting = Arc::new(AtomicBool::new(true));
         let submitting = Arc::new(AtomicU64::new(0));
         let producer = RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::clone(&accepting),
             submitting: Arc::clone(&submitting),
             sample_rate_per_million: config.sample_rate_per_million,
@@ -5624,7 +5842,7 @@ mod tests {
     }
 
     #[test]
-    fn disabled_controller_skips_lazy_start_fields() {
+    fn disabled_controller_skips_requests_without_a_session() {
         let controller = RouteRequestLogController::with_root(PathBuf::new());
         let evaluated = AtomicBool::new(false);
         let probe = controller.begin(|producer| {
@@ -5642,7 +5860,7 @@ mod tests {
             })
         });
         assert!(probe.is_none());
-        assert!(!evaluated.load(Ordering::Relaxed));
+        assert!(evaluated.load(Ordering::Relaxed));
     }
 
     #[tokio::test]
@@ -5680,7 +5898,7 @@ mod tests {
             controller.reconfigure(&disabled).await.unwrap(),
             RouteRequestLogReconfigure::Disabled
         );
-        assert!(controller.begin(|_| unreachable!()).is_none());
+        assert!(controller.active.load_full().is_none());
         let connection = Connection::open(directory.path().join(SQLITE_FILE_NAME)).unwrap();
         let count: i64 = connection
             .query_row("SELECT COUNT(*) FROM route_request_logs", [], |row| {
@@ -5786,7 +6004,7 @@ mod tests {
             ..RouteRequestLogConfig::default()
         };
         assert!(controller.reconfigure(&config).await.is_err());
-        assert!(controller.begin(|_| unreachable!()).is_none());
+        assert!(controller.active.load_full().is_none());
     }
 
     #[test]
@@ -5794,7 +6012,8 @@ mod tests {
         let (sender, _receiver) = mpsc::sync_channel(1);
         let stats = Arc::new(RouteRequestLogStats::default());
         let producer = RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
@@ -5812,7 +6031,8 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(4);
         let stats = Arc::new(RouteRequestLogStats::default());
         let producer = RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
@@ -5887,7 +6107,8 @@ mod tests {
     fn deferred_finish_waits_for_observer_and_still_submits_exactly_once() {
         let (sender, receiver) = mpsc::sync_channel(2);
         let producer = RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
@@ -5939,7 +6160,8 @@ mod tests {
     fn synthetic_response_created_does_not_set_ttft() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let producer = RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
@@ -5972,7 +6194,8 @@ mod tests {
     fn retry_updates_effective_transport_without_resetting_ttft_origin() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let producer = RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
@@ -6010,7 +6233,8 @@ mod tests {
     fn unavailable_usage_has_an_explicit_reason() {
         let (sender, receiver) = mpsc::sync_channel(1);
         let producer = RouteRequestLogProducer {
-            sender,
+            sender: Some(sender),
+            session_stats: None,
             accepting: Arc::new(AtomicBool::new(true)),
             submitting: Arc::new(AtomicU64::new(0)),
             sample_rate_per_million: 1_000_000,
