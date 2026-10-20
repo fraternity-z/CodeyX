@@ -17,7 +17,7 @@ const loaderScript = loaderMatch[1];
 
 const flushPromises = flushMicrotasks;
 
-test("settings overlay loads once on first click and opens the real controller", async () => {
+test("settings overlay shares preloading with repeated clicks and opens once", async () => {
   let bridgeCalls = 0;
   let resolveLoad;
   const alerts = [];
@@ -50,6 +50,9 @@ test("settings overlay loads once on first click and opens the real controller",
   const proxy = window.__codeySettingsOverlay;
   assert.equal(proxy.__codeyLazyLoader, true);
 
+  const preload = proxy.load();
+  assert.equal(proxy.load(), preload);
+  assert.equal(realOverlay.opened, 0);
   proxy.toggle();
   proxy.toggle();
   assert.equal(bridgeCalls, 1);
@@ -59,6 +62,91 @@ test("settings overlay loads once on first click and opens the real controller",
   assert.equal(window.__codeySettingsOverlay, realOverlay);
   assert.equal(realOverlay.opened, 1);
   assert.deepEqual(alerts, []);
+});
+
+test("settings overlay preloading does not open the panel before a click", async () => {
+  let bridgeCalls = 0;
+  const realOverlay = {
+    opened: 0,
+    open() { this.opened += 1; },
+    toggle() {},
+  };
+  const window = {
+    alert() { assert.fail("successful preload must not alert"); },
+    async __codexSessionDeleteBridge() {
+      bridgeCalls += 1;
+      window.__codeySettingsOverlay = realOverlay;
+      return { status: "ok" };
+    },
+  };
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  const proxy = window.__codeySettingsOverlay;
+
+  assert.equal(await proxy.load(), realOverlay);
+  assert.equal(realOverlay.opened, 0);
+  proxy.toggle();
+  await flushPromises();
+
+  assert.equal(bridgeCalls, 1);
+  assert.equal(realOverlay.opened, 1);
+});
+
+test("settings overlay preload failures stay silent and allow clicking to retry", async () => {
+  let bridgeCalls = 0;
+  const alerts = [];
+  const realOverlay = {
+    opened: 0,
+    open() { this.opened += 1; },
+    toggle() {},
+  };
+  const window = {
+    alert(message) { alerts.push(message); },
+    async __codexSessionDeleteBridge() {
+      bridgeCalls += 1;
+      if (bridgeCalls === 1) throw new Error("preload failed");
+      window.__codeySettingsOverlay = realOverlay;
+      return { status: "ok" };
+    },
+  };
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  const proxy = window.__codeySettingsOverlay;
+
+  await assert.rejects(proxy.load(), /preload failed/);
+  assert.deepEqual(alerts, []);
+  proxy.toggle();
+  await flushPromises();
+
+  assert.equal(bridgeCalls, 2);
+  assert.equal(realOverlay.opened, 1);
+  assert.deepEqual(alerts, []);
+});
+
+test("settings overlay handles a missing bridge and synchronous bridge failures", async () => {
+  for (const bridge of [undefined, () => { throw new Error("bridge threw"); }]) {
+    const alerts = [];
+    const window = {
+      alert(message) { alerts.push(message); },
+      __codexSessionDeleteBridge: bridge,
+    };
+    vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+    const proxy = window.__codeySettingsOverlay;
+    await assert.rejects(proxy.load(), /bridge/);
+    assert.deepEqual(alerts, []);
+
+    proxy.toggle();
+    await flushPromises();
+    assert.equal(alerts.length, 1);
+    assert.match(alerts[0], /bridge/);
+
+    window.__codexSessionDeleteBridge = async () => {
+      window.__codeySettingsOverlay = { toggle() {} };
+      return { status: "ok" };
+    };
+    proxy.toggle();
+    await flushPromises();
+    assert.equal(alerts.length, 1);
+    assert.notEqual(window.__codeySettingsOverlay, proxy);
+  }
 });
 
 test("settings overlay loader reports a failure and permits a retry", async () => {

@@ -1836,6 +1836,7 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
   if (existing?.__codeyLazyLoader) return;
 
   let loading = null;
+  let opening = false;
   const formatError = (error) => error instanceof Error
     ? `${error.name}: ${error.message}`
     : String(error || "未知错误");
@@ -1848,9 +1849,9 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
       if (typeof window.__codexSessionDeleteBridge !== "function") {
         return Promise.reject(new Error("CodeyX bridge 尚未就绪"));
       }
-      loading = Promise.resolve(
-        window.__codexSessionDeleteBridge(loadPath, {}),
-      ).then((result) => {
+      loading = new Promise((resolve) => {
+        resolve(window.__codexSessionDeleteBridge(loadPath, {}));
+      }).then((result) => {
         if (!result || result.status !== "ok") {
           throw new Error(result?.message || "配置面板加载请求失败");
         }
@@ -1859,6 +1860,9 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
           throw new Error(window.__codeyOverlayError || "未生成浮层控制器");
         }
         return overlay;
+      }).catch((error) => {
+        loading = null;
+        throw error;
       });
       return loading;
     },
@@ -1866,15 +1870,17 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
       this.toggle();
     },
     toggle() {
-      if (loading) return;
+      if (opening) return;
+      opening = true;
       void this.load().then((overlay) => {
         if (typeof overlay.open === "function") overlay.open();
         else overlay.toggle();
       }).catch((error) => {
         const message = formatError(error);
         window.__codeyOverlayError = message;
-        loading = null;
         window.alert(`CodeyX 内嵌配置面板加载失败：${message}`);
+      }).finally(() => {
+        opening = false;
       });
     },
   };

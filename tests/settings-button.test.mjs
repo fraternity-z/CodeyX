@@ -939,6 +939,72 @@ const createStartupUpdateFixture = (bridge) => {
   };
 };
 
+for (const type of ["pointerenter", "focus"]) {
+  test(`passively preloads settings on ${type} and keeps clicks working`, async () => {
+    const fixture = createStartupUpdateFixture(async () => ({ status: "ok" }));
+    let loads = 0;
+    let toggles = 0;
+    const loadedOverlay = { toggle() { toggles += 1; } };
+    fixture.window.__codeySettingsOverlay = {
+      __codeyLazyLoader: true,
+      load() {
+        loads += 1;
+        fixture.window.__codeySettingsOverlay = loadedOverlay;
+        return Promise.resolve(loadedOverlay);
+      },
+    };
+    const button = fixture.document.getElementById("codey-settings-button");
+    assert.equal(loads, 0, "startup does not preload settings");
+    button.dispatchEvent({ type });
+    await new Promise(setImmediate);
+    assert.equal(loads, 1);
+    assert.equal(toggles, 0, "preloading does not open settings");
+    button.dispatchEvent({ type: "pointerenter" });
+    button.dispatchEvent({ type: "focus" });
+    assert.equal(loads, 1, "the loaded overlay is not requested again");
+    button.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {} });
+    assert.equal(toggles, 1);
+    assert.deepEqual(fixture.alerts, []);
+  });
+}
+
+test("settings preloading ignores missing and non-lazy loaders", () => {
+  const fixture = createStartupUpdateFixture(async () => ({ status: "ok" }));
+  const button = fixture.document.getElementById("codey-settings-button");
+  let loads = 0;
+  for (const overlay of [undefined, {}, { load() { loads += 1; } }, {
+    __codeyLazyLoader: true, load: true,
+  }]) {
+    fixture.window.__codeySettingsOverlay = overlay;
+    button.dispatchEvent({ type: "pointerenter" });
+    button.dispatchEvent({ type: "focus" });
+  }
+  assert.equal(loads, 0);
+  assert.deepEqual(fixture.alerts, []);
+});
+
+for (const synchronous of [false, true]) {
+  test(`settings preload ${synchronous ? "throw" : "rejection"} stays passive and preserves click`, async () => {
+    const fixture = createStartupUpdateFixture(async () => ({ status: "ok" }));
+    let toggles = 0;
+    fixture.window.__codeySettingsOverlay = {
+      __codeyLazyLoader: true,
+      load() {
+        if (synchronous) throw new Error("preload failed");
+        return Promise.reject(new Error("preload failed"));
+      },
+      toggle() { toggles += 1; },
+    };
+    const button = fixture.document.getElementById("codey-settings-button");
+    button.dispatchEvent({ type: "pointerenter" });
+    await new Promise(setImmediate);
+    assert.deepEqual(fixture.alerts, []);
+    assert.equal(toggles, 0);
+    button.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {} });
+    assert.equal(toggles, 1);
+  });
+}
+
 test("hydrates the passive update badge from startup backend state", async () => {
   const bridgeCalls = [];
   const fixture = createStartupUpdateFixture(async (path, payload) => {
@@ -1146,6 +1212,14 @@ test("marks the CodeyX icon unavailable after consecutive hung health checks and
   assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
   assert.match(button.getAttribute("aria-label"), /CodeyX 连接中断/);
   assert.match(button.title, /CodeyX 后端未响应/);
+  let settingsLoads = 0;
+  fixture.window.__codeySettingsOverlay = {
+    __codeyLazyLoader: true,
+    load() { settingsLoads += 1; },
+  };
+  button.dispatchEvent({ type: "pointerenter" });
+  button.dispatchEvent({ type: "focus" });
+  assert.equal(settingsLoads, 0, "an unavailable backend must not be preloaded");
   button.dispatchEvent({
     type: "click",
     preventDefault() {},
