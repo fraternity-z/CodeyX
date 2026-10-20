@@ -352,16 +352,65 @@ fn damaged_rollout_with_known_filename_and_orphan_history_can_be_cleaned() {
 }
 
 #[test]
+fn suffixed_rollouts_keep_the_original_identity_during_listing_and_cleanup() {
+    for archived in [false, true] {
+        for damaged in [false, true] {
+            let home = fixture();
+            let original = rollout(home.path(), A, false);
+            let folder = if archived {
+                home.path().join("archived_sessions/2026/10/17")
+            } else {
+                original.parent().unwrap().to_path_buf()
+            };
+            let path = folder.join(format!("rollout-2026-10-18T16-20-49-{A}_{B}.jsonl"));
+            fs::rename(original, &path).unwrap();
+            if damaged {
+                fs::write(&path, "partial write").unwrap();
+            }
+
+            let inventory = list(home.path()).unwrap();
+            assert_eq!(inventory.sessions.len(), 2);
+            let session = inventory
+                .sessions
+                .iter()
+                .find(|entry| entry.id == A)
+                .unwrap();
+            assert_eq!(session.archived, archived);
+            assert_eq!(session.bytes, fs::metadata(&path).unwrap().len());
+
+            let result = remove(home.path(), request(home.path(), &[B])).unwrap();
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            finish_pending(home.path()).unwrap();
+            assert!(path.exists(), "附加 UUID 不应决定会话文件归属");
+
+            let result = remove(home.path(), request(home.path(), &[A])).unwrap();
+            assert!(result.errors.is_empty(), "{:?}", result.errors);
+            finish_pending(home.path()).unwrap();
+            assert!(!path.exists());
+            assert!(list(home.path()).unwrap().sessions.is_empty());
+        }
+    }
+}
+
+#[test]
 fn conflicting_rollout_identity_is_rejected_before_mutation() {
-    let home = tempfile::tempdir().unwrap();
-    let path = rollout(home.path(), A, false);
-    fs::write(
-        &path,
-        json!({"type":"session_meta", "payload":{"id":B}}).to_string(),
-    )
-    .unwrap();
-    assert!(list(home.path()).is_err());
-    assert!(path.exists());
+    for suffix in ["", B, C] {
+        let home = tempfile::tempdir().unwrap();
+        let mut path = rollout(home.path(), A, false);
+        if !suffix.is_empty() {
+            let renamed = path.with_file_name(format!("rollout-test-{A}_{suffix}.jsonl"));
+            fs::rename(&path, &renamed).unwrap();
+            path = renamed;
+        }
+        fs::write(
+            &path,
+            json!({"type":"session_meta", "payload":{"id":B}}).to_string(),
+        )
+        .unwrap();
+        assert!(list(home.path()).is_err());
+        assert!(path.exists());
+        assert!(!home.path().join(PENDING).exists());
+    }
 }
 
 #[test]

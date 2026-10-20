@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { Config, FastContextToolsStatus } from "../../App.types";
 import type { BuiltinToolsStatus } from "../../builtinTools";
 import { errorText } from "../../appUtils";
@@ -20,10 +20,11 @@ export function useBuiltinToolsController({ active, config, fastContextToolsStat
   const [readError, setReadError] = useState("");
   const [notice, setNotice] = useState("");
   const [revision, setRevision] = useState(0);
+  const needsStatusRead = useRef(true);
   const scope = useOperationScope(active);
 
   useEffect(() => {
-    if (!active || scope.pending) return;
+    if (!active || scope.pending || !needsStatusRead.current) return;
     let cancelled = false;
     let timer: number | undefined;
     const valid = scope.read();
@@ -35,8 +36,11 @@ export function useBuiltinToolsController({ active, config, fastContextToolsStat
         if (!current()) return;
         setStatus(next);
         setReadError("");
-        timer = window.setTimeout(() => void poll(), next.job?.phase === "running" ? 1500 : 5000);
-      } catch (cause) { if (current()) setReadError(errorText(cause)); }
+        needsStatusRead.current = next.job?.phase === "running";
+        if (needsStatusRead.current) timer = window.setTimeout(() => void poll(), 1500);
+      } catch (cause) {
+        if (current()) { needsStatusRead.current = false; setReadError(errorText(cause)); }
+      }
     }
     void poll();
     return () => { cancelled = true; window.clearTimeout(timer); };
@@ -59,12 +63,13 @@ export function useBuiltinToolsController({ active, config, fastContextToolsStat
       if (current()) { setStatus(next); setNotice(next.message ?? ""); }
     } catch (cause) { if (current()) setError(errorText(cause)); }
     finally {
-      if (operationScope.finish()) { setBusy(false); setRevision(value => value + 1); }
+      if (operationScope.finish()) { needsStatusRead.current = true; setBusy(false); setRevision(value => value + 1); }
     }
   }
   function refresh() {
     if (!active || scope.pending || isBusy) return;
     scope.invalidateReads();
+    needsStatusRead.current = true;
     setError("");
     setReadError("");
     setRevision(value => value + 1);

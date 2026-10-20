@@ -3,11 +3,25 @@ async (page, { baseURL = "http://127.0.0.1:1421" } = {}) => {
   page.on("pageerror", error => errors.push(error.message));
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(`${baseURL}/codey/tests/ui-browser.html?platform=windows`);
+  await page.evaluate(() => {
+    const bridge = window.__codexSessionDeleteBridge;
+    window.__codeyTestCodegraphStatusCalls = 0;
+    window.__codexSessionDeleteBridge = (path, args) => {
+      if (path.endsWith("/builtin_tools") && args.tool !== "ponytail" && args.action === "status") window.__codeyTestCodegraphStatusCalls++;
+      return bridge(path, args);
+    };
+  });
   await page.getByRole("button", { name: "内置工具", exact: true }).click();
   const region = page.getByRole("region", { name: "内置工具", exact: true }).first();
   await region.getByRole("button", { name: "刷新", exact: true }).waitFor();
   if (await region.getByRole("textbox").count()) throw new Error("自动接入不应要求填写项目路径");
   const toggle = region.getByRole("switch", { name: "启用 CodeGraph 自动索引" });
+  await region.locator("article").filter({ hasText: "CodeGraph 代码索引" }).getByText("待安装", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "基础功能", exact: true }).click();
+  await page.getByRole("button", { name: "内置工具", exact: true }).click();
+  if (await page.evaluate(() => window.__codeyTestCodegraphStatusCalls) !== 1) throw new Error("切换页面不应重复检测 CodeGraph");
+  await region.getByRole("button", { name: "刷新", exact: true }).click();
+  await page.waitForFunction(() => window.__codeyTestCodegraphStatusCalls === 2);
   await toggle.locator("xpath=ancestor::label").click();
   await region.getByRole("status").filter({ hasText: "正在准备 CodeGraph 自动接入" }).waitFor();
   await page.getByRole("button", { name: "基础功能", exact: true }).click();
@@ -59,5 +73,5 @@ async (page, { baseURL = "http://127.0.0.1:1421" } = {}) => {
   await region.getByRole("button", { name: "刷新", exact: true }).click();
   await region.getByRole("alert").waitFor({ state: "hidden" });
   if (errors.length) throw new Error(errors.join("\n"));
-  console.log("PASS: 无路径启用、后台安装、切换栏目保留状态、键盘停用、明暗主题、窄屏、主设置不显示项目列表与读取失败后重试。");
+  console.log("PASS: 首次检测、切页复用结果、手动刷新、无路径启用、后台安装、键盘停用、明暗主题、窄屏、主设置不显示项目列表与读取失败后重试。");
 }

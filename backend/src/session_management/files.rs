@@ -332,13 +332,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn filename_identity_uses_only_the_final_uuid() {
+    fn filename_identity_handles_session_suffixes_and_imported_names() {
         let id = "11111111-1111-4111-8111-111111111111";
         let random = "22222222-2222-4222-8222-222222222222";
         for name in [
             format!("rollout-2026-10-18-{id}.jsonl"),
             format!("rollout-123-{random}-{id}.jsonl"),
+            format!("rollout-2026-10-18T16-20-49-{id}_{random}.jsonl"),
             format!("导入-{id}.jsonl"),
+            format!("导入_{id}.jsonl"),
             format!("{id}.ps1"),
             id.to_owned(),
         ] {
@@ -347,6 +349,8 @@ mod tests {
         for name in [
             "short.jsonl".to_owned(),
             format!("{id}-invalid.jsonl"),
+            format!("{id}_invalid.jsonl"),
+            format!("{id}_{random}-invalid.jsonl"),
             format!("é{}.jsonl", "x".repeat(35)),
             format!("{}.jsonl", "x".repeat(36)),
         ] {

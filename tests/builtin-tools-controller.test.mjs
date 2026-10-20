@@ -18,7 +18,7 @@ function fixture(extra = {}, component = false) {
   return { ...h, calls, changes, ui, options, render: () => h.render(options) };
 }
 
-test("内置工具只在活动页轮询，保留共享草稿所有权和 FastCtx 配置保护", async t => {
+test("内置工具只在活动页检测，保留共享草稿所有权和 FastCtx 配置保护", async t => {
   installControllerWindow(t);
   const h = fixture({ active: false }); h.render().changeFastContextTools(true); await h.render().setEnabled(true);
   assert.equal(h.calls.length, 0); assert.equal(h.changes.length, 0);
@@ -35,6 +35,36 @@ test("内置工具只在活动页轮询，保留共享草稿所有权和 FastCtx
   assert.equal(h.changes.length, 1); h.unmount();
 });
 
+test("首次检测后保留结果，空闲和切换页面不再检测，手动刷新更新状态", async t => {
+  const browser = installControllerWindow(t);
+  const h = fixture({ active: false }); h.render();
+  assert.equal(h.calls.length, 0);
+  h.options.active = true; h.render(); h.calls[0].resolve(ready); await h.flush();
+  assert.equal(browser.timers.size, 0); browser.tick();
+  h.options.active = false; h.render(); h.options.active = true; h.render();
+  assert.equal(h.calls.length, 1); assert.deepEqual(h.render().status, ready);
+  h.render().refresh(); h.render(); assert.equal(h.calls.length, 2);
+  h.calls[1].resolve(enabled); assert.equal((await h.flush()).status.mcp.enabled, true);
+  assert.equal(browser.timers.size, 0); h.unmount();
+});
+
+test("安装任务只在活动页跟踪，切页后恢复并在完成时停止轮询", async t => {
+  const browser = installControllerWindow(t);
+  const h = fixture(); h.render(); h.calls[0].resolve(ready); await h.flush();
+  const work = h.render().setEnabled(true);
+  const installing = { ...ready, job: { phase: "running" } };
+  h.calls.at(-1).resolve(installing); await work; await h.flush();
+  h.calls.at(-1).resolve(installing); await h.flush(); assert.equal(browser.timers.size, 1);
+  h.options.active = false; h.render(); assert.equal(browser.timers.size, 0);
+  const count = h.calls.length; browser.tick(); assert.equal(h.calls.length, count);
+  h.options.active = true; h.render(); assert.equal(h.calls.length, count + 1);
+  h.calls.at(-1).resolve(installing); await h.flush(); browser.tick();
+  h.calls.at(-1).resolve(enabled); assert.equal((await h.flush()).status.mcp.enabled, true);
+  assert.equal(browser.timers.size, 0);
+  h.options.active = false; h.render(); h.options.active = true; h.render();
+  assert.equal(h.calls.length, count + 2); h.unmount();
+});
+
 test("检测中、全局忙碌、后台安装和用户自管状态禁止启停", async t => {
   installControllerWindow(t);
   for (const mode of ["loading", "busy", "job", "user"]) {
@@ -47,10 +77,10 @@ test("检测中、全局忙碌、后台安装和用户自管状态禁止启停",
   }
 });
 
-test("启停防止重复提交和旧轮询覆盖，失败保留草稿并支持显式重试", async t => {
-  const browser = installControllerWindow(t);
+test("启停防止重复提交和旧读取覆盖，失败保留草稿并支持显式重试", async t => {
+  installControllerWindow(t);
   const h = fixture(); h.render(); h.calls[0].resolve(ready); await h.flush();
-  browser.tick(); const old = h.calls.at(-1);
+  h.render().refresh(); h.render(); const old = h.calls.at(-1);
   const c = h.render(); const work = c.setEnabled(true); await c.setEnabled(false); c.refresh();
   assert.deepEqual(h.calls.at(-1).args, { action: "set_enabled", enabled: true }); assert.equal(h.calls.length, 3);
   old.reject(new Error("old read")); await h.flush(); assert.equal(h.render().error, ""); assert.equal(h.render().busy, true);
@@ -68,8 +98,10 @@ test("刷新作废旧读结果，当前读取失败停止轮询并可手动恢�
     h.calls[1].reject(new Error("read failed")); await h.flush();
     if (failed) h.calls[0].reject(new Error("stale")); else h.calls[0].resolve(enabled);
     assert.equal((await h.flush()).error, "read failed"); assert.equal(browser.timers.size, 0);
+    h.options.active = false; h.render(); h.options.active = true; h.render();
+    assert.equal(h.calls.length, 2); assert.equal(h.render().error, "read failed");
     h.render().refresh(); h.render(); h.calls.at(-1).resolve(ready);
-    assert.equal((await h.flush()).error, ""); assert.equal(browser.timers.size, 1); h.unmount();
+    assert.equal((await h.flush()).error, ""); assert.equal(browser.timers.size, 0); h.unmount();
   }
 });
 
