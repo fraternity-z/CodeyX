@@ -68,7 +68,16 @@ fn walk(home: &Path, directory: &Path) -> Result<Vec<PathBuf>> {
 fn filename_id(path: &Path) -> Option<String> {
     let stem = path.file_stem()?.to_str()?;
     let candidate = stem.get(stem.len().checked_sub(36)?..)?;
-    valid_id(candidate).then(|| candidate.to_owned())
+    if !valid_id(candidate) {
+        return None;
+    }
+    // A "_<uuid>" suffix is not the session ID when a valid ID precedes it.
+    let original = stem
+        .strip_suffix(candidate)
+        .and_then(|prefix| prefix.strip_suffix('_'))
+        .and_then(|prefix| prefix.get(prefix.len().checked_sub(36)?..))
+        .filter(|id| valid_id(id));
+    Some(original.unwrap_or(candidate).to_owned())
 }
 
 fn rollout_metadata(path: &Path) -> Result<Value> {
@@ -337,14 +346,18 @@ mod tests {
         let random = "22222222-2222-4222-8222-222222222222";
         for name in [
             format!("rollout-2026-10-18-{id}.jsonl"),
+            format!("rollout-2026-10-18T16-20-49-{id}.jsonl"),
             format!("rollout-123-{random}-{id}.jsonl"),
             format!("rollout-2026-10-18T16-20-49-{id}_{random}.jsonl"),
+            format!("rollout-{random}_copy-{id}.jsonl"),
+            format!("{}_{id}.jsonl", "x".repeat(36)),
+            format!("é{}_{id}.jsonl", "x".repeat(35)),
             format!("导入-{id}.jsonl"),
             format!("导入_{id}.jsonl"),
             format!("{id}.ps1"),
             id.to_owned(),
         ] {
-            assert_eq!(filename_id(Path::new(&name)).as_deref(), Some(id));
+            assert_eq!(filename_id(Path::new(&name)).as_deref(), Some(id), "{name}");
         }
         for name in [
             "short.jsonl".to_owned(),
@@ -354,7 +367,7 @@ mod tests {
             format!("é{}.jsonl", "x".repeat(35)),
             format!("{}.jsonl", "x".repeat(36)),
         ] {
-            assert_eq!(filename_id(Path::new(&name)), None);
+            assert_eq!(filename_id(Path::new(&name)), None, "{name}");
         }
     }
 }
