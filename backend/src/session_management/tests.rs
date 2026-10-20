@@ -227,6 +227,64 @@ fn selected_cleanup_removes_records_archives_indexes_and_wal_without_touching_ot
 }
 
 #[test]
+fn selected_cleanup_allows_activity_in_unselected_sessions() {
+    use std::io::Write;
+
+    let home = fixture();
+    let path = rollout(home.path(), A, false);
+    let request = request(home.path(), &[B]);
+    writeln!(
+        fs::OpenOptions::new().append(true).open(&path).unwrap(),
+        "{}",
+        json!({"type":"response_item", "payload":{"text":"new activity"}})
+    )
+    .unwrap();
+    let contents = fs::read(&path).unwrap();
+    let db = Connection::open(home.path().join("state_5.sqlite")).unwrap();
+    db.execute("UPDATE threads SET updated_at=2000 WHERE id=?1", [A])
+        .unwrap();
+    drop(db);
+
+    let result = remove(home.path(), request).unwrap();
+    assert_eq!(result.selected_count, 1);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    finish_pending(home.path()).unwrap();
+    assert_eq!(fs::read(&path).unwrap(), contents);
+    let inventory = list(home.path()).unwrap();
+    assert_eq!(inventory.sessions.len(), 1);
+    assert_eq!(inventory.sessions[0].id, A);
+    assert_eq!(inventory.pending_count, 0);
+}
+
+#[test]
+fn inventory_scope_changes_require_confirmation_before_recording_intent() {
+    for change in ["added", "removed", "archived"] {
+        let home = tempfile::tempdir().unwrap();
+        let active = rollout(home.path(), A, false);
+        let selected = rollout(home.path(), B, false);
+        let request = request(home.path(), &[B]);
+        match change {
+            "added" => {
+                rollout(home.path(), C, false);
+            }
+            "removed" => fs::remove_file(active).unwrap(),
+            _ => {
+                let archived = rollout(home.path(), A, true);
+                fs::rename(active, archived).unwrap();
+            }
+        }
+
+        let error = remove(home.path(), request).unwrap_err();
+        assert!(
+            error.to_string().contains("会话列表已变化"),
+            "{change}: {error}"
+        );
+        assert!(!home.path().join(PENDING).exists(), "{change}");
+        assert!(selected.exists(), "{change}");
+    }
+}
+
+#[test]
 fn restart_replays_stale_writes_but_preserves_new_sessions_and_remote_rows() {
     let home = fixture();
     let result = remove(home.path(), request(home.path(), &[A, B])).unwrap();

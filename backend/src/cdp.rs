@@ -16,6 +16,10 @@ use crate::error_log;
 
 mod runtime_optimizations;
 pub(crate) use runtime_optimizations::refresh_auxiliary_renderers;
+#[cfg(windows)]
+mod quit;
+#[cfg(windows)]
+pub(crate) use quit::request_native_quit;
 
 const SETTINGS_OVERLAY_LOAD_PATH: &str = "/internal/codey/settings-overlay/load";
 const SESSION_TOOLS_LOAD_PATH: &str = "/internal/codey/session-tools/load";

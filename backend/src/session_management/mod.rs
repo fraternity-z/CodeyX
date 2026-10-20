@@ -84,7 +84,12 @@ fn scan(home: &Path) -> Result<Inventory> {
     files::inventory(home, &mut entries)?;
     database::inventory(home, &mut entries)?;
     let pending = read_pending(home)?;
-    let revision = crate::fs_util::sha256_hex(&serde_json::to_vec(&entries)?);
+    // 正常写入不改变清理范围；仅会话集合与归档状态变化需要重新确认。
+    let scope = entries
+        .iter()
+        .map(|(id, entry)| (id, entry.archived))
+        .collect::<Vec<_>>();
+    let revision = crate::fs_util::sha256_hex(&serde_json::to_vec(&scope)?);
     let mut sessions = entries.into_values().collect::<Vec<_>>();
     sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then(a.id.cmp(&b.id)));
     Ok(Inventory {

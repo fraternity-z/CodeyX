@@ -10,3 +10,7 @@ export function filterSessions(sessions: SessionEntry[], query: string, filter: 
 export function sessionDate(timestamp: number) {
   return timestamp > 0 ? new Date(timestamp).toLocaleString("zh-CN", { hour12: false }) : "时间未知";
 }
+
+export function sessionPath(path: string) {
+  return path.replace(/^\\\\\?\\UNC\\/i, "\\\\").replace(/^\\\\\?\\/, "");
+}

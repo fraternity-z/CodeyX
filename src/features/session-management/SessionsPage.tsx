@@ -1,7 +1,7 @@
 import { IconMessages, IconRefresh, IconTrash } from "@tabler/icons-react";
 import { Badge, Button, Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "../../components/ui";
 import { SettingsPageHeader } from "../../SettingsPageHeader";
-import { sessionDate } from "./state";
+import { sessionDate, sessionPath } from "./state";
 import type { SessionFilter } from "./types";
 import { useSessionsController } from "./useSessionsController";
 
@@ -51,7 +51,7 @@ export function SessionsPage({ active, isBusy, onRestart, container }: {
             onChange={() => c.toggle(session.id)} className="mt-1 size-4 shrink-0 accent-[var(--accent)]" />
           <span className="min-w-0 flex-1 space-y-1">
             <span className="flex flex-wrap items-center gap-2"><strong className="text-sm break-words min-w-0">{session.title}</strong><Badge variant="secondary">{session.archived ? "已归档" : "未归档"}</Badge></span>
-            <span className="block break-all text-xs text-muted">{session.cwd || "未记录项目路径"}</span>
+            <span className="block break-all text-xs text-muted">{sessionPath(session.cwd) || "未记录项目路径"}</span>
             <span className="block break-all text-xs text-muted">{sessionDate(session.updatedAt)} · {session.id}</span>
           </span>
         </label>)}

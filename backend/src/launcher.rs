@@ -44,6 +44,8 @@ mod platform;
 mod process;
 mod recovery;
 #[cfg(any(windows, test))]
+mod restart;
+#[cfg(any(windows, test))]
 mod windows_activation;
 #[cfg(any(windows, test))]
 mod windows_packaged;
@@ -2326,6 +2328,14 @@ impl CodeyRuntime {
             },
             codex_exit,
         ))
+    }
+
+    #[cfg(windows)]
+    pub async fn prepare_for_restart(&self) -> Result<()> {
+        let websocket_url = self.injection_websocket_url.read().await.clone();
+        restart::prepare(self.process_id, &websocket_url)
+            .await
+            .context("无法确认 Codex 已正常退出，已取消重启以保护尚未保存的设置")
     }
 
     pub async fn stop(&self) -> Result<()> {

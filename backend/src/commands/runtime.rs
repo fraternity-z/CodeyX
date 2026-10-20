@@ -557,7 +557,21 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
         return;
     }
 
-    if let Err(error) = stop_codey_runtime_locked(&restart_state).await {
+    let stop = async {
+        #[cfg(windows)]
+        {
+            let runtime = restart_state.runtime.lock().await;
+            if let Some(runtime) = runtime.as_ref() {
+                runtime
+                    .prepare_for_restart()
+                    .await
+                    .map_err(|error| format!("{error:#}"))?;
+            }
+        }
+        stop_codey_runtime_locked(&restart_state).await
+    }
+    .await;
+    if let Err(error) = stop {
         error_log::record_failure(
             "runtime_restart_failed",
             "stop_runtime_for_restart",
