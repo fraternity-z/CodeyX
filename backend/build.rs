@@ -18,6 +18,8 @@ fn main() {
         "../scripts/build-overlay.mjs",
         "../scripts/build-output.mjs",
         "../scripts/overlay-build-cache.mjs",
+        "../scripts/startup-splash.mjs",
+        "src/codex_startup_splash.html",
         "../public",
         "../dist-overlay",
     ] {

@@ -20,12 +20,14 @@ function fixture(t) {
     "vite.overlay.config.ts", "vite.remote.config.ts", "tsconfig.json", "package.json",
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches/example.patch",
     "scripts/build-overlay.mjs", "scripts/build-output.mjs", "scripts/overlay-build-cache.mjs",
+    "scripts/startup-splash.mjs", "backend/src/codex_startup_splash.html", "public/startup-art/gpt-claude.webp",
     "node_modules/.pnpm/lock.yaml", "node_modules/.modules.yaml", ".gitignore",
   ]) write(name);
   const outputs = new Map([
     ["codey-overlay.js", "overlay"], ["codey.css", "styles"],
     ["codey-remote.js", "remote"], ["codey-remote.css", "remote styles"],
     ["inject/bridge.js", "bridge"],
+    ["inject/startup-splash.html", "startup splash"],
   ]);
   let calls = 0;
   const build = async directory => {
@@ -61,6 +63,7 @@ for (const name of [
   "vite.overlay.config.ts", "vite.remote.config.ts", "tsconfig.json", "package.json",
   "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches/example.patch",
   "scripts/build-overlay.mjs", "scripts/build-output.mjs", "scripts/overlay-build-cache.mjs",
+  "scripts/startup-splash.mjs", "backend/src/codex_startup_splash.html", "public/startup-art/gpt-claude.webp",
   "node_modules/.pnpm/lock.yaml", "node_modules/.modules.yaml", ".gitignore", ".env.production.local",
   "tsconfig.build.json", "postcss.config.cjs",
 ]) {
@@ -101,7 +104,7 @@ test("public injection additions and removals rebuild and prune obsolete outputs
   assert.equal(existsSync(join(f.root, "dist-overlay/inject/new.js")), false);
 });
 
-for (const name of ["codey-overlay.js", "codey.css", "codey-remote.js", "codey-remote.css", "inject/bridge.js"]) {
+for (const name of ["codey-overlay.js", "codey.css", "codey-remote.js", "codey-remote.css", "inject/bridge.js", "inject/startup-splash.html"]) {
   test(`missing and corrupt output causes a rebuild: ${name}`, async t => {
     const f = fixture(t);
     await f.run();

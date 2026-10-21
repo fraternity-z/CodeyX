@@ -1,19 +1,15 @@
 <style>
 .codey-splash {
-  --cs-bg: oklch(0.985 0.003 255);
-  --cs-ink: oklch(0.24 0.02 258);
-  --cs-dim: oklch(0.46 0.02 258);
-  --cs-line: oklch(0.24 0.02 258 / 0.14);
-  --cs-grid: oklch(0.3 0.03 258 / 0.16);
-  --cs-accent: #007aff;
-  --cs-aura: rgb(0 122 255 / 0.12);
-  --cs-scan: rgb(0 122 255 / 0.55);
-  --cs-scan-core: #007aff;
-  --cs-scan-blend: normal;
-  --cs-h: clamp(52px, 8.6vmin, 80px);
+  color-scheme: light dark;
+  --cs-bg: light-dark(#f8f7f5, #131620);
+  --cs-ink: light-dark(#202638, #f1f1f8);
+  --cs-dim: light-dark(#687083, #a5a9bd);
+  --cs-line: light-dark(rgb(39 48 73 / 0.16), rgb(223 227 255 / 0.18));
+  --cs-grid: light-dark(rgb(65 77 106 / 0.12), rgb(193 203 244 / 0.1));
+  --cs-accent: light-dark(#5268d8, #9aaaff);
+  --cs-warm: light-dark(#d18c59, #edb482);
   --cs-ease: cubic-bezier(0.16, 1, 0.3, 1);
   --cs-ease-quart: cubic-bezier(0.25, 1, 0.5, 1);
-  --cs-sweep: cubic-bezier(0.65, 0, 0.35, 1);
   position: fixed;
   inset: 0;
   z-index: 2147483000;
@@ -23,279 +19,192 @@
   contain: strict;
   background: var(--cs-bg);
   color: var(--cs-ink);
-  font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  font-family: "Segoe UI Variable Display", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
   cursor: default;
   user-select: none;
   -webkit-app-region: drag;
 }
-:root[data-theme="dark"] .codey-splash {
-  --cs-bg: oklch(0.165 0.014 258);
-  --cs-ink: oklch(0.955 0.008 258);
-  --cs-dim: oklch(0.74 0.015 258);
-  --cs-line: oklch(0.955 0.008 258 / 0.14);
-  --cs-grid: oklch(0.85 0.04 258 / 0.13);
-  --cs-accent: #2f93ff;
-  --cs-aura: rgb(10 132 255 / 0.2);
-  --cs-scan: rgb(120 185 255 / 0.5);
-  --cs-scan-core: #e8f3ff;
-  --cs-scan-blend: plus-lighter;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .codey-splash {
-    --cs-bg: oklch(0.165 0.014 258);
-    --cs-ink: oklch(0.955 0.008 258);
-    --cs-dim: oklch(0.74 0.015 258);
-    --cs-line: oklch(0.955 0.008 258 / 0.14);
-    --cs-grid: oklch(0.85 0.04 258 / 0.13);
-    --cs-accent: #2f93ff;
-    --cs-aura: rgb(10 132 255 / 0.2);
-    --cs-scan: rgb(120 185 255 / 0.5);
-    --cs-scan-core: #e8f3ff;
-    --cs-scan-blend: plus-lighter;
-  }
-}
-#root > .startup-loader > .startup-loader__logo { display: none; }
+:root:is([data-theme="light"], .light) .codey-splash,
+:root:not([data-theme="light"], [data-theme="dark"], .light, .dark) body:is([data-theme="light"], .light) > .codey-splash,
+:root:not([data-theme="light"], [data-theme="dark"], .light, .dark) body:not([data-theme="light"], [data-theme="dark"], .light, .dark):has(> #root:is([data-theme="light"], .light)) > .codey-splash { color-scheme: light; }
+:root:is([data-theme="dark"], .dark) .codey-splash,
+:root:not([data-theme="light"], [data-theme="dark"], .light, .dark) body:is([data-theme="dark"], .dark) > .codey-splash,
+:root:not([data-theme="light"], [data-theme="dark"], .light, .dark) body:not([data-theme="light"], [data-theme="dark"], .light, .dark):has(> #root:is([data-theme="dark"], .dark)) > .codey-splash { color-scheme: dark; }
+body:has(> .codey-splash) > #root .startup-loader { visibility: hidden; }
 .codey-splash *, .codey-splash *::before, .codey-splash *::after { box-sizing: border-box; }
 .codey-splash__grid {
   position: absolute;
   inset: 0;
-  -webkit-mask-image: radial-gradient(ellipse 58% 52% at 50% 50%, #000 0%, rgb(0 0 0 / 0.55) 45%, transparent 78%);
-  mask-image: radial-gradient(ellipse 58% 52% at 50% 50%, #000 0%, rgb(0 0 0 / 0.55) 45%, transparent 78%);
-  animation: codey-splash-fade-in 1100ms var(--cs-ease) both;
-}
-.codey-splash__grid::before {
-  content: "";
-  position: absolute;
-  inset: -24px;
-  background-image: radial-gradient(circle at center, var(--cs-grid) 1px, transparent 1.6px);
-  background-size: 24px 24px;
-  will-change: transform;
-  animation: codey-splash-drift 9s linear infinite;
+  background-image: radial-gradient(circle, var(--cs-grid) 0.8px, transparent 1px);
+  background-size: 28px 28px;
+  mask-image: radial-gradient(ellipse at 54% 50%, #000, transparent 76%);
+  pointer-events: none;
 }
 .codey-splash__aura {
   position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 620px;
-  height: 620px;
-  margin: -310px 0 0 -310px;
-  background: radial-gradient(
-    circle closest-side,
-    var(--cs-aura) 0%,
-    color-mix(in srgb, var(--cs-aura) 64%, transparent) 26%,
-    color-mix(in srgb, var(--cs-aura) 32%, transparent) 48%,
-    color-mix(in srgb, var(--cs-aura) 11%, transparent) 72%,
-    color-mix(in srgb, var(--cs-aura) 3%, transparent) 88%,
-    transparent 100%
-  );
-  will-change: transform, opacity;
-  animation:
-    codey-splash-aura-in 1500ms var(--cs-ease) both,
-    codey-splash-aura-breathe 4200ms ease-in-out 1500ms infinite alternate;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 74% 39%, light-dark(rgb(146 141 212 / 0.1), rgb(129 133 233 / 0.12)), transparent 48%),
+    radial-gradient(ellipse at 60% 74%, light-dark(rgb(238 185 133 / 0.13), rgb(201 135 83 / 0.08)), transparent 48%);
+  pointer-events: none;
 }
 .codey-splash__stage {
   position: relative;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
   align-items: center;
+  gap: clamp(28px, 5vw, 76px);
+  width: min(calc(100% - 112px), 1080px);
 }
-.codey-splash__frame {
-  position: relative;
-  padding: 26px 34px;
+.codey-splash__copy {
+  min-width: 0;
+  padding-bottom: 12px;
+  animation: codey-splash-rise 850ms var(--cs-ease) 120ms both;
 }
-.codey-splash__corner {
-  --dx: -1;
-  --dy: -1;
-  position: absolute;
-  width: 14px;
-  height: 14px;
-  border: 0 solid var(--cs-accent);
-  opacity: 0.8;
-  animation: codey-splash-lock 760ms var(--cs-ease) 880ms both;
-}
-.codey-splash__corner:nth-child(1) { top: 0; left: 0; border-top-width: 1.5px; border-left-width: 1.5px; }
-.codey-splash__corner:nth-child(2) { --dx: 1; top: 0; right: 0; border-top-width: 1.5px; border-right-width: 1.5px; }
-.codey-splash__corner:nth-child(3) { --dy: 1; bottom: 0; left: 0; border-bottom-width: 1.5px; border-left-width: 1.5px; }
-.codey-splash__corner:nth-child(4) { --dx: 1; --dy: 1; bottom: 0; right: 0; border-bottom-width: 1.5px; border-right-width: 1.5px; }
-.codey-splash__mark {
-  position: relative;
+.codey-splash__overline {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 25px 5px;
 }
-.codey-splash__glyph {
-  position: relative;
+.codey-splash__overline i {
+  width: 24px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--cs-accent);
+}
+.codey-splash__overline i:nth-child(2) { width: 11px; opacity: 0.55; }
+.codey-splash__overline i:nth-child(3) { width: 5px; background: var(--cs-warm); }
+.codey-splash__mark {
   display: block;
-  will-change: transform, opacity;
-  animation: codey-splash-glyph-in 760ms var(--cs-ease) calc(220ms + var(--i) * 85ms) both;
+  width: clamp(260px, 34vw, 450px);
+  max-width: 100%;
+  height: auto;
+  margin: 0;
 }
-.codey-splash__glyph svg {
-  display: block;
-  width: auto;
-  height: var(--cs-h);
-  overflow: visible;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 3.4;
-  stroke-linecap: butt;
-  stroke-linejoin: miter;
-}
-.codey-splash__glyph--x {
-  color: var(--cs-accent);
-  animation: codey-splash-x-in 820ms var(--cs-ease) 700ms both;
-}
-.codey-splash__glyph--x .codey-splash__glow {
-  position: absolute;
-  inset: 0;
-  stroke-width: 7;
-  filter: blur(7px);
-  opacity: 0.5;
-  will-change: opacity;
-  animation:
-    codey-splash-flare 1150ms var(--cs-ease-quart) 760ms both,
-    codey-splash-glow-breathe 3200ms ease-in-out 1910ms infinite alternate;
-}
-.codey-splash__scan {
-  position: absolute;
-  top: -30%;
-  bottom: -30%;
-  left: 0;
-  width: 100%;
-  pointer-events: none;
-  opacity: 0;
-  mix-blend-mode: var(--cs-scan-blend);
-  will-change: transform, opacity;
-  animation:
-    codey-splash-scan 720ms var(--cs-sweep) 150ms both,
-    codey-splash-scan-loop 3800ms linear 2600ms infinite;
-}
-.codey-splash__scan::before,
-.codey-splash__scan::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-}
-.codey-splash__scan::before {
-  left: -1px;
-  width: 2px;
-  background: linear-gradient(180deg, transparent, var(--cs-scan-core) 28%, var(--cs-scan-core) 72%, transparent);
-}
-.codey-splash__scan::after {
-  left: -26px;
-  width: 52px;
-  background: radial-gradient(ellipse 50% 46% at 50% 50%, var(--cs-scan) 0%, transparent 100%);
+.codey-splash__mark stop:first-child { stop-color: light-dark(#3d7de2, #a3c7ff); }
+.codey-splash__mark stop:last-child { stop-color: light-dark(#8061c5, #ba9cec); }
+.codey-splash__underline {
+  width: 56px;
+  height: 2px;
+  margin: 24px 0 0 5px;
+  background: linear-gradient(90deg, var(--cs-accent) 0% 64%, var(--cs-warm) 64%);
 }
 .codey-splash__meta {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 16px;
-  margin-top: 18px;
+  gap: 17px;
+  margin: 34px 0 0 5px;
+}
+.codey-splash__label {
+  color: var(--cs-dim);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1.5;
+  letter-spacing: 0.13em;
 }
 .codey-splash__track {
   position: relative;
   display: block;
-  width: 200px;
-  height: 1px;
+  width: 180px;
+  height: 2px;
   overflow: hidden;
-  background: linear-gradient(90deg, transparent, var(--cs-line) 22% 78%, transparent);
-  animation: codey-splash-track-in 900ms var(--cs-ease) 980ms both;
+  border-radius: 1px;
+  background: var(--cs-line);
 }
 .codey-splash__track i {
   position: absolute;
-  top: 0;
-  left: 0;
-  width: 64px;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, var(--cs-accent) 60%, var(--cs-scan-core) 92%, transparent);
-  transform: translateX(-64px);
-  will-change: transform;
-  animation: codey-splash-comet 1900ms var(--cs-sweep) 1150ms infinite;
+  inset: 0 auto 0 0;
+  width: 58px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, transparent, var(--cs-accent), var(--cs-warm));
+  animation: codey-splash-comet 1900ms ease-in-out infinite;
 }
-.codey-splash__label {
-  font-size: 12px;
-  line-height: 1;
-  letter-spacing: 0.14em;
-  color: var(--cs-dim);
-  animation: codey-splash-rise 900ms var(--cs-ease) 1150ms both;
+.codey-splash__art {
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  animation: codey-splash-rise 1000ms var(--cs-ease) 200ms both;
 }
-body:not(:has(> #root > .startup-loader)) > .codey-splash {
+.codey-splash__art img {
+  display: block;
+  width: auto;
+  height: min(70vh, 550px);
+  max-width: 100%;
+  object-fit: contain;
+  animation: codey-splash-float 4800ms ease-in-out 1200ms infinite alternate;
+}
+body:has(> #root :is([data-app-navigation-rail], [data-app-action-sidebar-scroll], main button, main a[href], main input, main textarea, main [contenteditable="true"], form button, form input, [role="alert"]:not(:empty)):not([hidden], [hidden] *, [aria-hidden="true"], [aria-hidden="true"] *, [aria-busy="true"], [aria-busy="true"] *)):not(:has(> #root .startup-loader)) > .codey-splash:not([data-codey-splash-managed]),
+.codey-splash[data-codey-splash-ready] {
   pointer-events: none;
   animation: codey-splash-exit 520ms var(--cs-ease-quart) forwards;
 }
-body:not(:has(> #root > .startup-loader)) > .codey-splash .codey-splash__stage {
+.codey-splash[data-codey-splash-ready] .codey-splash__stage {
   animation: codey-splash-stage-exit 520ms var(--cs-ease-quart) forwards;
 }
-@keyframes codey-splash-fade-in { from { opacity: 0; } }
-@keyframes codey-splash-drift { to { transform: translate3d(24px, 24px, 0); } }
-@keyframes codey-splash-aura-in { from { opacity: 0; transform: scale(0.55); } }
-@keyframes codey-splash-aura-breathe { to { opacity: 0.72; transform: scale(1.08); } }
-@keyframes codey-splash-glyph-in {
-  from { opacity: 0; transform: translate3d(0, 10px, 0); filter: blur(6px); }
-  to { opacity: 1; transform: none; filter: blur(0); }
-}
-@keyframes codey-splash-x-in {
-  from { opacity: 0; transform: scale(1.55) rotate(-28deg); filter: blur(4px); }
-  to { opacity: 1; transform: none; filter: blur(0); }
-}
-@keyframes codey-splash-flare {
-  0% { opacity: 0; }
-  32% { opacity: 1; }
-  100% { opacity: 0.5; }
-}
-@keyframes codey-splash-glow-breathe { to { opacity: 0.9; } }
-@keyframes codey-splash-lock {
-  from { opacity: 0; transform: translate3d(calc(var(--dx) * 12px), calc(var(--dy) * 12px), 0); }
-}
-@keyframes codey-splash-scan {
-  0% { opacity: 0; transform: translate3d(-6%, 0, 0); }
-  12% { opacity: 1; }
-  85% { opacity: 1; }
-  100% { opacity: 0; transform: translate3d(104%, 0, 0); }
-}
-@keyframes codey-splash-scan-loop {
-  0% { opacity: 0; transform: translate3d(-6%, 0, 0); animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
-  3% { opacity: 1; }
-  20% { opacity: 1; }
-  24% { opacity: 0; transform: translate3d(104%, 0, 0); }
-  100% { opacity: 0; transform: translate3d(104%, 0, 0); }
-}
-@keyframes codey-splash-track-in { from { opacity: 0; transform: scaleX(0); } }
+@keyframes codey-splash-rise { from { opacity: 0; transform: translate3d(0, 14px, 0); } }
+@keyframes codey-splash-float { to { transform: translate3d(0, -6px, 0); } }
 @keyframes codey-splash-comet {
-  from { transform: translateX(-64px); }
-  to { transform: translateX(200px); }
+  from { transform: translateX(-58px); }
+  to { transform: translateX(180px); }
 }
-@keyframes codey-splash-rise { from { opacity: 0; transform: translate3d(0, 6px, 0); } }
 @keyframes codey-splash-exit { to { opacity: 0; visibility: hidden; display: none; } }
-@keyframes codey-splash-stage-exit { to { transform: scale(1.04); filter: blur(3px); } }
+@keyframes codey-splash-stage-exit { to { transform: translate3d(0, -5px, 0); opacity: 0; } }
+@media (max-width: 760px) {
+  .codey-splash__stage {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+    gap: 22px;
+    width: calc(100% - 48px);
+  }
+  .codey-splash__copy { display: flex; flex-direction: column; align-items: center; padding: 0; }
+  .codey-splash__overline { margin: 0 0 14px; }
+  .codey-splash__mark { width: min(82vw, 340px); }
+  .codey-splash__underline { margin: 15px 0 0; }
+  .codey-splash__meta { align-items: center; gap: 10px; margin: 18px 0 0; }
+  .codey-splash__art img { height: min(49vh, 400px); }
+}
+@media (max-height: 520px) {
+  .codey-splash__stage { width: calc(100% - 48px); gap: 16px; }
+  .codey-splash__overline { margin-bottom: 12px; }
+  .codey-splash__underline { margin-top: 12px; }
+  .codey-splash__meta { margin-top: 18px; gap: 10px; }
+  .codey-splash__art img { height: 78vh; }
+}
+@media (max-width: 760px) and (max-height: 520px) {
+  .codey-splash__stage { gap: 12px; }
+  .codey-splash__mark { width: min(72vw, 290px); }
+  .codey-splash__overline { display: none; }
+  .codey-splash__underline { margin-top: 8px; }
+  .codey-splash__meta { margin-top: 12px; gap: 8px; }
+  .codey-splash__art img { height: 46vh; }
+}
 @media (prefers-reduced-motion: reduce) {
   .codey-splash *,
   .codey-splash *::before,
   .codey-splash *::after { animation: none !important; }
-  .codey-splash__scan,
   .codey-splash__track i { display: none; }
-  body:not(:has(> #root > .startup-loader)) > .codey-splash { animation-duration: 200ms; }
+  .codey-splash { animation-duration: 1ms !important; }
 }
 </style>
 <div class="codey-splash" aria-hidden="true">
   <div class="codey-splash__grid"></div>
   <div class="codey-splash__aura"></div>
   <div class="codey-splash__stage">
-    <div class="codey-splash__frame">
-      <i class="codey-splash__corner"></i><i class="codey-splash__corner"></i><i class="codey-splash__corner"></i><i class="codey-splash__corner"></i>
-      <div class="codey-splash__mark">
-        <span class="codey-splash__glyph" style="--i:0"><svg viewBox="0 0 46 68"><path d="M40.32 15.14A20 20 0 1 0 40.32 40.86"/></svg></span>
-        <span class="codey-splash__glyph" style="--i:1"><svg viewBox="46 0 34 68"><path d="M76 35A13 13 0 1 1 50 35A13 13 0 1 1 76 35Z"/></svg></span>
-        <span class="codey-splash__glyph" style="--i:2"><svg viewBox="80 0 34 68"><path d="M110 35A13 13 0 1 1 84 35A13 13 0 1 1 110 35ZM110 8V48"/></svg></span>
-        <span class="codey-splash__glyph" style="--i:3"><svg viewBox="114 0 34 68"><path d="M118 35H144A13 13 0 1 0 140.96 43.36"/></svg></span>
-        <span class="codey-splash__glyph" style="--i:4"><svg viewBox="148 0 34 68"><path d="M150 22L163.7 48M178 22L156 62"/></svg></span>
-        <span class="codey-splash__glyph codey-splash__glyph--x" style="--i:5"><svg class="codey-splash__glow" viewBox="182 0 42 68"><path d="M188 8L220 48M220 8L188 48"/></svg><svg viewBox="182 0 42 68"><path d="M188 8L220 48M220 8L188 48"/></svg></span>
-        <i class="codey-splash__scan"></i>
+    <div class="codey-splash__copy">
+      <span class="codey-splash__overline"><i></i><i></i><i></i></span>
+      <!-- 以 Segoe Script Bold 轮廓修整 y 尾笔，启动时无需加载字体。 -->
+      <svg class="codey-splash__mark" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 7866 2908" role="img" aria-label="CodeyX"><title>CodeyX</title><defs><linearGradient id="codey-splash-wordmark-x" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3d7de2"/><stop offset="1" stop-color="#8061c5"/></linearGradient></defs><g transform="translate(-108 1642) scale(1 -1)" fill="currentColor"><path d="M1727 648Q1727 613 1700.0 569.0Q1673 525 1627.0 476.5Q1581 428 1520.0 376.0Q1459 324 1391 272Q1299 202 1195.5 138.0Q1092 74 985.0 24.5Q878 -25 772.0 -54.5Q666 -84 570 -84Q455 -84 371.0 -51.5Q287 -19 232.0 41.0Q177 101 150.5 185.5Q124 270 124 373Q124 459 144.0 549.0Q164 639 199.5 727.0Q235 815 283.0 897.0Q331 979 386 1048Q418 1088 462.0 1131.5Q506 1175 555.0 1217.0Q604 1259 654.0 1295.5Q704 1332 749 1359Q781 1378 830.0 1401.5Q879 1425 932.5 1445.5Q986 1466 1038.0 1480.0Q1090 1494 1128 1494Q1196 1494 1236.0 1485.0Q1276 1476 1307 1453Q1322 1442 1341.0 1419.0Q1360 1396 1377.0 1369.0Q1394 1342 1406.0 1315.5Q1418 1289 1418 1271Q1418 1259 1410.5 1238.5Q1403 1218 1391.0 1194.0Q1379 1170 1364.0 1144.5Q1349 1119 1334.5 1096.0Q1320 1073 1307.0 1055.0Q1294 1037 1287 1028Q1242 975 1174 975Q1117 975 1085.5 1007.0Q1054 1039 1054 1087Q1054 1102 1071.0 1134.5Q1088 1167 1127 1206Q1146 1225 1160.0 1243.5Q1174 1262 1182 1276Q1157 1285 1131 1285Q1100 1285 1053.5 1269.5Q1007 1254 956.5 1230.5Q906 1207 858.0 1178.0Q810 1149 777 1122Q685 1047 603.0 953.0Q521 859 467 748Q446 704 427.0 654.0Q408 604 394.0 552.5Q380 501 372.0 449.5Q364 398 364 352Q364 301 375.0 258.0Q386 215 411.5 183.0Q437 151 478.0 133.0Q519 115 579 115Q650 115 728.0 134.5Q806 154 886.0 187.5Q966 221 1046.5 264.5Q1127 308 1201.5 356.0Q1276 404 1342.5 453.0Q1409 502 1463 546Q1484 563 1509.5 586.0Q1535 609 1561.5 634.0Q1588 659 1613.5 685.0Q1639 711 1660 733Q1683 721 1696.5 712.0Q1710 703 1716.5 693.5Q1723 684 1725.0 673.0Q1727 662 1727 648ZM2302 608Q2302 633 2299.5 660.0Q2297 687 2289.0 710.5Q2281 734 2267.0 751.5Q2253 769 2230 775Q2195 784 2173.0 794.5Q2151 805 2138.0 814.0Q2125 823 2120.0 829.0Q2115 835 2113 835Q2105 835 2090.5 821.5Q2076 808 2058.5 787.0Q2041 766 2022.5 742.0Q2004 718 1987 697Q1966 671 1947.5 646.5Q1929 622 1911.5 595.5Q1894 569 1877.0 540.0Q1860 511 1842 476Q1826 444 1818.0 397.5Q1810 351 1810 310Q1810 293 1814.0 275.5Q1818 258 1826.0 244.0Q1834 230 1847.0 221.0Q1860 212 1879 212Q1925 212 1956.0 216.5Q1987 221 2014.0 232.5Q2041 244 2068.5 263.5Q2096 283 2135 312Q2153 326 2171.0 344.5Q2189 363 2207.0 384.5Q2225 406 2242.0 429.5Q2259 453 2273 475Q2281 487 2286.5 506.5Q2292 526 2295.5 546.0Q2299 566 2300.5 583.0Q2302 600 2302 607ZM3078 833Q3078 815 3070.5 795.0Q3063 775 3050.0 756.5Q3037 738 3020.5 722.0Q3004 706 2987 695Q2951 671 2882.5 653.0Q2814 635 2717 635Q2689 635 2657.5 639.0Q2626 643 2593.5 650.0Q2561 657 2529.5 667.5Q2498 678 2469 691Q2475 682 2479.0 666.5Q2483 651 2484.5 634.0Q2486 617 2486.5 601.5Q2487 586 2487 577Q2487 513 2464.5 449.5Q2442 386 2405.0 328.0Q2368 270 2321.0 220.5Q2274 171 2225 135Q2186 106 2138.5 85.0Q2091 64 2038.5 50.0Q1986 36 1930.5 29.0Q1875 22 1818 22Q1771 22 1728.0 45.0Q1685 68 1652.5 104.5Q1620 141 1600.5 187.0Q1581 233 1581 278Q1581 358 1602.5 432.0Q1624 506 1660.0 575.0Q1696 644 1744.0 710.5Q1792 777 1845 842Q1876 880 1916.0 916.0Q1956 952 2000.5 980.5Q2045 1009 2090.5 1026.0Q2136 1043 2178 1043Q2213 1043 2238.5 1035.0Q2264 1027 2285.5 1012.5Q2307 998 2327.0 977.0Q2347 956 2369 930L2390 907Q2398 899 2433.5 883.0Q2469 867 2518.0 851.5Q2567 836 2621.0 824.0Q2675 812 2719 812Q2764 812 2804.0 813.0Q2844 814 2884.5 820.5Q2925 827 2969.5 840.5Q3014 854 3068 878Q3073 869 3075.5 855.0Q3078 841 3078 833ZM4399 375Q4353 333 4294.5 287.0Q4236 241 4168.5 202.5Q4101 164 4025.5 139.5Q3950 115 3869 115Q3799 115 3744.0 144.0Q3689 173 3651.5 228.0Q3614 283 3594.5 362.5Q3575 442 3575 544Q3560 517 3539.5 487.5Q3519 458 3497.5 430.5Q3476 403 3456.0 380.5Q3436 358 3423 345Q3284 207 3160.5 133.0Q3037 59 2923 59Q2881 59 2848.0 73.0Q2815 87 2792.5 109.0Q2770 131 2758.0 158.5Q2746 186 2746 213Q2746 291 2770.5 374.0Q2795 457 2833.5 537.5Q2872 618 2919.5 691.5Q2967 765 3014 824Q3060 883 3109.0 932.5Q3158 982 3205.5 1019.0Q3253 1056 3297.0 1076.5Q3341 1097 3377 1097Q3398 1097 3424.5 1087.5Q3451 1078 3475.5 1065.0Q3500 1052 3519.5 1038.5Q3539 1025 3546 1017Q3555 1007 3566.0 994.0Q3577 981 3582 964Q3591 1024 3601.5 1093.5Q3612 1163 3621.5 1231.5Q3631 1300 3638.5 1364.0Q3646 1428 3649 1477Q3654 1552 3687.0 1589.0Q3720 1626 3792 1626Q3834 1626 3857.5 1590.5Q3881 1555 3881 1489Q3881 1479 3876.0 1442.0Q3871 1405 3862.5 1350.5Q3854 1296 3843.5 1228.5Q3833 1161 3822.5 1090.0Q3812 1019 3801.5 949.5Q3791 880 3782.5 821.0Q3774 762 3769.0 718.0Q3764 674 3764 655Q3764 630 3765.0 594.5Q3766 559 3770.5 520.5Q3775 482 3784.5 444.0Q3794 406 3810.0 376.0Q3826 346 3850.0 327.0Q3874 308 3908 308Q3959 308 4009.5 319.5Q4060 331 4113.0 353.5Q4166 376 4223.0 409.0Q4280 442 4344 485Q4346 487 4352.5 492.5Q4359 498 4368.0 504.5Q4377 511 4387.5 516.0Q4398 521 4407 521Q4414 521 4425.5 506.5Q4437 492 4437 466Q4437 444 4431.0 421.0Q4425 398 4399 375ZM3555 819Q3558 830 3563.5 848.0Q3569 866 3571 883Q3550 857 3526.5 846.5Q3503 836 3464 836Q3444 836 3429.5 841.0Q3415 846 3404.0 855.0Q3393 864 3384.0 877.5Q3375 891 3365 908Q3322 898 3275.5 852.5Q3229 807 3183.5 743.0Q3138 679 3097.0 606.0Q3056 533 3025.0 467.5Q2994 402 2975.5 352.5Q2957 303 2957 287Q2957 273 2964.5 263.0Q2972 253 2985 253Q3008 253 3038.0 265.5Q3068 278 3098.0 297.0Q3128 316 3156.0 337.0Q3184 358 3203 374Q3249 414 3302.5 465.5Q3356 517 3405.5 575.5Q3455 634 3495.0 696.5Q3535 759 3555 819ZM4783 860Q4783 904 4769.5 922.0Q4756 940 4739 940Q4724 940 4704.0 922.0Q4684 904 4662.5 873.5Q4641 843 4619.5 802.5Q4598 762 4579.5 717.0Q4561 672 4548.5 624.5Q4536 577 4531 533Q4560 557 4583.5 576.5Q4607 596 4628 618Q4649 639 4675.5 669.5Q4702 700 4726.0 733.0Q4750 766 4766.5 799.0Q4783 832 4783 860ZM5559 752Q5559 744 5553.0 727.0Q5547 710 5533 687Q5494 625 5435.5 552.0Q5377 479 5306.5 406.5Q5236 334 5155.5 266.5Q5075 199 4992.5 147.0Q4910 95 4828.0 63.5Q4746 32 4672 32Q4578 32 4508.0 58.0Q4438 84 4392.0 133.5Q4346 183 4323.0 254.5Q4300 326 4300 417Q4300 486 4310.5 563.0Q4321 640 4349.0 719.5Q4377 799 4424.5 879.5Q4472 960 4546 1035Q4603 1093 4669.0 1123.0Q4735 1153 4795 1153Q4806 1153 4823.0 1148.5Q4840 1144 4857.0 1136.0Q4874 1128 4890.0 1117.0Q4906 1106 4916 1093Q4948 1052 4964.0 1015.5Q4980 979 4980 933Q4980 861 4960.0 803.0Q4940 745 4905.5 694.5Q4871 644 4824.0 597.0Q4777 550 4723 499Q4690 468 4641.0 431.5Q4592 395 4536 352Q4544 321 4556.0 298.5Q4568 276 4586.0 261.0Q4604 246 4629.5 238.5Q4655 231 4690 231Q4737 231 4790.5 247.0Q4844 263 4898 288Q4945 310 4991.0 343.5Q5037 377 5084 413Q5113 435 5158.5 476.5Q5204 518 5251 563Q5283 593 5315.0 621.5Q5347 650 5383 685L5436 737Q5494 784 5530 784Q5549 784 5554.0 773.0Q5559 762 5559 752ZM6410 840Q6409 823 6398.0 786.5Q6387 750 6370.5 701.0Q6354 652 6332.5 593.5Q6311 535 6289.5 473.0Q6268 411 6247.0 348.5Q6226 286 6210 230Q6209 227 6201.5 202.5Q6194 178 6182.0 139.5Q6170 101 6155.0 52.5Q6140 4 6124.5 -96.0Q6109 -196 6093.5 -293.0Q6078 -390 6066.0 -468.0Q6054 -546 6046.0 -597.0Q6038 -648 6037 -654
+C6000 -990 5860 -1250 5500 -1250C5200 -1250 4950 -1120 4950 -900C4950 -770 5030 -700 5120 -700Q5200 -700 5200 -760Q5200 -810 5150 -820Q5080 -830 5100 -930C5130 -1090 5450 -1110 5640 -1010C5750 -950 5790 -790 5811.5 -571.0
+Q5828 -484 5847.5 -387.0Q5867 -290 5884 -196Q5884 -196 5891.5 -157.0Q5899 -118 5911.0 -56.5Q5923 5 5937.5 45.0Q5952 85 5967.0 125.0Q5982 165 5995.5 201.0Q6009 237 6018 261Q5995 242 5965.0 220.0Q5935 198 5901.5 175.5Q5868 153 5831.0 132.5Q5794 112 5757.5 96.0Q5721 80 5685.5 70.5Q5650 61 5618 61Q5549 61 5496.0 84.0Q5443 107 5407.0 142.5Q5371 178 5352.5 220.5Q5334 263 5334 303Q5334 333 5340.5 377.0Q5347 421 5358.5 471.5Q5370 522 5386.0 576.5Q5402 631 5420.0 682.0Q5438 733 5457.5 776.5Q5477 820 5497 849Q5528 894 5556.5 912.0Q5585 930 5618 930Q5649 930 5668.5 921.0Q5688 912 5699.0 896.0Q5710 880 5714.0 860.0Q5718 840 5718 817Q5718 803 5706.5 777.0Q5695 751 5678 715Q5663 684 5643.0 641.5Q5623 599 5606.0 549.5Q5589 500 5577.0 446.0Q5565 392 5565 337Q5565 318 5575.0 305.0Q5585 292 5598.5 284.5Q5612 277 5626.5 273.5Q5641 270 5650 270Q5686 270 5725.0 284.5Q5764 299 5802.5 320.5Q5841 342 5877.5 366.5Q5914 391 5947 411Q5974 428 6007.0 454.5Q6040 481 6064 514Q6075 529 6090.5 567.5Q6106 606 6123.0 655.0Q6140 704 6156.5 755.5Q6173 807 6185 849Q6194 879 6208.5 901.5Q6223 924 6239.5 938.5Q6256 953 6273.5 960.5Q6291 968 6306 968Q6340 968 6360.5 962.0Q6381 956 6392.0 941.5Q6403 927 6406.5 902.5Q6410 878 6410 842Z"/><path class="codey-splash__x" d="M7958 138Q7958 116 7944.0 91.5Q7930 67 7906.5 46.0Q7883 25 7853.5 11.5Q7824 -2 7794 -2Q7731 -2 7543 156Q7485 206 7431.0 268.0Q7377 330 7312 406Q7301 420 7279.5 447.5Q7258 475 7234.0 506.5Q7210 538 7187.0 568.5Q7164 599 7149 618Q7111 586 7068.0 539.5Q7025 493 6987 450Q6942 399 6898.0 350.5Q6854 302 6814 249Q6802 234 6783.0 210.5Q6764 187 6743.0 160.0Q6722 133 6700.5 105.0Q6679 77 6663 53Q6655 39 6645.5 22.5Q6636 6 6624.5 -8.0Q6613 -22 6599.5 -31.0Q6586 -40 6571 -40Q6547 -40 6528.0 -26.5Q6509 -13 6496.0 10.0Q6483 33 6476.5 62.5Q6470 92 6470 123Q6470 201 6551 306Q6587 352 6633.0 401.5Q6679 451 6738 507Q6786 552 6837.5 599.5Q6889 647 6931.5 687.0Q6974 727 7001.5 755.5Q7029 784 7029 792Q7029 802 6997.0 852.0Q6965 902 6919 983Q6838 1128 6791.0 1216.5Q6744 1305 6744 1340Q6744 1360 6751.5 1389.0Q6759 1418 6774.0 1446.0Q6789 1474 6811.0 1493.5Q6833 1513 6861 1513Q6906 1513 6934.5 1473.0Q6963 1433 6989 1353Q7007 1316 7020.0 1286.5Q7033 1257 7044.0 1230.5Q7055 1204 7067.5 1179.5Q7080 1155 7096 1126Q7109 1105 7119.5 1083.0Q7130 1061 7141.0 1038.5Q7152 1016 7164.5 993.0Q7177 970 7193 946Q7212 967 7236.5 992.0Q7261 1017 7281 1037L7411 1166Q7417 1172 7430.5 1186.5Q7444 1201 7461.0 1219.5Q7478 1238 7497.0 1258.5Q7516 1279 7532.5 1297.5Q7549 1316 7561.5 1330.0Q7574 1344 7578 1349Q7590 1363 7613.0 1389.0Q7636 1415 7665.5 1440.5Q7695 1466 7728.5 1485.0Q7762 1504 7794 1504Q7831 1504 7854.5 1493.5Q7878 1483 7891.5 1464.5Q7905 1446 7910.0 1420.5Q7915 1395 7915 1366Q7915 1349 7905.0 1333.0Q7895 1317 7878.5 1305.0Q7862 1293 7840.0 1285.5Q7818 1278 7794 1278Q7789 1278 7774.5 1266.0Q7760 1254 7743.0 1236.5Q7726 1219 7709.0 1199.5Q7692 1180 7681 1165Q7644 1114 7606.5 1077.5Q7569 1041 7532 1006Q7526 1000 7510.5 985.5Q7495 971 7474.0 950.5Q7453 930 7428.5 906.0Q7404 882 7380.0 858.0Q7356 834 7334.5 811.5Q7313 789 7298 772Q7318 747 7341.5 719.0Q7365 691 7389.0 662.5Q7413 634 7436.5 607.5Q7460 581 7479 558Q7520 511 7562.0 467.5Q7604 424 7655 376Q7716 317 7773.0 277.0Q7830 237 7868 225Q7916 210 7937.0 192.5Q7958 175 7958 138Z" fill="url(#codey-splash-wordmark-x)"/></g></svg>
+      <div class="codey-splash__underline"></div>
+      <div class="codey-splash__meta">
+        <span class="codey-splash__label">正在启动 Codex</span>
+        <span class="codey-splash__track"><i></i></span>
       </div>
     </div>
-    <div class="codey-splash__meta">
-      <span class="codey-splash__track"><i></i></span>
-      <span class="codey-splash__label">正在启动 Codex</span>
+    <div class="codey-splash__art">
+      <img src="__CODEY_STARTUP_ART__" width="624" height="774" alt="" decoding="async" fetchpriority="high">
     </div>
   </div>
 </div>

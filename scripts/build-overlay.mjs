@@ -2,6 +2,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { readFileSync, readdirSync } from "node:fs";
 import { buildOverlayWithCache } from "./overlay-build-cache.mjs";
+import { loadStartupSplash } from "./startup-splash.mjs";
 
 async function compileOverlay(root) {
   const { build, transformWithEsbuild } = await import("vite");
@@ -58,6 +59,7 @@ async function compileOverlay(root) {
   console.log(
     `[overlay] minified inject scripts: ${rawTotal} -> ${minifiedTotal} bytes`,
   );
+  outputs.set("inject/startup-splash.html", loadStartupSplash(root));
   return outputs;
 }
 

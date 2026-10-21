@@ -92,7 +92,8 @@ pub fn inspector_argument(port: u16) -> String {
 }
 
 const STARTUP_PATCH_TEMPLATE: &str = concat!("\n", include_str!("codex_startup_patch.js"));
-pub(crate) const STARTUP_SPLASH_MARKUP: &str = include_str!("codex_startup_splash.html");
+pub(crate) const STARTUP_SPLASH_MARKUP: &str =
+    include_str!("../../dist-overlay/inject/startup-splash.html");
 
 #[cfg(test)]
 fn patch_expression(options: PatchOptions) -> String {

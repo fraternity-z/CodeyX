@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { readSource } from "./helpers/read-source.mjs";
 import { loadStartupPatchTemplate } from "./helpers/startup-patch.mjs";
+import { loadStartupSplashMarkup } from "./helpers/startup-splash.mjs";
 
 const bootstrapHtml = [
   "<!doctype html><html><head><style>.startup-loader{display:flex}</style></head>",
@@ -44,7 +44,7 @@ async function installAppProtocolHandler(startupSplash) {
 }
 
 test("the CodeyX splash is embedded only into the primary Codex bootstrap page", async () => {
-  const splash = await readSource("backend/src/codex_startup_splash.html");
+  const splash = loadStartupSplashMarkup();
   const useUpstream = await installAppProtocolHandler(splash);
   const handler = useUpstream(async () =>
     new Response(bootstrapHtml, {
@@ -77,13 +77,12 @@ test("the CodeyX splash is embedded only into the primary Codex bootstrap page",
   );
 });
 
-test("the splash hides itself once Codex replaces the static startup loader", async () => {
-  const splash = await readSource("backend/src/codex_startup_splash.html");
+test("the splash waits for a usable Codex screen and keeps a CSP-safe CSS fallback", async () => {
+  const splash = loadStartupSplashMarkup();
   assert.doesNotMatch(splash, /<script\b/i, "Codex CSP rejects inline scripts");
-  assert.match(
-    splash,
-    /body:not\(:has\(> #root > \.startup-loader\)\) > \.codey-splash \{[^}]*animation: codey-splash-exit/,
-  );
+  assert.doesNotMatch(splash, /body:not\(:has\(> #root > \.startup-loader\)\)/);
+  assert.match(splash, /\[data-app-navigation-rail\]/);
+  assert.match(splash, /\.codey-splash\[data-codey-splash-ready\] \{[^}]*animation: codey-splash-exit/);
   assert.match(splash, /@keyframes codey-splash-exit \{ to \{[^}]*visibility: hidden/);
   assert.match(splash, /@media \(prefers-reduced-motion: reduce\)/);
 });
