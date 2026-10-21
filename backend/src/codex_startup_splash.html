@@ -1,0 +1,301 @@
+<style>
+.codey-splash {
+  --cs-bg: oklch(0.985 0.003 255);
+  --cs-ink: oklch(0.24 0.02 258);
+  --cs-dim: oklch(0.46 0.02 258);
+  --cs-line: oklch(0.24 0.02 258 / 0.14);
+  --cs-grid: oklch(0.3 0.03 258 / 0.16);
+  --cs-accent: #007aff;
+  --cs-aura: rgb(0 122 255 / 0.12);
+  --cs-scan: rgb(0 122 255 / 0.55);
+  --cs-scan-core: #007aff;
+  --cs-scan-blend: normal;
+  --cs-h: clamp(52px, 8.6vmin, 80px);
+  --cs-ease: cubic-bezier(0.16, 1, 0.3, 1);
+  --cs-ease-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --cs-sweep: cubic-bezier(0.65, 0, 0.35, 1);
+  position: fixed;
+  inset: 0;
+  z-index: 2147483000;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  contain: strict;
+  background: var(--cs-bg);
+  color: var(--cs-ink);
+  font-family: "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+  cursor: default;
+  user-select: none;
+  -webkit-app-region: drag;
+}
+:root[data-theme="dark"] .codey-splash {
+  --cs-bg: oklch(0.165 0.014 258);
+  --cs-ink: oklch(0.955 0.008 258);
+  --cs-dim: oklch(0.74 0.015 258);
+  --cs-line: oklch(0.955 0.008 258 / 0.14);
+  --cs-grid: oklch(0.85 0.04 258 / 0.13);
+  --cs-accent: #2f93ff;
+  --cs-aura: rgb(10 132 255 / 0.2);
+  --cs-scan: rgb(120 185 255 / 0.5);
+  --cs-scan-core: #e8f3ff;
+  --cs-scan-blend: plus-lighter;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .codey-splash {
+    --cs-bg: oklch(0.165 0.014 258);
+    --cs-ink: oklch(0.955 0.008 258);
+    --cs-dim: oklch(0.74 0.015 258);
+    --cs-line: oklch(0.955 0.008 258 / 0.14);
+    --cs-grid: oklch(0.85 0.04 258 / 0.13);
+    --cs-accent: #2f93ff;
+    --cs-aura: rgb(10 132 255 / 0.2);
+    --cs-scan: rgb(120 185 255 / 0.5);
+    --cs-scan-core: #e8f3ff;
+    --cs-scan-blend: plus-lighter;
+  }
+}
+#root > .startup-loader > .startup-loader__logo { display: none; }
+.codey-splash *, .codey-splash *::before, .codey-splash *::after { box-sizing: border-box; }
+.codey-splash__grid {
+  position: absolute;
+  inset: 0;
+  -webkit-mask-image: radial-gradient(ellipse 58% 52% at 50% 50%, #000 0%, rgb(0 0 0 / 0.55) 45%, transparent 78%);
+  mask-image: radial-gradient(ellipse 58% 52% at 50% 50%, #000 0%, rgb(0 0 0 / 0.55) 45%, transparent 78%);
+  animation: codey-splash-fade-in 1100ms var(--cs-ease) both;
+}
+.codey-splash__grid::before {
+  content: "";
+  position: absolute;
+  inset: -24px;
+  background-image: radial-gradient(circle at center, var(--cs-grid) 1px, transparent 1.6px);
+  background-size: 24px 24px;
+  will-change: transform;
+  animation: codey-splash-drift 9s linear infinite;
+}
+.codey-splash__aura {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 620px;
+  height: 620px;
+  margin: -310px 0 0 -310px;
+  background: radial-gradient(
+    circle closest-side,
+    var(--cs-aura) 0%,
+    color-mix(in srgb, var(--cs-aura) 64%, transparent) 26%,
+    color-mix(in srgb, var(--cs-aura) 32%, transparent) 48%,
+    color-mix(in srgb, var(--cs-aura) 11%, transparent) 72%,
+    color-mix(in srgb, var(--cs-aura) 3%, transparent) 88%,
+    transparent 100%
+  );
+  will-change: transform, opacity;
+  animation:
+    codey-splash-aura-in 1500ms var(--cs-ease) both,
+    codey-splash-aura-breathe 4200ms ease-in-out 1500ms infinite alternate;
+}
+.codey-splash__stage {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.codey-splash__frame {
+  position: relative;
+  padding: 26px 34px;
+}
+.codey-splash__corner {
+  --dx: -1;
+  --dy: -1;
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 0 solid var(--cs-accent);
+  opacity: 0.8;
+  animation: codey-splash-lock 760ms var(--cs-ease) 880ms both;
+}
+.codey-splash__corner:nth-child(1) { top: 0; left: 0; border-top-width: 1.5px; border-left-width: 1.5px; }
+.codey-splash__corner:nth-child(2) { --dx: 1; top: 0; right: 0; border-top-width: 1.5px; border-right-width: 1.5px; }
+.codey-splash__corner:nth-child(3) { --dy: 1; bottom: 0; left: 0; border-bottom-width: 1.5px; border-left-width: 1.5px; }
+.codey-splash__corner:nth-child(4) { --dx: 1; --dy: 1; bottom: 0; right: 0; border-bottom-width: 1.5px; border-right-width: 1.5px; }
+.codey-splash__mark {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+}
+.codey-splash__glyph {
+  position: relative;
+  display: block;
+  will-change: transform, opacity;
+  animation: codey-splash-glyph-in 760ms var(--cs-ease) calc(220ms + var(--i) * 85ms) both;
+}
+.codey-splash__glyph svg {
+  display: block;
+  width: auto;
+  height: var(--cs-h);
+  overflow: visible;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 3.4;
+  stroke-linecap: butt;
+  stroke-linejoin: miter;
+}
+.codey-splash__glyph--x {
+  color: var(--cs-accent);
+  animation: codey-splash-x-in 820ms var(--cs-ease) 700ms both;
+}
+.codey-splash__glyph--x .codey-splash__glow {
+  position: absolute;
+  inset: 0;
+  stroke-width: 7;
+  filter: blur(7px);
+  opacity: 0.5;
+  will-change: opacity;
+  animation:
+    codey-splash-flare 1150ms var(--cs-ease-quart) 760ms both,
+    codey-splash-glow-breathe 3200ms ease-in-out 1910ms infinite alternate;
+}
+.codey-splash__scan {
+  position: absolute;
+  top: -30%;
+  bottom: -30%;
+  left: 0;
+  width: 100%;
+  pointer-events: none;
+  opacity: 0;
+  mix-blend-mode: var(--cs-scan-blend);
+  will-change: transform, opacity;
+  animation:
+    codey-splash-scan 720ms var(--cs-sweep) 150ms both,
+    codey-splash-scan-loop 3800ms linear 2600ms infinite;
+}
+.codey-splash__scan::before,
+.codey-splash__scan::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+.codey-splash__scan::before {
+  left: -1px;
+  width: 2px;
+  background: linear-gradient(180deg, transparent, var(--cs-scan-core) 28%, var(--cs-scan-core) 72%, transparent);
+}
+.codey-splash__scan::after {
+  left: -26px;
+  width: 52px;
+  background: radial-gradient(ellipse 50% 46% at 50% 50%, var(--cs-scan) 0%, transparent 100%);
+}
+.codey-splash__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  margin-top: 18px;
+}
+.codey-splash__track {
+  position: relative;
+  display: block;
+  width: 200px;
+  height: 1px;
+  overflow: hidden;
+  background: linear-gradient(90deg, transparent, var(--cs-line) 22% 78%, transparent);
+  animation: codey-splash-track-in 900ms var(--cs-ease) 980ms both;
+}
+.codey-splash__track i {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 64px;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, var(--cs-accent) 60%, var(--cs-scan-core) 92%, transparent);
+  transform: translateX(-64px);
+  will-change: transform;
+  animation: codey-splash-comet 1900ms var(--cs-sweep) 1150ms infinite;
+}
+.codey-splash__label {
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  color: var(--cs-dim);
+  animation: codey-splash-rise 900ms var(--cs-ease) 1150ms both;
+}
+body:not(:has(> #root > .startup-loader)) > .codey-splash {
+  pointer-events: none;
+  animation: codey-splash-exit 520ms var(--cs-ease-quart) forwards;
+}
+body:not(:has(> #root > .startup-loader)) > .codey-splash .codey-splash__stage {
+  animation: codey-splash-stage-exit 520ms var(--cs-ease-quart) forwards;
+}
+@keyframes codey-splash-fade-in { from { opacity: 0; } }
+@keyframes codey-splash-drift { to { transform: translate3d(24px, 24px, 0); } }
+@keyframes codey-splash-aura-in { from { opacity: 0; transform: scale(0.55); } }
+@keyframes codey-splash-aura-breathe { to { opacity: 0.72; transform: scale(1.08); } }
+@keyframes codey-splash-glyph-in {
+  from { opacity: 0; transform: translate3d(0, 10px, 0); filter: blur(6px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+@keyframes codey-splash-x-in {
+  from { opacity: 0; transform: scale(1.55) rotate(-28deg); filter: blur(4px); }
+  to { opacity: 1; transform: none; filter: blur(0); }
+}
+@keyframes codey-splash-flare {
+  0% { opacity: 0; }
+  32% { opacity: 1; }
+  100% { opacity: 0.5; }
+}
+@keyframes codey-splash-glow-breathe { to { opacity: 0.9; } }
+@keyframes codey-splash-lock {
+  from { opacity: 0; transform: translate3d(calc(var(--dx) * 12px), calc(var(--dy) * 12px), 0); }
+}
+@keyframes codey-splash-scan {
+  0% { opacity: 0; transform: translate3d(-6%, 0, 0); }
+  12% { opacity: 1; }
+  85% { opacity: 1; }
+  100% { opacity: 0; transform: translate3d(104%, 0, 0); }
+}
+@keyframes codey-splash-scan-loop {
+  0% { opacity: 0; transform: translate3d(-6%, 0, 0); animation-timing-function: cubic-bezier(0.65, 0, 0.35, 1); }
+  3% { opacity: 1; }
+  20% { opacity: 1; }
+  24% { opacity: 0; transform: translate3d(104%, 0, 0); }
+  100% { opacity: 0; transform: translate3d(104%, 0, 0); }
+}
+@keyframes codey-splash-track-in { from { opacity: 0; transform: scaleX(0); } }
+@keyframes codey-splash-comet {
+  from { transform: translateX(-64px); }
+  to { transform: translateX(200px); }
+}
+@keyframes codey-splash-rise { from { opacity: 0; transform: translate3d(0, 6px, 0); } }
+@keyframes codey-splash-exit { to { opacity: 0; visibility: hidden; display: none; } }
+@keyframes codey-splash-stage-exit { to { transform: scale(1.04); filter: blur(3px); } }
+@media (prefers-reduced-motion: reduce) {
+  .codey-splash *,
+  .codey-splash *::before,
+  .codey-splash *::after { animation: none !important; }
+  .codey-splash__scan,
+  .codey-splash__track i { display: none; }
+  body:not(:has(> #root > .startup-loader)) > .codey-splash { animation-duration: 200ms; }
+}
+</style>
+<div class="codey-splash" aria-hidden="true">
+  <div class="codey-splash__grid"></div>
+  <div class="codey-splash__aura"></div>
+  <div class="codey-splash__stage">
+    <div class="codey-splash__frame">
+      <i class="codey-splash__corner"></i><i class="codey-splash__corner"></i><i class="codey-splash__corner"></i><i class="codey-splash__corner"></i>
+      <div class="codey-splash__mark">
+        <span class="codey-splash__glyph" style="--i:0"><svg viewBox="0 0 46 68"><path d="M40.32 15.14A20 20 0 1 0 40.32 40.86"/></svg></span>
+        <span class="codey-splash__glyph" style="--i:1"><svg viewBox="46 0 34 68"><path d="M76 35A13 13 0 1 1 50 35A13 13 0 1 1 76 35Z"/></svg></span>
+        <span class="codey-splash__glyph" style="--i:2"><svg viewBox="80 0 34 68"><path d="M110 35A13 13 0 1 1 84 35A13 13 0 1 1 110 35ZM110 8V48"/></svg></span>
+        <span class="codey-splash__glyph" style="--i:3"><svg viewBox="114 0 34 68"><path d="M118 35H144A13 13 0 1 0 140.96 43.36"/></svg></span>
+        <span class="codey-splash__glyph" style="--i:4"><svg viewBox="148 0 34 68"><path d="M150 22L163.7 48M178 22L156 62"/></svg></span>
+        <span class="codey-splash__glyph codey-splash__glyph--x" style="--i:5"><svg class="codey-splash__glow" viewBox="182 0 42 68"><path d="M188 8L220 48M220 8L188 48"/></svg><svg viewBox="182 0 42 68"><path d="M188 8L220 48M220 8L188 48"/></svg></span>
+        <i class="codey-splash__scan"></i>
+      </div>
+    </div>
+    <div class="codey-splash__meta">
+      <span class="codey-splash__track"><i></i></span>
+      <span class="codey-splash__label">正在启动 Codex</span>
+    </div>
+  </div>
+</div>

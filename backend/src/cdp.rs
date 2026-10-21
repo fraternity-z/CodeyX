@@ -66,6 +66,7 @@ const PROMPT_OPTIMIZE_SCRIPT: &str = include_str!("../../dist-overlay/inject/pro
 const CONVERSATION_GIT_SCRIPT: &str = include_str!("../../dist-overlay/inject/conversation-git.js");
 const CONVERSATION_STATS_SCRIPT: &str =
     include_str!("../../dist-overlay/inject/conversation-stats-inject.js");
+const STARTUP_SPLASH_SCRIPT: &str = include_str!("../../dist-overlay/inject/startup-splash.js");
 const MAX_INJECTION_ERROR_CHARS: usize = 500;
 // 面向用户的是归类后的摘要；完整错误链只进诊断与错误日志，单独给一个更大预算。
 const MAX_INJECTION_DETAIL_CHARS: usize = 2000;
@@ -465,7 +466,14 @@ pub fn prepare_injection_scripts(
             + PLUGIN_MARKETPLACE_FIX_SCRIPT.len()
             + PROMPT_OPTIMIZE_SCRIPT.len()
             + CONVERSATION_STATS_SCRIPT.len()
+            + STARTUP_SPLASH_SCRIPT.len()
+            + crate::codex_startup_patch::STARTUP_SPLASH_MARKUP.len()
             + 4096,
+    );
+    core_bundle.push_str("try {\n");
+    core_bundle.push_str(&startup_splash_script());
+    core_bundle.push_str(
+        "\n} catch (error) {\n  console.error(\"[Codey] startup splash injection failed\", error);\n}\n",
     );
     let mut descriptors = Vec::with_capacity(builtin_scripts.len() + user_scripts.len());
     for (id, name, script, probe, visibility) in builtin_scripts {
@@ -515,6 +523,14 @@ pub fn prepare_injection_scripts(
             prepare_script(RUNTIME_OPTIMIZATIONS_SCRIPT, slim_codex_pet),
         )),
     }
+}
+
+fn startup_splash_script() -> String {
+    STARTUP_SPLASH_SCRIPT.replace(
+        "__CODEY_STARTUP_SPLASH__",
+        &serde_json::to_string(crate::codex_startup_patch::STARTUP_SPLASH_MARKUP)
+            .expect("startup splash markup should serialize"),
+    )
 }
 
 fn prepare_script(script: &str, slim_codex_pet: bool) -> Cow<'_, str> {
@@ -3121,6 +3137,27 @@ const run = async (patch) => {
         );
         // 压缩会改写内部标识符，锚点必须用不会被改名的 window 属性。
         assert!(session_tools_load_script.contains("__codeyInstallSessionDeleteButtons"));
+    }
+
+    #[test]
+    fn startup_splash_runs_first_in_the_core_bundle_without_a_status_entry() {
+        let prepared = prepare_injection_scripts(true, false, false, &[]);
+        let core = &prepared.scripts[0];
+        let splash_at = core
+            .find("codey-splash__mark")
+            .expect("splash markup is embedded");
+        let first_status_at = core
+            .find("window.__codeyInjectionStatus")
+            .expect("builtin scripts follow the splash");
+        assert!(splash_at < first_status_at);
+        assert!(!core.contains("__CODEY_STARTUP_SPLASH__"));
+        assert!(core.contains("startup splash injection failed"));
+        assert!(
+            prepared
+                .descriptors
+                .iter()
+                .all(|descriptor| !descriptor.id.contains("splash"))
+        );
     }
 
     #[test]

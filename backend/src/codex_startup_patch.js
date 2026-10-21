@@ -8,6 +8,12 @@
   const rawMiscModelId = "__CODEY_MISC_MODEL_ID__";
   const miscModelId =
     typeof rawMiscModelId === "string" ? rawMiscModelId.trim() : "";
+  const rawCodeyStartupSplash = "__CODEY_STARTUP_SPLASH__";
+  const codeyStartupSplash =
+    typeof rawCodeyStartupSplash === "string" &&
+    rawCodeyStartupSplash.trimStart().startsWith("<")
+      ? rawCodeyStartupSplash
+      : "";
   const maxOptionalPatchFailureBatchSize = 64;
   const optionalPatchFailureQueue = [];
   let optionalPatchFailureFlushScheduled = false;
@@ -1038,17 +1044,58 @@
       return false;
     }
   };
+  const isPrimaryCodexRendererBootstrap = (request) => {
+    try {
+      return !new URL(request?.url).searchParams.has("initialRoute");
+    } catch {
+      return false;
+    }
+  };
+  const injectCodeyStartupSplash = (source) => {
+    if (
+      !codeyStartupSplash ||
+      !source.includes("startup-loader") ||
+      source.includes("codey-splash")
+    ) return source;
+    const body = /<body\b[^>]*>/i.exec(source);
+    if (!body) return source;
+    const insertAt = body.index + body[0].length;
+    return source.slice(0, insertAt) + codeyStartupSplash + source.slice(insertAt);
+  };
+  const replaceRendererResponseBody = (response, body) => {
+    const headers = new Headers(response.headers);
+    for (const header of [
+      "content-encoding",
+      "content-length",
+      "content-md5",
+      "digest",
+      "etag",
+      "last-modified",
+    ]) headers.delete(header);
+    return new Response(body, {
+      headers,
+      status: response.status,
+      statusText: response.statusText,
+    });
+  };
   const patchCodexRendererResponse = async (request, response) => {
     if (response?.ok !== true) return response;
     if (isCodexRendererBootstrapRequest(request)) {
+      let source;
       try {
-        discoverCodexRendererAssets(request.url, await response.clone().text());
+        source = await response.clone().text();
+        discoverCodexRendererAssets(request.url, source);
       } catch (error) {
         recordCodeyPatchFailure("renderer_patch:asset discovery", error, {
           requestUrl: request?.url,
         });
+        return response;
       }
-      return response;
+      if (!isPrimaryCodexRendererBootstrap(request)) return response;
+      const patched = injectCodeyStartupSplash(source);
+      return patched === source
+        ? response
+        : replaceRendererResponseBody(response, patched);
     }
     if (!isCodexRendererAssetRequest(request)) return response;
     let source;
@@ -1067,20 +1114,7 @@
       // Refresh insertion order so the bounded map behaves as an LRU.
       rememberRendererPatchedOutput(fingerprint, patched);
       if (patched === source) return response;
-      const headers = new Headers(response.headers);
-      for (const header of [
-        "content-encoding",
-        "content-length",
-        "content-md5",
-        "digest",
-        "etag",
-        "last-modified",
-      ]) headers.delete(header);
-      return new Response(patched, {
-        headers,
-        status: response.status,
-        statusText: response.statusText,
-      });
+      return replaceRendererResponseBody(response, patched);
     }
     const previousRendererPatchFailures = activeRendererPatchFailures;
     activeRendererPatchFailures = rendererPatchFailuresForFingerprint(fingerprint);
@@ -1103,20 +1137,7 @@
       activeRendererPatchFailures = previousRendererPatchFailures;
     }
     if (patched === source) return response;
-    const headers = new Headers(response.headers);
-    for (const header of [
-      "content-encoding",
-      "content-length",
-      "content-md5",
-      "digest",
-      "etag",
-      "last-modified",
-    ]) headers.delete(header);
-    return new Response(patched, {
-      headers,
-      status: response.status,
-      statusText: response.statusText,
-    });
+    return replaceRendererResponseBody(response, patched);
   };
 
   // The inspector and NODE_OPTIONS --require path are only startup injection

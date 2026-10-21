@@ -92,6 +92,7 @@ pub fn inspector_argument(port: u16) -> String {
 }
 
 const STARTUP_PATCH_TEMPLATE: &str = concat!("\n", include_str!("codex_startup_patch.js"));
+pub(crate) const STARTUP_SPLASH_MARKUP: &str = include_str!("codex_startup_splash.html");
 
 #[cfg(test)]
 fn patch_expression(options: PatchOptions) -> String {
@@ -161,6 +162,10 @@ fn patch_expression_with_runtime_overrides_and_validation(
         .replace(
             "\"__CODEY_PROCESS_PROXY_AUTH__\"",
             &serde_json::to_string(&options.proxy_auth).expect("local proxy auth should serialize"),
+        )
+        .replace(
+            "\"__CODEY_STARTUP_SPLASH__\"",
+            &serde_json::to_string(STARTUP_SPLASH_MARKUP).expect("startup splash should serialize"),
         )
 }
 
@@ -2331,6 +2336,8 @@ mod tests {
         ));
         assert!(!expression.contains("__REQUIRE_APP_SERVER_RUNTIME_OVERRIDES__"));
         assert!(!expression.contains("\"__CODEY_ERROR_LOGGER_EXECUTABLE__\""));
+        assert!(!expression.contains("__CODEY_STARTUP_SPLASH__"));
+        assert!(expression.contains("const rawCodeyStartupSplash = \"<style>"));
     }
 
     #[test]

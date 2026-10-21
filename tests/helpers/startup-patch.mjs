@@ -13,6 +13,7 @@ export async function loadStartupPatchTemplate({
   runtimeConfigOverrides = null,
   subagentGateActive = null,
   errorLoggerExecutable = null,
+  startupSplash = null,
 } = {}) {
   const template = await readSource("backend/src/codex_startup_patch.js");
   assert.ok(template, "startup patch template should be readable");
@@ -41,6 +42,12 @@ export async function loadStartupPatchTemplate({
     expression = expression.replaceAll(
       '"__CODEY_ERROR_LOGGER_EXECUTABLE__"',
       JSON.stringify(errorLoggerExecutable),
+    );
+  }
+  if (startupSplash != null) {
+    expression = expression.replaceAll(
+      '"__CODEY_STARTUP_SPLASH__"',
+      JSON.stringify(startupSplash),
     );
   }
   return expression;
