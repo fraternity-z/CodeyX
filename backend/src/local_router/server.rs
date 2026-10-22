@@ -275,12 +275,7 @@ impl LocalRouter {
             websocket_backoffs: Arc::clone(&websocket_backoffs),
             native_history_cache: Arc::new(Mutex::new(NativeHistoryCache::default())),
             idle_downstreams: Arc::new(Mutex::new(IdleDownstreamRegistry::default())),
-            // 系统证书与代理配置加载是同步操作，不占用路由的异步工作线程。
-            client: tokio::task::spawn_blocking(|| upstream_http_client_builder().build())
-                .await
-                .context("创建 Codey 本地路由 HTTP 客户端任务异常退出")?
-                .context("创建 Codey 本地路由 HTTP 客户端失败")?,
-            proxied_clients: Mutex::new(HashMap::new()),
+            http_clients: Arc::default(),
             egress,
             official_auth_path,
             account_usage_cache,
@@ -648,10 +643,7 @@ pub(crate) struct RouterServer {
     pub(crate) websocket_backoffs: Arc<Mutex<UpstreamWebSocketBackoffs>>,
     pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) idle_downstreams: Arc<Mutex<IdleDownstreamRegistry>>,
-    pub(crate) client: reqwest::Client,
-    /// 按代理地址缓存的线路专用客户端，保留连接池复用。上限内缓存，
-    /// 超出后清空重建（代理地址变更是罕见操作，代价仅为重建连接）。
-    pub(crate) proxied_clients: Mutex<HashMap<String, reqwest::Client>>,
+    pub(super) http_clients: Arc<UpstreamHttpClients>,
     pub(crate) egress: Arc<crate::network_proxy::egress::EgressPool>,
     pub(crate) official_auth_path: PathBuf,
     pub(crate) account_usage_cache:
@@ -663,15 +655,13 @@ pub(crate) struct RouterServer {
     pub(crate) request_log: Arc<RouteRequestLogController>,
 }
 
-const MAX_PROXIED_CLIENTS: usize = 8;
-
 impl RouterServer {
     /// 选择线路的上游 HTTP 客户端：未配置代理的线路共用默认客户端（遵循
     /// 系统代理），配置了上游代理的线路使用仅走该代理的专用客户端。
     pub(crate) async fn upstream_client(
         &self,
         route: &RouteTarget,
-    ) -> std::result::Result<crate::network_proxy::egress::PreparedClient, String> {
+    ) -> std::result::Result<RouterUpstreamClient, String> {
         let prepared = self
             .egress
             .proxy_for_profile(
@@ -680,37 +670,17 @@ impl RouterServer {
                 route.plugin_transport.is_some(),
             )
             .await?;
-        let Some(proxy) = prepared.as_deref() else {
-            return Ok(prepared.bind(self.client.clone()));
-        };
-        let mut clients = self
-            .proxied_clients
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(client) = clients.get(proxy) {
-            return Ok(prepared.bind(client.clone()));
-        }
-        let proxy_target = reqwest::Proxy::all(proxy).map_err(|_| {
-            format!(
-                "线路「{}」的上游代理地址无效，请检查线路设置",
-                route.route_name
-            )
-        })?;
-        let client = upstream_http_client_builder()
-            .no_proxy()
-            .proxy(proxy_target)
-            .build()
-            .map_err(|_| {
-                format!(
-                    "线路「{}」无法创建上游代理客户端，请检查代理地址",
-                    route.route_name
-                )
-            })?;
-        if clients.len() >= MAX_PROXIED_CLIENTS {
-            clients.clear();
-        }
-        clients.insert(proxy.to_string(), client.clone());
-        Ok(prepared.bind(client))
+        let url = route.upstream_url.as_deref().map_err(Clone::clone)?;
+        let lease = self
+            .http_clients
+            .client(url, prepared.as_deref())
+            .await
+            .map_err(|message| format!("线路「{}」{message}", route.route_name))?;
+        Ok(RouterUpstreamClient {
+            prepared: prepared.bind(lease.client),
+            generation: lease.generation,
+            system_proxy_applies: lease.system_proxy_applies,
+        })
     }
 }
 

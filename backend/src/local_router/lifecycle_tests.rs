@@ -107,11 +107,7 @@ fn test_server(config: &CodeyConfig) -> RouterServer {
         websocket_backoffs: Arc::default(),
         native_history_cache: Arc::default(),
         idle_downstreams: Arc::default(),
-        client: super::server::upstream_http_client_builder()
-            .no_proxy()
-            .build()
-            .unwrap(),
-        proxied_clients: Mutex::default(),
+        http_clients: Arc::default(),
         egress: Arc::new(crate::network_proxy::egress::EgressPool::for_config(
             Path::new("unused-test-config.json"),
             config.network_proxy.clone(),
@@ -714,6 +710,53 @@ async fn lifecycle_http_and_network_errors_finish_failed() {
     let terminal = terminal(&mut events).await;
     assert_eq!(terminal.0, "request.failed");
     assert_eq!(terminal.1["status"], 424);
+}
+
+#[tokio::test]
+async fn network_failure_refreshes_the_next_request_without_replaying_the_post() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let (config, provider, model) = super::tests::router_config(url.clone());
+    let server = test_server(&config);
+    let before = server.http_clients.client(&url, None).await.unwrap();
+    let (not_replayed_tx, not_replayed_rx) = oneshot::channel();
+    let upstream = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.unwrap();
+        let first_request = read_http_request(&mut first).await.unwrap();
+        drop(first);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err()
+        );
+        not_replayed_tx.send(()).unwrap();
+        let (mut second, _) = listener.accept().await.unwrap();
+        let second_request = read_http_request(&mut second).await.unwrap();
+        write_json_response(
+            &mut second,
+            200,
+            &json!({"id":"recovered","object":"response","status":"completed","output":[]}),
+        )
+        .await
+        .unwrap();
+        [first_request, second_request]
+    });
+    let model = model_alias(&provider, &model);
+    let mut first = CapturedDownstream::default();
+    invoke(&server, &model, false, &mut first).await.unwrap();
+    assert_eq!(first.status, Some(424));
+    tokio::time::timeout(Duration::from_secs(3), not_replayed_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    let after = server.http_clients.client(&url, None).await.unwrap();
+    assert_ne!(before.generation, after.generation);
+    let mut second = CapturedDownstream::default();
+    invoke(&server, &model, false, &mut second).await.unwrap();
+    assert_eq!(second.status, Some(200));
+    let requests = upstream.await.unwrap();
+    assert!(requests.iter().all(|request| request.method == "POST"));
+    assert_eq!(requests[0].body, requests[1].body);
 }
 
 #[tokio::test]

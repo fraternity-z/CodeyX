@@ -745,6 +745,7 @@ impl RouterServer {
         {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
+                self.http_clients.invalidate(upstream_client.generation);
                 let timeout = error.is_timeout();
                 let (status, code, message) = if timeout {
                     (
@@ -770,6 +771,7 @@ impl RouterServer {
                 return Ok(());
             }
             Err(_) => {
+                self.http_clients.invalidate(upstream_client.generation);
                 mark_error(504, "upstream_header_timeout");
                 write_text_error_response(
                     &mut stream,
@@ -794,6 +796,13 @@ impl RouterServer {
             );
         }
         let result = write_proxy_response(&mut stream, response, probe.as_ref(), false).await;
+        if result
+            .as_ref()
+            .err()
+            .is_some_and(|error| !error.is::<DownstreamClosed>())
+        {
+            self.http_clients.invalidate(upstream_client.generation);
+        }
         if let Some(probe) = &probe {
             if result.is_ok() {
                 probe.finish_success();
@@ -864,10 +873,7 @@ impl RouterServer {
         &self,
         request: &HttpRequest,
         route: &RouteTarget,
-    ) -> std::result::Result<
-        (HeaderMap, crate::network_proxy::egress::PreparedClient),
-        (u16, &'static str, String),
-    > {
+    ) -> std::result::Result<(HeaderMap, RouterUpstreamClient), (u16, &'static str, String)> {
         // Pin one egress lease before auth refresh or any plugin network work.
         // The caller retains it through the whole response, including SSE.
         let client = self
@@ -914,12 +920,17 @@ impl RouterServer {
             }) {
                 // SIWC 直连平面：令牌来自账号的 SIWC 槽位，不接受下游自带的
                 // Codex 令牌；backend-api 专属头一律剥掉。
+                let auth_client = self
+                    .http_clients
+                    .client(crate::official_accounts::SIWC_TOKEN_URL, None)
+                    .await
+                    .map_err(|message| (502, "proxy_unavailable", message))?;
                 let siwc_auth = resolve_siwc_upstream_auth(
                     siwc_path,
                     account_id,
                     &self.siwc_auth_cache,
-                    &self.client,
-                    &self.proxied_clients,
+                    &auth_client.client,
+                    &self.http_clients.proxied,
                     client
                         .proxy
                         .uses_pool()
@@ -927,7 +938,10 @@ impl RouterServer {
                         .flatten(),
                 )
                 .await
-                .map_err(|error| (401, "siwc_auth_unavailable", format!("{error:#}")))?;
+                .map_err(|error| {
+                    self.http_clients.invalidate(auth_client.generation);
+                    (401, "siwc_auth_unavailable", format!("{error:#}"))
+                })?;
                 let value = HeaderValue::from_str(&siwc_auth.authorization).map_err(|_| {
                     (
                         401,
@@ -2106,6 +2120,11 @@ impl RouterServer {
                 return Ok(());
             }
         };
+        if upstream_client.system_proxy_applies {
+            let mut http_route = resolved.route.as_ref().clone();
+            http_route.supports_websockets = false;
+            downstream.select_route(&http_route);
+        }
         // 请求体的模型名已还原为上游模型名，路由提示头里的模型名必须保持一致；
         // HTTP、WebSocket 握手和压缩请求共用这份头。
         align_routing_hint_model(&mut headers, &resolved.upstream_model);
@@ -2191,6 +2210,7 @@ impl RouterServer {
             // 历史仍由下面的 HTTP 回退展开。
             if !compacting
                 && !upstream_client.proxy.uses_pool()
+                && !upstream_client.system_proxy_applies
                 && !lifecycle.is_active()
                 && !native_upstream_needs_xai_compat(upstream_url, &resolved.upstream_model)
             {
@@ -2454,7 +2474,8 @@ impl RouterServer {
                 retain_compact_request_budget(&mut admission, retained_after_upload);
             }, &mut attempt, response_header_timeout, resolved.route.plugin_transport.as_ref(),
         ).await?;
-        let Some(response) = Self::finish_upstream_http_send(
+        let Some(response) = self.finish_upstream_http_send(
+            upstream_client.generation,
             downstream,
             response_result,
             response_header_timeout,
@@ -2496,6 +2517,7 @@ impl RouterServer {
             {
                 Ok(Ok(body)) => body,
                 Ok(Err(error)) | Err(error) if is_upstream_timeout_error(&error) => {
+                    self.http_clients.invalidate(upstream_client.generation);
                     write_upstream_error_body_timeout(downstream, &resolved, compacting, &error)
                         .await?;
                     return Ok(());
@@ -2549,7 +2571,8 @@ impl RouterServer {
                         retain_compact_request_budget(&mut admission, retry_retained);
                     }, &mut attempt, response_header_timeout, resolved.route.plugin_transport.as_ref(),
                 ).await?;
-                let Some(retried) = Self::finish_upstream_http_send(
+                let Some(retried) = self.finish_upstream_http_send(
+                    upstream_client.generation,
                     downstream,
                     retry_result,
                     response_header_timeout,
@@ -2639,6 +2662,7 @@ impl RouterServer {
                         .await
                     }
                     Ok(Err(error)) | Err(error) if is_upstream_timeout_error(&error) => {
+                        self.http_clients.invalidate(upstream_client.generation);
                         write_upstream_error_body_timeout(downstream, &resolved, compacting, &error)
                             .await
                     }
@@ -2690,6 +2714,9 @@ impl RouterServer {
                 }
             }
         };
+        if result.as_ref().err().is_some_and(|error| !error.is::<DownstreamClosed>()) {
+            self.http_clients.invalidate(upstream_client.generation);
+        }
         if let Err(error) = &result
             && downstream_websocket
             && !error.is::<DownstreamClosed>()
@@ -2721,7 +2748,22 @@ impl RouterServer {
         }.await;
         (result, CURRENT_LIFECYCLE_FAILURE.with(|failure| failure.borrow_mut().take()))
         })).await;
+        if result.as_ref().err().is_some_and(|error| {
+            !error.is::<DownstreamClosed>()
+                && !error.is::<crate::codey_plugins::lifecycle::LifecycleError>()
+        }) {
+            self.http_clients.invalidate(upstream_client.generation);
+        }
         if let Some((status, code)) = stream_failure {
+            if matches!(
+                code.as_str(),
+                "upstream_idle_timeout"
+                    | "upstream_timeout"
+                    | "upstream_stream_error"
+                    | "upstream_response_failed"
+            ) {
+                self.http_clients.invalidate(upstream_client.generation);
+            }
             observed.status = Some(status);
             observed.error = Some(code);
         }
@@ -2749,6 +2791,8 @@ impl RouterServer {
     /// 返回 None 表示调用方直接结束请求。
     #[allow(clippy::too_many_arguments)]
     async fn finish_upstream_http_send<D>(
+        &self,
+        generation: u64,
         downstream: &mut D,
         response_result: std::result::Result<
             std::result::Result<reqwest::Response, reqwest::Error>,
@@ -2764,6 +2808,9 @@ impl RouterServer {
     where
         D: ResponsesDownstream + ?Sized,
     {
+        if !matches!(&response_result, Ok(Ok(_))) {
+            self.http_clients.invalidate(generation);
+        }
         let response = match response_result {
             Ok(Ok(response)) => response,
             Ok(Err(error)) if compacting && error.is_timeout() => {
