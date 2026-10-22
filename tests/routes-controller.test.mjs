@@ -21,6 +21,7 @@ function createRoutesHarness(overrides = {}, handlers = {}) {
     persistedConfigRef: { current: baseline() }, status: {}, confirmation: null,
     setConfig(update) { options.config = typeof update === "function" ? update(options.config) : update; },
     setDirty(value) { options.dirty = value; },
+    onConfigChange(value) { options.config = value; options.dirty = true; },
     setPersistedConfig(value) { options.persistedConfigRef.current = value; options.config = value; },
     isOnlyNativeRouterToggle: () => true,
     adoptRouteConfig(value) {
@@ -54,6 +55,47 @@ function createRoutesHarness(overrides = {}, handlers = {}) {
   const render = () => harness.render(options);
   return { ...harness, render, options, calls, notices, completions, starts, cancelled, saved, remembered };
 }
+
+test("路由开关只更新共享草稿，日志启用选择 SQLite，关闭保留已有后端", t => {
+  installControllerWindow(t);
+  const h = createRoutesHarness({ config: { ...baseline(), streamMaxRetries: 9,
+    routeRequestLog: { enabled: false, backend: "ndjson", retentionDays: 7 } } });
+  const controller = h.render();
+  controller.toggleLocalRouter(false);
+  assert.equal(h.options.config.localRouterEnabled, false);
+  assert.equal(h.options.config.streamMaxRetries, 9);
+  assert.equal(h.options.dirty, true);
+  assert.equal(h.notices.at(-1).text, "保存并重启 Codex 后关闭本地路由");
+  assert.equal(h.render().toggleLocalRouter, controller.toggleLocalRouter);
+  controller.toggleLocalRouter(true);
+  assert.equal(h.options.config.localRouterEnabled, true);
+  assert.equal(h.notices.at(-1).text, "保存并重启 Codex 后开启本地路由");
+  h.render().toggleRouteRequestLog(false);
+  assert.deepEqual(h.options.config.routeRequestLog, { enabled: false, backend: "ndjson", retentionDays: 7 });
+  assert.equal(h.notices.at(-1).text, "保存后关闭日志记录，无需重启");
+  h.render().toggleRouteRequestLog(true);
+  assert.deepEqual(h.options.config.routeRequestLog, { enabled: true, backend: "sqlite", retentionDays: 7 });
+  assert.equal(h.notices.at(-1).text, "保存后开启日志记录，无需重启");
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.saved.length, 0);
+  h.unmount();
+});
+
+test("路由草稿开关在未加载、繁忙、隐藏和卸载后不编辑或提示", t => {
+  installControllerWindow(t);
+  for (const overrides of [{ config: null }, { isBusy: true }, { active: false }, {}]) {
+    const h = createRoutesHarness(overrides);
+    const controller = h.render();
+    const before = h.options.config;
+    if (Object.keys(overrides).length === 0) h.unmount();
+    controller.toggleLocalRouter(false);
+    controller.toggleRouteRequestLog(true);
+    assert.equal(h.options.config, before);
+    assert.equal(h.options.dirty, false);
+    assert.equal(h.notices.length, 0);
+    h.unmount();
+  }
+});
 
 test("线路保存沿用草稿，新增与更新不改变活动线路，失败保留编辑内容", async (t) => {
   installControllerWindow(t);
@@ -237,6 +279,12 @@ test("同一渲染内重复操作只提交一次，失败后可再次提交", as
   const controller = h.render();
   const first = controller.setRouteEnabled("a", false);
   assert.equal(await controller.setRouteEnabled("b", false), false);
+  const draft = h.options.config;
+  controller.toggleLocalRouter(false);
+  controller.toggleRouteRequestLog(true);
+  assert.equal(h.options.config, draft);
+  assert.equal(h.options.dirty, false);
+  assert.equal(h.notices.length, 0);
   assert.equal(h.calls.length, 1);
   pending.reject(new Error("save failed"));
   assert.equal(await first, false);

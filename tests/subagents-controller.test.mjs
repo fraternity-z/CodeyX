@@ -76,3 +76,23 @@ test("controller coordinates the shared draft and blocks edits while busy", () =
   assert.equal(changes.length, 2);
   h.unmount();
 });
+
+test("optimization toggle uses the shared draft and preserves role settings", () => {
+  const h = createControllerHarness(new URL("useSubagentsController.ts", feature), "useSubagentsController");
+  const changes = [];
+  const props = { config: config(), isBusy: false, subagentModelOptions: [model], onConfigChange: next => changes.push(next) };
+  const controller = h.render(props);
+  controller.changeOptimization(false);
+  assert.equal(changes[0].subagentOptimization, false);
+  assert.equal(changes[0].subagentRoles, props.config.subagentRoles);
+  assert.equal(props.config.subagentOptimization, true);
+  props.config = { ...changes[0], subagentMaxThreads: 8 };
+  assert.equal(h.render(props).changeOptimization, controller.changeOptimization);
+  controller.changeOptimization(true);
+  assert.equal(changes[1].subagentMaxThreads, 8);
+  assert.equal(changes[1].subagentOptimization, true);
+  props.isBusy = true;
+  h.render(props).changeOptimization(false);
+  assert.equal(changes.length, 2);
+  h.unmount();
+});

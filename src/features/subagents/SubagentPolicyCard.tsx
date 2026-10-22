@@ -16,7 +16,7 @@ const EFFORT_LABELS: Record<string, string> = {
 };
 
 function SubagentPolicyCardComponent(props: SubagentPolicyCardProps) {
-  const { config, isBusy, subagentModelOptions, onSubagentOptimizationChange } = props;
+  const { config, isBusy, subagentModelOptions } = props;
   const controller = useSubagentsController(props);
   const enabledCount = enabledSubagentCount(config);
   const customRoles = Object.keys(config.subagentRoles).filter(isCustomSubagent);
@@ -121,7 +121,7 @@ function SubagentPolicyCardComponent(props: SubagentPolicyCardProps) {
         <SettingsPageHeader id="subagent-title" title="子代理优化" icon={<IconUsersGroup size={15} />}
           description="保留内置角色，并按任务添加自己的子代理。"
           actions={<Switch checked={config.subagentOptimization} disabled={isBusy}
-            onCheckedChange={onSubagentOptimizationChange} aria-label="启用子代理优化" />} />
+            onCheckedChange={controller.changeOptimization} aria-label="启用子代理优化" />} />
         <div className="module-card-body subagent-policy-body">
           {config.subagentOptimization ? <>
             <div className="subagent-group-card codey-card p-4">

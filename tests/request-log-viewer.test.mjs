@@ -159,7 +159,7 @@ test("request log detail labels request body shape and flags empty input arrays"
   assert.match(viewer, /isEmptyInputArray\(selectedItem\.upstreamInputState, selectedItem\.upstreamInputItems\)/);
 });
 
-test("request log controls are scoped to built-in routing and preserve logger settings", async () => {
+test("request log controls are scoped to built-in routing and delegate draft changes", async () => {
   const [app, modelSection, types, preview, configurationState] = await Promise.all([
     readSource("src/App.tsx"),
     readSource("src/ModelSection.tsx"),
@@ -170,11 +170,9 @@ test("request log controls are scoped to built-in routing and preserve logger se
 
   assert.match(types, /export type RouteRequestLogConfig/);
   assert.match(types, /backend: "ndjson" \| "sqlite"/);
-  assert.match(app, /routeRequestLog:\s*\{\s*\.\.\.config\.routeRequestLog/);
-  assert.match(app, /enabled: checked/);
-  assert.match(app, /checked \? \{ backend: "sqlite" as const \} : \{\}/);
+  assert.match(app, /handleToggleRouteRequestLog = useStableEvent\(toggleRouteRequestLog\)/);
+  assert.match(app, /onToggleRouteRequestLog=\{handleToggleRouteRequestLog\}/);
   assert.match(configurationState, /请求日志记录已实时开启，无需重启/);
-  assert.match(app, /保存后关闭日志记录，无需重启/);
   assert.match(modelSection, /\{config\.localRouterEnabled && \([\s\S]*(开启)?日志记录/);
   assert.match(modelSection, /aria-label="开启请求日志记录"/);
   assert.match(modelSection, /查看请求日志/);

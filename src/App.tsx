@@ -132,12 +132,6 @@ export function App({
     config, isBusy, onSaved: applySavedConfig, setBusy, setNotice, setConfirmation,
   });
   const configLoaded = config !== null;
-  const setSubagentOptimization = useCallback((enabled: boolean) => {
-    setConfig((current) =>
-      current ? { ...current, subagentOptimization: enabled } : current,
-    );
-    setDirty(true);
-  }, []);
   const runOperation = useCallback(
     async (name: string, action: () => Promise<void>) => {
       if (isBusy) return;
@@ -249,10 +243,11 @@ export function App({
   const {
     saveRoute, setRouteEnabled, reorderRoute, reorderRouteModels, requestDeleteRoute,
     fetchRouteModels, saveOfficialRouteSettings, setRouteDefaultModel, handleOfficialAccountsChanged,
+    toggleLocalRouter, toggleRouteRequestLog,
   } = useRoutesController({
     active: !embedded || modalVisible,
     config, dirty, isBusy, provider, setConfig, setDirty, persistedConfigRef,
-    isOnlyNativeRouterToggle, adoptRouteConfig,
+    isOnlyNativeRouterToggle, adoptRouteConfig, onConfigChange: editConfig,
     modelState, setModelState, beginModelPickerLoad, completeModelPickerLoad, cancelModelPickerLoad,
     setProviderStatus, setStatus, setNotice, setConfirmation, runOperation, persist,
   });
@@ -325,9 +320,6 @@ export function App({
   const handleRequestRemoveNotificationChannel = useStableEvent(
     askRemoveNotificationChannel,
   );
-  const handleSubagentOptimizationChange = useStableEvent(
-    (checked: boolean) => setSubagentOptimization(checked),
-  );
   const handleSaveRoute = useStableEvent(saveRoute);
   const handleSetRouteEnabled = useStableEvent(setRouteEnabled);
   const handleReorderRoute = useStableEvent(reorderRoute);
@@ -336,36 +328,8 @@ export function App({
   const handleFetchRouteModels = useStableEvent((route: Profile) => {
     void fetchRouteModels(route);
   });
-  const handleToggleLocalRouter = useStableEvent((checked: boolean) => {
-    if (!config) return;
-    editConfig({
-      ...config,
-      localRouterEnabled: checked,
-    });
-    setNotice({
-      tone: "info",
-      text: checked
-        ? "保存并重启 Codex 后开启本地路由"
-        : "保存并重启 Codex 后关闭本地路由",
-    });
-  });
-  const handleToggleRouteRequestLog = useStableEvent((checked: boolean) => {
-    if (!config) return;
-    editConfig({
-      ...config,
-      routeRequestLog: {
-        ...config.routeRequestLog,
-        enabled: checked,
-        ...(checked ? { backend: "sqlite" as const } : {}),
-      },
-    });
-    setNotice({
-      tone: "info",
-      text: checked
-        ? "保存后开启日志记录，无需重启"
-        : "保存后关闭日志记录，无需重启",
-    });
-  });
+  const handleToggleLocalRouter = useStableEvent(toggleLocalRouter);
+  const handleToggleRouteRequestLog = useStableEvent(toggleRouteRequestLog);
   const handleNotice = useStableEvent(
     (notice: { tone: "success" | "info" | "error"; text: string }) => setNotice(notice),
   );
@@ -734,7 +698,6 @@ export function App({
               isBusy={isBusy}
               subagentModelOptions={subagentModelOptions}
               onConfigChange={handleConfigChange}
-              onSubagentOptimizationChange={handleSubagentOptimizationChange}
             />
           ),
           remote: (active) => <RemoteControlPanel active={active} />,

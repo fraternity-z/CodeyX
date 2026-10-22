@@ -9,7 +9,6 @@ export type SubagentPolicyCardProps = {
   isBusy: boolean;
   subagentModelOptions: SubagentModelOption[];
   onConfigChange: (config: Config) => void;
-  onSubagentOptimizationChange: (checked: boolean) => void;
 };
 
 export function useSubagentsController({ config, isBusy, subagentModelOptions, onConfigChange }: SubagentPolicyCardProps) {
@@ -29,5 +28,6 @@ export function useSubagentsController({ config, isBusy, subagentModelOptions, o
   const changeMaxThreads = useStableEvent((value: number) => {
     if (Number.isInteger(value) && value >= 1 && value <= 64) commit({ ...config, subagentMaxThreads: value });
   });
-  return { preferredProviderId, addRole, updateRole, removeRole, changeModel, changeMaxThreads, error: validateSubagents(config) };
+  const changeOptimization = useStableEvent((enabled: boolean) => commit({ ...config, subagentOptimization: enabled }));
+  return { preferredProviderId, addRole, updateRole, removeRole, changeModel, changeMaxThreads, changeOptimization, error: validateSubagents(config) };
 }

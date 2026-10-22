@@ -18,6 +18,7 @@ type Options = Pick<ReturnType<typeof useDraftConfig>,
   active: boolean;
   isBusy: boolean;
   provider: ProviderStatus["provider"] | undefined;
+  onConfigChange: (config: Config) => void;
   setProviderStatus: Dispatch<SetStateAction<ProviderStatus | null>>;
   setStatus: Dispatch<SetStateAction<RuntimeStatus>>;
   setNotice: (notice: Notice) => void;
@@ -27,7 +28,7 @@ type Options = Pick<ReturnType<typeof useDraftConfig>,
 };
 
 export function useRoutesController({ active, config, dirty, isBusy, provider, setConfig, setDirty,
-  persistedConfigRef, isOnlyNativeRouterToggle, adoptRouteConfig,
+  persistedConfigRef, isOnlyNativeRouterToggle, adoptRouteConfig, onConfigChange,
   modelState, setModelState, beginModelPickerLoad, completeModelPickerLoad, cancelModelPickerLoad,
   setProviderStatus, setStatus, setNotice, setConfirmation, runOperation, persist,
 }: Options) {
@@ -107,6 +108,22 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
     if (typeof result.officialAccountAvailable === "boolean") {
       setStatus((current) => ({ ...current, officialAccountAvailable: result.officialAccountAvailable }));
     }
+  });
+
+  const toggleLocalRouter = useStableEvent((enabled: boolean) => {
+    if (!config || !mounted.current || !active || isBusy || operationLocked.current) return;
+    onConfigChange({ ...config, localRouterEnabled: enabled });
+    setNotice({ tone: "info", text: enabled
+      ? "保存并重启 Codex 后开启本地路由"
+      : "保存并重启 Codex 后关闭本地路由" });
+  });
+  const toggleRouteRequestLog = useStableEvent((enabled: boolean) => {
+    if (!config || !mounted.current || !active || isBusy || operationLocked.current) return;
+    onConfigChange({ ...config, routeRequestLog: { ...config.routeRequestLog, enabled,
+      ...(enabled ? { backend: "sqlite" as const } : {}) } });
+    setNotice({ tone: "info", text: enabled
+      ? "保存后开启日志记录，无需重启"
+      : "保存后关闭日志记录，无需重启" });
   });
 
   async function syncCurrentProvider() {
@@ -305,5 +322,6 @@ export function useRoutesController({ active, config, dirty, isBusy, provider, s
   }
 
   return { saveRoute, setRouteEnabled, reorderRoute, reorderRouteModels, requestDeleteRoute,
-    fetchRouteModels, saveOfficialRouteSettings, setRouteDefaultModel, handleOfficialAccountsChanged };
+    fetchRouteModels, saveOfficialRouteSettings, setRouteDefaultModel, handleOfficialAccountsChanged,
+    toggleLocalRouter, toggleRouteRequestLog };
 }

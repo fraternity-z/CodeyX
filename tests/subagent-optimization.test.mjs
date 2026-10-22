@@ -15,7 +15,7 @@ test("subagent settings expose the five supported role controls", async () => {
   assert.match(featurePolicySource, /checked=\{config\.subagentOptimization\}/);
   assert.match(
     featurePolicySource,
-    /onCheckedChange=\{onSubagentOptimizationChange\}/,
+    /onCheckedChange=\{controller\.changeOptimization\}/,
   );
   const roleSource = await readFile(new URL("src/features/subagents/state.ts", root), "utf8");
   for (const [id, name] of [
