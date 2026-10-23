@@ -525,6 +525,10 @@ export function useAppUpdatesController({
     if (!canAct() || !config || !onConfigChange) return;
     onConfigChange({ ...config, codeyUpdatePolicy: policy });
   });
+  const changeUpdateDownloadSource = useStableEvent((source: Config["codeyUpdateDownloadSource"]) => {
+    if (!canAct() || !config || !onConfigChange) return;
+    onConfigChange({ ...config, codeyUpdateDownloadSource: source });
+  });
 
   return {
     automaticallyChecking,
@@ -536,5 +540,6 @@ export function useAppUpdatesController({
     askDownloadUpdate,
     askInstallDownloadedUpdate,
     changeUpdatePolicy,
+    changeUpdateDownloadSource,
   };
 }

@@ -44,7 +44,7 @@ Object.defineProperty(globalThis, "navigator", {
 
 function renderDialog(overrides = {}) {
   reset();
-  const calls = { repair: 0, select: 0, autoCheck: [] };
+  const calls = { repair: 0, select: 0, autoCheck: [], downloadSources: [] };
   const props = {
     open: true,
     onOpenChange: () => {},
@@ -60,6 +60,8 @@ function renderDialog(overrides = {}) {
     configRepairNotice: null,
     onSelectCodexDirectory: () => { calls.select++; },
     codeyUpdatePolicy: "stable",
+    codeyUpdateDownloadSource: "github",
+    onCodeyUpdateDownloadSourceChange: source => calls.downloadSources.push(source),
     onCodeyUpdatePolicyChange: (checked) => {
       calls.autoCheck.push(checked);
     },
@@ -152,6 +154,23 @@ test("更新策略跟随配置、修复中显示进行态", () => {
   assert.equal(busy.calls.repair, 0);
 });
 
+test("更新下载源沿用 Select，关闭自动更新仍可选择，旧配置默认官方源", () => {
+  const { tree, calls } = renderDialog({ codeyUpdatePolicy: "off" });
+  const select = elementProps(byLabel(tree, "更新下载源")[0]);
+  assert.equal(elementType(byLabel(tree, "更新下载源")[0]), ui.Select);
+  assert.equal(select.value, "github");
+  assert.equal(select.disabled, false);
+  assert.deepEqual(select.optionList, [
+    { value: "github", label: "GitHub 官方" }, { value: "ghProxy", label: "GH-Proxy 加速" },
+  ]);
+  select.onChange("ghProxy"); select.onChange("github"); select.onChange(undefined); select.onChange("unknown");
+  assert.deepEqual(calls.downloadSources, ["ghProxy", "github"]);
+  assert.match(textContent(tree), /仅代理安装包下载，失败时自动回退 GitHub 官方源/);
+  assert.equal(elementProps(byLabel(renderDialog({ codeyUpdateDownloadSource: undefined }).tree, "更新下载源")[0]).value, "github");
+  assert.equal(elementProps(byLabel(renderDialog({ codeyUpdateDownloadSource: "ghProxy" }).tree, "更新下载源")[0]).value, "ghProxy");
+  assert.equal(elementProps(byLabel(renderDialog({ isBusy: true }).tree, "更新下载源")[0]).disabled, true);
+});
+
 test("系统设置不出现冗余状态文案", () => {
   const { tree } = renderDialog();
   const text = textContent(tree);
@@ -166,6 +185,8 @@ test("App 把系统设置对话框接到修复命令与自动更新保存入口"
   assert.match(appSource, /onRepairCodexConfig=\{askRepairCodexConfig\}/);
   assert.match(appSource, /onSelectCodexDirectory=\{selectCodexDirectory\}/);
   assert.match(appSource, /onCodeyUpdatePolicyChange=\{changeUpdatePolicy\}/);
+  assert.match(appSource, /onCodeyUpdateDownloadSourceChange=\{changeUpdateDownloadSource\}/);
+  assert.match(appSource, /codeyUpdateDownloadSource=\{config\.codeyUpdateDownloadSource \?\? "github"\}/);
   assert.match(appSource, /codeyUpdatePolicy=\{config\.codeyUpdatePolicy\}/);
   assert.match(appSource, /useRuntimeMaintenanceController\(/);
   assert.match(appSource, /className="sidebar-footer-bar"/);

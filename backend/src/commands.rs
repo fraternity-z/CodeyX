@@ -1485,6 +1485,7 @@ pub async fn save_codey_config(
 struct CodeyConfigSaveInput {
     config: CodeyConfig,
     codey_update_policy_present: bool,
+    codey_update_download_source_present: bool,
     model_reasoning_efforts_present: bool,
     model_context_present: bool,
     local_router_enabled_present: bool,
@@ -1503,6 +1504,7 @@ impl CodeyConfigSaveInput {
         Self {
             config,
             codey_update_policy_present: true,
+            codey_update_download_source_present: true,
             model_reasoning_efforts_present: true,
             model_context_present: true,
             local_router_enabled_present: true,
@@ -1527,6 +1529,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
         .ok_or_else(|| "参数 config 无效：必须是 object".to_string())?;
     let codey_update_policy_present =
         fields.contains_key("codeyUpdatePolicy") || fields.contains_key("autoCheckCodeyUpdates");
+    let codey_update_download_source_present = fields.contains_key("codeyUpdateDownloadSource");
     let local_router_enabled_present = fields.contains_key("localRouterEnabled");
     let model_reasoning_efforts_present = fields.contains_key("modelReasoningEffortsByProvider");
     let model_context_present = fields.contains_key("modelContextByProvider");
@@ -1542,6 +1545,7 @@ fn codey_config_save_input(args: &Value) -> Result<CodeyConfigSaveInput, String>
     Ok(CodeyConfigSaveInput {
         config,
         codey_update_policy_present,
+        codey_update_download_source_present,
         model_reasoning_efforts_present,
         model_context_present,
         local_router_enabled_present,
@@ -1579,6 +1583,7 @@ async fn save_codey_config_locked(
     let CodeyConfigSaveInput {
         config: mut config_input,
         codey_update_policy_present,
+        codey_update_download_source_present,
         model_reasoning_efforts_present,
         model_context_present,
         local_router_enabled_present,
@@ -1703,6 +1708,9 @@ async fn save_codey_config_locked(
     }
     if codey_update_policy_present {
         config.codey_update_policy = config_input.codey_update_policy;
+    }
+    if codey_update_download_source_present {
+        config.codey_update_download_source = config_input.codey_update_download_source;
     }
     if local_router_enabled_present {
         config.local_router_enabled = config_input.local_router_enabled;

@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::AppState;
-use crate::config::ConfigStore;
+use crate::config::{CodeyUpdateDownloadSource, ConfigStore};
 
 const UPDATE_CHECK_CACHE_TTL: Duration = Duration::from_secs(30);
 const UPDATE_DOWNLOAD_CACHE_TTL: Duration = Duration::from_secs(10 * 60);
@@ -541,11 +541,13 @@ async fn download_update_candidate_with_mode(
         .selected_asset
         .as_ref()
         .ok_or_else(|| "没有适用于当前系统的可安装更新包".to_string())?;
+    let download_source = state.config.read().await.codey_update_download_source;
     let file_path = download_update_asset(
         &state.http_client,
         &state.store,
         &candidate.check.latest_version,
         asset,
+        download_source,
     )
     .await?;
     // 保存用户确认的版本与安装包，进程重启后也要检查同一份确认。
@@ -782,10 +784,49 @@ async fn download_update_asset(
     store: &ConfigStore,
     version: &str,
     asset: &UpdateAssetInfo,
+    source: CodeyUpdateDownloadSource,
 ) -> Result<PathBuf, String> {
+    download_update_asset_with_request(store, version, asset, source, |url| async move {
+        let response = client
+            .get(url)
+            .header(
+                USER_AGENT,
+                format!("Codey/{} update-download", env!("CARGO_PKG_VERSION")),
+            )
+            .timeout(Duration::from_secs(300))
+            .send()
+            .await
+            .map_err(|error| format!("下载更新失败：{error}"))?;
+        if response.url().scheme() != "https" {
+            return Err("安装包地址重定向到了非 HTTPS 地址".to_string());
+        }
+        Ok(response)
+    })
+    .await
+}
+
+fn update_download_urls(asset: &UpdateAssetInfo, source: CodeyUpdateDownloadSource) -> Vec<String> {
+    let mut urls = Vec::new();
+    if source == CodeyUpdateDownloadSource::GhProxy {
+        urls.push(format!("https://gh-proxy.com/{}", asset.url));
+    }
+    urls.push(asset.url.clone());
+    urls
+}
+
+async fn download_update_asset_with_request<F, Fut>(
+    store: &ConfigStore,
+    version: &str,
+    asset: &UpdateAssetInfo,
+    source: CodeyUpdateDownloadSource,
+    mut request: F,
+) -> Result<PathBuf, String>
+where
+    F: FnMut(String) -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, String>>,
+{
     validate_update_asset_info(asset)?;
-    let url = reqwest::Url::parse(&asset.url)
-        .map_err(|_| format!("安装包地址无效：{}", asset.file_name))?;
+    let version = Version::parse(version).map_err(|error| format!("更新版本无效：{error}"))?;
     let directory = update_download_dir(store)?.join(format!("v{version}"));
     tokio::fs::create_dir_all(&directory)
         .await
@@ -793,60 +834,42 @@ async fn download_update_asset(
     let destination = directory.join(&asset.file_name);
     let temporary = directory.join(format!(".{}.download", asset.file_name));
     let _ = tokio::fs::remove_file(&temporary).await;
-
-    let response = client
-        .get(url)
-        .header(
-            USER_AGENT,
-            format!("Codey/{} update-download", env!("CARGO_PKG_VERSION")),
-        )
-        .timeout(Duration::from_secs(300))
-        .send()
-        .await
-        .map_err(|error| format!("下载更新失败：{error}"))?
-        .error_for_status()
-        .map_err(|error| format!("下载安装包失败：{error}"))?;
-    if response.url().scheme() != "https" {
-        return Err("安装包地址重定向到了非 HTTPS 地址".to_string());
+    if verify_update_file(&destination, asset).await.is_ok() {
+        return Ok(destination);
     }
 
-    let verified_download = async {
-        let mut file = tokio::fs::File::create(&temporary)
-            .await
-            .map_err(|error| format!("创建更新缓存文件失败：{error}"))?;
-        let mut stream = response.bytes_stream();
-        let mut hasher = Sha256::new();
-        let mut bytes_written = 0u64;
-        while let Some(chunk) = stream.next().await {
-            let chunk = chunk.map_err(|error| format!("读取更新下载数据失败：{error}"))?;
-            bytes_written += chunk.len() as u64;
-            if bytes_written > asset.size {
-                return Err("下载的安装包大小超过更新清单声明".to_string());
+    // 留出更新元数据检查和桥接响应时间，两个下载源共用预算。
+    let download = tokio::time::timeout(Duration::from_secs(270), async {
+        let urls = update_download_urls(asset, source);
+        let mut last_error = String::new();
+        for (index, url) in urls.iter().enumerate() {
+            let attempt = async {
+                let response = request(url.clone())
+                    .await?
+                    .error_for_status()
+                    .map_err(|error| format!("下载安装包失败：{error}"))?;
+                write_update_download(response, &temporary, asset).await
+            };
+            let result = if index + 1 < urls.len() {
+                tokio::time::timeout(Duration::from_secs(135), attempt)
+                    .await
+                    .unwrap_or_else(|_| Err("GH-Proxy 下载超时，已尝试 GitHub 官方源".to_string()))
+            } else {
+                attempt.await
+            };
+            match result {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = error;
+                    let _ = tokio::fs::remove_file(&temporary).await;
+                }
             }
-            hasher.update(&chunk);
-            file.write_all(&chunk)
-                .await
-                .map_err(|error| format!("写入更新缓存文件失败：{error}"))?;
         }
-        file.flush()
-            .await
-            .map_err(|error| format!("刷新更新缓存文件失败：{error}"))?;
-        drop(file);
-
-        if bytes_written != asset.size {
-            return Err(format!(
-                "安装包大小不一致：期望 {} 字节，实际 {} 字节",
-                asset.size, bytes_written
-            ));
-        }
-        let actual_sha256 = format!("{:x}", hasher.finalize());
-        if !actual_sha256.eq_ignore_ascii_case(&asset.sha256) {
-            return Err("安装包 SHA-256 校验失败".to_string());
-        }
-        Ok(())
-    }
-    .await;
-    if let Err(error) = verified_download {
+        Err(last_error)
+    })
+    .await
+    .unwrap_or_else(|_| Err("下载更新超时，请稍后重试".to_string()));
+    if let Err(error) = download {
         let _ = tokio::fs::remove_file(&temporary).await;
         return Err(error);
     }
@@ -856,6 +879,46 @@ async fn download_update_asset(
         return Err(format!("保存更新安装包失败：{error}"));
     }
     Ok(destination)
+}
+
+async fn write_update_download(
+    response: reqwest::Response,
+    temporary: &Path,
+    asset: &UpdateAssetInfo,
+) -> Result<(), String> {
+    let mut file = tokio::fs::File::create(temporary)
+        .await
+        .map_err(|error| format!("创建更新缓存文件失败：{error}"))?;
+    let mut stream = response.bytes_stream();
+    let mut hasher = Sha256::new();
+    let mut bytes_written = 0u64;
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(|error| format!("读取更新下载数据失败：{error}"))?;
+        bytes_written += chunk.len() as u64;
+        if bytes_written > asset.size {
+            return Err("下载的安装包大小超过更新清单声明".to_string());
+        }
+        hasher.update(&chunk);
+        file.write_all(&chunk)
+            .await
+            .map_err(|error| format!("写入更新缓存文件失败：{error}"))?;
+    }
+    file.flush()
+        .await
+        .map_err(|error| format!("刷新更新缓存文件失败：{error}"))?;
+    drop(file);
+
+    if bytes_written != asset.size {
+        return Err(format!(
+            "安装包大小不一致：期望 {} 字节，实际 {} 字节",
+            asset.size, bytes_written
+        ));
+    }
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+    if !actual_sha256.eq_ignore_ascii_case(&asset.sha256) {
+        return Err("安装包 SHA-256 校验失败".to_string());
+    }
+    Ok(())
 }
 
 fn validate_update_asset_info(asset: &UpdateAssetInfo) -> Result<(), String> {
@@ -948,10 +1011,18 @@ async fn verify_downloaded_update(
         return Err("更新安装包与最近下载的版本不匹配，请重新下载".to_string());
     }
 
-    let metadata = tokio::fs::metadata(&update_path)
+    verify_update_file(&update_path, asset).await?;
+    Ok(VerifiedDownloadedUpdate {
+        path: update_path,
+        asset: asset.clone(),
+    })
+}
+
+async fn verify_update_file(update_path: &Path, asset: &UpdateAssetInfo) -> Result<(), String> {
+    let metadata = tokio::fs::symlink_metadata(update_path)
         .await
         .map_err(|error| format!("读取更新安装包信息失败：{error}"))?;
-    if metadata.len() != asset.size {
+    if !metadata.is_file() || metadata.len() != asset.size {
         return Err(format!(
             "安装前校验失败：安装包大小应为 {} 字节，实际为 {} 字节",
             asset.size,
@@ -961,7 +1032,7 @@ async fn verify_downloaded_update(
 
     // The cache can be modified after the original download completed. Hash
     // the final on-disk bytes again immediately before launching the installer.
-    let mut file = tokio::fs::File::open(&update_path)
+    let mut file = tokio::fs::File::open(update_path)
         .await
         .map_err(|error| format!("打开更新安装包失败：{error}"))?;
     let mut hasher = Sha256::new();
@@ -991,10 +1062,7 @@ async fn verify_downloaded_update(
     if !actual_sha256.eq_ignore_ascii_case(&asset.sha256) {
         return Err("安装前校验失败：安装包 SHA-256 不匹配，请重新下载".to_string());
     }
-    Ok(VerifiedDownloadedUpdate {
-        path: update_path,
-        asset: asset.clone(),
-    })
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -1137,6 +1205,163 @@ mod tests {
     use super::*;
 
     const REPOSITORY: &str = "fraternity-z/CodeyX";
+
+    fn download_asset() -> UpdateAssetInfo {
+        let body = b"verified installer";
+        UpdateAssetInfo {
+            platform: "windows".into(),
+            arch: "x64".into(),
+            package_type: "nsis".into(),
+            file_name: "CodeyX-2.0.0-windows-x64-setup.exe".into(),
+            url: format!(
+                "https://github.com/{REPOSITORY}/releases/download/v2.0.0/CodeyX-2.0.0-windows-x64-setup.exe"
+            ),
+            size: body.len() as u64,
+            sha256: format!("{:x}", Sha256::digest(body)),
+        }
+    }
+
+    fn download_response(status: u16, body: &[u8]) -> reqwest::Response {
+        hyper::http::Response::builder()
+            .status(status)
+            .body(body.to_vec())
+            .unwrap()
+            .into()
+    }
+
+    #[tokio::test]
+    async fn update_download_sources_map_urls_and_reuse_verified_cache() {
+        let asset = download_asset();
+        for source in [
+            CodeyUpdateDownloadSource::Github,
+            CodeyUpdateDownloadSource::GhProxy,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = ConfigStore::new(directory.path().join("config.json"));
+            let mut requests = Vec::new();
+            let path = download_update_asset_with_request(&store, "2.0.0", &asset, source, |url| {
+                requests.push(url);
+                std::future::ready(Ok(download_response(200, b"verified installer")))
+            })
+            .await
+            .unwrap();
+            let expected = if source == CodeyUpdateDownloadSource::GhProxy {
+                format!("https://gh-proxy.com/{}", asset.url)
+            } else {
+                asset.url.clone()
+            };
+            assert_eq!(requests, vec![expected]);
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), b"verified installer");
+            assert_eq!(
+                download_update_asset_with_request(&store, "2.0.0", &asset, source, |_| {
+                    std::future::ready(Err(
+                        "valid cached installer must not be fetched again".to_string()
+                    ))
+                })
+                .await
+                .unwrap(),
+                path
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn gh_proxy_download_failure_falls_back_once_and_cleans_partial_file() {
+        let asset = download_asset();
+        // Transport errors, HTTP errors, hash mismatches and both size limits share fallback.
+        for failure in 0..5 {
+            let directory = tempfile::tempdir().unwrap();
+            let store = ConfigStore::new(directory.path().join("config.json"));
+            let mut requests = Vec::new();
+            let path = download_update_asset_with_request(
+                &store,
+                "2.0.0",
+                &asset,
+                CodeyUpdateDownloadSource::GhProxy,
+                |url| {
+                    requests.push(url);
+                    let response = if requests.len() == 2 {
+                        Ok(download_response(200, b"verified installer"))
+                    } else {
+                        match failure {
+                            0 => Err("mock connection failure".to_string()),
+                            1 => Ok(download_response(503, b"unavailable")),
+                            2 => Ok(download_response(200, b"corrupt! installer")),
+                            3 => Ok(download_response(200, b"short")),
+                            _ => Ok(download_response(200, b"installer larger than expected")),
+                        }
+                    };
+                    std::future::ready(response)
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                requests,
+                update_download_urls(&asset, CodeyUpdateDownloadSource::GhProxy)
+            );
+            assert_eq!(tokio::fs::read(&path).await.unwrap(), b"verified installer");
+            assert!(
+                !path
+                    .parent()
+                    .unwrap()
+                    .join(format!(".{}.download", asset.file_name))
+                    .exists()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn update_download_rejects_bad_bodies_and_replaces_invalid_cache() {
+        let asset = download_asset();
+        for source in [
+            CodeyUpdateDownloadSource::Github,
+            CodeyUpdateDownloadSource::GhProxy,
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let store = ConfigStore::new(directory.path().join("config.json"));
+            let cache = update_download_dir(&store).unwrap().join("v2.0.0");
+            tokio::fs::create_dir_all(&cache).await.unwrap();
+            let destination = cache.join(&asset.file_name);
+            tokio::fs::write(&destination, b"corrupt! installer")
+                .await
+                .unwrap();
+            let mut calls = 0;
+            let error = download_update_asset_with_request(&store, "2.0.0", &asset, source, |_| {
+                calls += 1;
+                std::future::ready(Ok(download_response(200, b"corrupt! installer")))
+            })
+            .await
+            .unwrap_err();
+            assert!(error.contains("SHA-256"), "{error}");
+            assert_eq!(
+                calls,
+                if source == CodeyUpdateDownloadSource::GhProxy {
+                    2
+                } else {
+                    1
+                }
+            );
+            assert!(
+                !cache
+                    .join(format!(".{}.download", asset.file_name))
+                    .exists()
+            );
+            assert_eq!(
+                tokio::fs::read(&destination).await.unwrap(),
+                b"corrupt! installer"
+            );
+            download_update_asset_with_request(&store, "2.0.0", &asset, source, |_| {
+                std::future::ready(Ok(download_response(200, b"verified installer")))
+            })
+            .await
+            .unwrap();
+            assert_eq!(
+                tokio::fs::read(&destination).await.unwrap(),
+                b"verified installer"
+            );
+        }
+    }
 
     fn github_release(version: &str) -> GitHubRelease {
         let assets: Vec<_> = ["windows-x64-setup.exe", "macos-arm64-unsigned.zip"]

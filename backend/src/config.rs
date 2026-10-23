@@ -814,6 +814,14 @@ impl CodeyUpdatePolicy {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum CodeyUpdateDownloadSource {
+    #[default]
+    Github,
+    GhProxy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeyConfig {
@@ -821,6 +829,8 @@ pub struct CodeyConfig {
     pub settings_revision: u64,
     #[serde(default, alias = "autoCheckCodeyUpdates")]
     pub codey_update_policy: CodeyUpdatePolicy,
+    #[serde(default)]
+    pub codey_update_download_source: CodeyUpdateDownloadSource,
     /// Controls whether Codey installs and uses its process-local multi-route
     /// gateway. Missing values default to enabled so existing installations
     /// keep their current behavior after upgrading.
@@ -1036,6 +1046,7 @@ impl Default for CodeyConfig {
         Self {
             settings_revision: 0,
             codey_update_policy: CodeyUpdatePolicy::Stable,
+            codey_update_download_source: CodeyUpdateDownloadSource::Github,
             local_router_enabled: true,
             route_request_log: RouteRequestLogConfig::default(),
             stream_max_retries: default_stream_max_retries(),
@@ -4891,6 +4902,41 @@ mod tests {
             serde_json::to_value(disabled).unwrap()["localRouterEnabled"],
             serde_json::json!(false)
         );
+    }
+
+    #[test]
+    fn codey_update_download_source_defaults_and_rejects_invalid_values() {
+        assert_eq!(
+            CodeyConfig::default().codey_update_download_source,
+            CodeyUpdateDownloadSource::Github
+        );
+        let legacy: CodeyConfig = serde_json::from_str("{}").unwrap();
+        assert_eq!(
+            legacy.codey_update_download_source,
+            CodeyUpdateDownloadSource::Github
+        );
+        for source in ["github", "ghProxy"] {
+            let config: CodeyConfig =
+                serde_json::from_value(serde_json::json!({"codeyUpdateDownloadSource": source}))
+                    .unwrap();
+            assert_eq!(
+                serde_json::to_value(config).unwrap()["codeyUpdateDownloadSource"],
+                source
+            );
+        }
+        for invalid in [
+            serde_json::json!("unknown"),
+            serde_json::json!("ghproxy"),
+            serde_json::json!(true),
+            serde_json::Value::Null,
+        ] {
+            assert!(
+                serde_json::from_value::<CodeyConfig>(
+                    serde_json::json!({"codeyUpdateDownloadSource": invalid})
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]

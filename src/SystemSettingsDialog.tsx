@@ -17,6 +17,7 @@ import {
   DialogFooter,
   DialogHeader,
   DialogTitle,
+  Select,
   Switch,
   Tooltip,
 } from "./components/ui";
@@ -37,6 +38,8 @@ export type SystemSettingsDialogProps = {
   configRepairNotice?: { tone: "info" | "success" | "error"; text: string } | null;
   codeyUpdatePolicy: Config["codeyUpdatePolicy"];
   onCodeyUpdatePolicyChange: (policy: Config["codeyUpdatePolicy"]) => void;
+  codeyUpdateDownloadSource: Config["codeyUpdateDownloadSource"];
+  onCodeyUpdateDownloadSourceChange: (source: Config["codeyUpdateDownloadSource"]) => void;
 };
 
 function SystemSettingsDialogComponent({
@@ -54,6 +57,8 @@ function SystemSettingsDialogComponent({
   configRepairNotice,
   codeyUpdatePolicy,
   onCodeyUpdatePolicyChange,
+  codeyUpdateDownloadSource,
+  onCodeyUpdateDownloadSourceChange,
 }: SystemSettingsDialogProps) {
   const [copied, setCopied] = useState(false);
   const resolvedCodexPath = codexAppPath || "/Applications/ChatGPT.app";
@@ -218,6 +223,26 @@ function SystemSettingsDialogComponent({
                 onCheckedChange={(checked) => onCodeyUpdatePolicyChange(checked ? "stable" : "off")}
               />
             </div>
+          </div>
+          <div className="flex flex-col gap-2 rounded-xl border border-[var(--codey-border-subtle)] bg-[var(--codey-surface-muted)] p-3">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className="text-xs font-semibold text-[var(--codey-text)]">更新下载源</span>
+              <Select
+                aria-label="更新下载源"
+                className="w-40 text-xs"
+                value={codeyUpdateDownloadSource ?? "github"}
+                disabled={isBusy}
+                filter={false}
+                optionList={[
+                  { value: "github", label: "GitHub 官方" },
+                  { value: "ghProxy", label: "GH-Proxy 加速" },
+                ]}
+                onChange={value => {
+                  if (value === "github" || value === "ghProxy") onCodeyUpdateDownloadSourceChange(value);
+                }}
+              />
+            </div>
+            <p className="m-0 text-xs leading-relaxed text-[var(--codey-muted)]">保存后生效。GH-Proxy 仅代理安装包下载，失败时自动回退 GitHub 官方源。</p>
           </div>
         </div>
 

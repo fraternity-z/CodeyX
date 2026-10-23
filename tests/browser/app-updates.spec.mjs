@@ -98,3 +98,40 @@ test("更新开关只有更新和不更新，关闭后仍需保存", async ({ pa
   await expect(page.getByRole("button", { name: "保存更改", exact: true })).toBeEnabled();
   expect(await page.evaluate(() => window.updateBehavior.calls)).toEqual([]);
 });
+
+test("下载源关闭自动更新后仍可选择，草稿和保存值在重开后保留", async ({ page }) => {
+  await openSettings(page);
+  const trigger = page.getByRole("button", { name: "系统设置与偏好", exact: true });
+  await trigger.click();
+  const settings = page.getByRole("dialog", { name: "系统设置与偏好", exact: true });
+  const source = settings.getByRole("button", { name: /更新下载源$/ });
+  await expect(source).toContainText("GitHub 官方");
+  await settings.getByRole("switch", { name: "CodeyX 自动更新", exact: true }).press("Space");
+  await expect(source).toBeEnabled();
+  await source.click();
+  await page.getByRole("option", { name: "GH-Proxy 加速", exact: true }).click();
+  await expect(source).toContainText("GH-Proxy 加速");
+  await expect(settings.getByText("保存后生效。GH-Proxy 仅代理安装包下载，失败时自动回退 GitHub 官方源。", { exact: true })).toBeVisible();
+  await settings.press("Escape"); await trigger.click();
+  await expect(source).toContainText("GH-Proxy 加速");
+  await expect(settings.locator('[data-slot="toast"]')).toHaveCount(0);
+  await settings.screenshot({ path: "output/playwright/ghproxy-settings-light.png" });
+  await settings.press("Escape");
+  await page.getByRole("button", { name: "保存更改", exact: true }).click();
+  await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeVisible();
+  expect(await page.evaluate(() => window.updateBehavior.calls.filter(call => call.command === "save_codey_config").map(call => ({
+    source: call.args.config.codeyUpdateDownloadSource, policy: call.args.config.codeyUpdatePolicy,
+  })))).toEqual([{ source: "ghProxy", policy: "off" }]);
+  await page.getByRole("button", { name: "关闭配置", exact: true }).click();
+  await page.getByRole("button", { name: "打开内嵌设置", exact: true }).click(); await trigger.click();
+  await expect(source).toContainText("GH-Proxy 加速");
+  await expect(settings.getByRole("switch", { name: "CodeyX 自动更新", exact: true })).not.toBeChecked();
+  await page.evaluate(() => { document.documentElement.dataset.theme = "dark"; });
+  await settings.screenshot({ path: "output/playwright/ghproxy-settings-dark.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(source).toBeVisible();
+  const bounds = await settings.boundingBox();
+  expect(bounds.x).toBeGreaterThanOrEqual(0);
+  expect(bounds.x + bounds.width).toBeLessThanOrEqual(390);
+  await settings.screenshot({ path: "output/playwright/ghproxy-settings-narrow.png" });
+});

@@ -97,6 +97,7 @@ if (import.meta.env.DEV) {
     let previewConfig: Config = {
       settingsRevision: 0,
       codeyUpdatePolicy: "stable",
+      codeyUpdateDownloadSource: "github",
       localRouterEnabled: true,
       routeRequestLog: {
         enabled: true,

@@ -94,6 +94,7 @@ function modelSectionProps() {
     config: {
       activeProfileId: "route-a",
       codeyUpdatePolicy: "stable",
+      codeyUpdateDownloadSource: "github",
       codexAppPath: "",
       declaredOfficialModelsByProvider: {},
       defaultModel: "",

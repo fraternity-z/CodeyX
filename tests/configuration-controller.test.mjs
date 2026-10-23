@@ -6,7 +6,7 @@ import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 const feature = new URL("../src/features/configuration/", import.meta.url);
 const state = createModuleGraph(new URL("state.ts", feature)).exports;
 const subagents = createModuleGraph(new URL("../subagents/state.ts", feature)).exports;
-const config = (patch = {}) => ({ settingsRevision: 1, profiles: [], activeProfileId: "", streamMaxRetries: 2, subagentRoles: {}, retained: "saved", ...patch });
+const config = (patch = {}) => ({ settingsRevision: 1, codeyUpdateDownloadSource: "github", profiles: [], activeProfileId: "", streamMaxRetries: 2, subagentRoles: {}, retained: "saved", ...patch });
 const provider = { changed: false, provider: { id: "test", name: "Test", official: false, baseUrl: "https://api.example.com" } };
 const models = { officialModels: [], officialModelIds: [], thirdPartyModels: [], manualThirdPartyModels: [], upstreamModels: [], defaultModel: "" };
 const loadResult = (patch = {}) => ({ config: config(), providerStatus: provider, modelState: models, ...patch });
@@ -67,6 +67,22 @@ test("加载经请求层采纳共享配置和可选状态，缺少 FastCtx 状�
   assert.deepEqual(h.notices, []);
   h.options.active = false; h.render(); h.options.active = true; h.render();
   assert.equal(h.calls.length, 1, "初始化完成后普通重开的线路刷新仍由现有线路 controller 负责");
+});
+
+test("旧配置缺少下载源时规范化为官方，保存新来源并保留后续草稿", async t => {
+  const h = fixture(t);
+  const legacy = config(); delete legacy.codeyUpdateDownloadSource;
+  await h.ready({ config: legacy });
+  assert.equal(h.owner.render().config.codeyUpdateDownloadSource, "github");
+  assert.equal(h.owner.render().dirty, false);
+  const work = h.edit({ codeyUpdateDownloadSource: "ghProxy" }).saveCurrent();
+  assert.equal(h.calls.at(-1).command, "save_codey_config");
+  assert.equal(h.calls.at(-1).args.config.codeyUpdateDownloadSource, "ghProxy");
+  h.edit({ retained: "new draft" }); h.saveResult(); await work;
+  assert.equal(h.owner.render().persistedConfigRef.current.codeyUpdateDownloadSource, "ghProxy");
+  assert.equal(h.owner.render().config.codeyUpdateDownloadSource, "ghProxy");
+  assert.equal(h.owner.render().config.retained, "new draft");
+  assert.equal(h.owner.render().dirty, true);
 });
 
 test("隐藏页面不初始化或写入，激活后加载；缺失服务配置与请求失败可重试", async t => {

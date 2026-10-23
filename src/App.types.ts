@@ -88,6 +88,7 @@ export type ModelReasoningEffort = {
 export type Config = {
   settingsRevision: number;
   codeyUpdatePolicy: "off" | "stable";
+  codeyUpdateDownloadSource: "github" | "ghProxy";
   localRouterEnabled: boolean;
   routeRequestLog: RouteRequestLogConfig;
   streamMaxRetries: number;

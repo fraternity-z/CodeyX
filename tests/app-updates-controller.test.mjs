@@ -226,3 +226,18 @@ test("卸载清理监听和全部计时器，迟到成功、错误与 finally �
     assert.equal(h.busy, `${action}-update`); assert.equal(window.__codeyPendingUpdatePrompt, update);
   }
 });
+
+test("下载源编辑保留最新草稿，自动更新关闭仍可编辑，隐藏忙碌未加载时不写入", t => {
+  const h = updates(t, { codeyUpdatePolicy: "off" }); const c = h.render();
+  h.options.config = { ...h.options.config, retained: "latest draft" }; h.render();
+  c.changeUpdateDownloadSource("ghProxy");
+  assert.deepEqual(h.options.config, { codeyUpdatePolicy: "stable", retained: "latest draft", codeyUpdateDownloadSource: "ghProxy" });
+  h.render().changeUpdateDownloadSource("github");
+  assert.equal(h.options.config.codeyUpdateDownloadSource, "github");
+  h.options.active = false; h.render().changeUpdateDownloadSource("ghProxy");
+  assert.equal(h.options.config.codeyUpdateDownloadSource, "github");
+  h.options.active = true; h.busy = "save"; h.render().changeUpdateDownloadSource("ghProxy");
+  assert.equal(h.options.config.codeyUpdateDownloadSource, "github");
+  h.busy = null; h.options.configLoaded = false; h.render().changeUpdateDownloadSource("ghProxy");
+  assert.equal(h.options.config.codeyUpdateDownloadSource, "github"); h.unmount();
+});

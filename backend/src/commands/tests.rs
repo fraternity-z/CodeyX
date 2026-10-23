@@ -1659,6 +1659,51 @@ async fn codey_update_policy_save_persists_explicit_and_legacy_values() {
 }
 
 #[tokio::test]
+async fn codey_update_download_source_save_preserves_legacy_payload_and_rejects_invalid() {
+    use crate::config::CodeyUpdateDownloadSource;
+    let directory = tempfile::tempdir().unwrap();
+    let state = Arc::new(AppState {
+        store: ConfigStore::new(directory.path().join("config.json")),
+        config: RwLock::new(CodeyConfig::default()),
+        ..AppState::default()
+    });
+    for source in [
+        CodeyUpdateDownloadSource::GhProxy,
+        CodeyUpdateDownloadSource::Github,
+    ] {
+        let mut payload = serde_json::to_value(state.config.read().await.clone()).unwrap();
+        payload["codeyUpdateDownloadSource"] = json!(source);
+        let input = codey_config_save_input(&json!({"config": payload})).unwrap();
+        save_codey_config_locked(&state, input).await.unwrap();
+        assert_eq!(
+            state.config.read().await.codey_update_download_source,
+            source
+        );
+        assert_eq!(
+            state.store.load().unwrap().codey_update_download_source,
+            source
+        );
+        let mut legacy = serde_json::to_value(state.config.read().await.clone()).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("codeyUpdateDownloadSource");
+        let input = codey_config_save_input(&json!({"config": legacy})).unwrap();
+        save_codey_config_locked(&state, input).await.unwrap();
+        assert_eq!(
+            state.store.load().unwrap().codey_update_download_source,
+            source
+        );
+    }
+    let before = state.config.read().await.clone();
+    let mut invalid = serde_json::to_value(&before).unwrap();
+    invalid["codeyUpdateDownloadSource"] = json!("https://untrusted.example");
+    assert!(codey_config_save_input(&json!({"config": invalid})).is_err());
+    assert_eq!(*state.config.read().await, before);
+    assert_eq!(state.store.load().unwrap(), before);
+}
+
+#[tokio::test]
 async fn legacy_save_without_local_router_field_preserves_disabled_state() {
     let directory = tempfile::tempdir().unwrap();
     let initial = CodeyConfig {

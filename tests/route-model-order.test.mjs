@@ -79,6 +79,7 @@ function modelSectionProps(overrides = {}) {
     config: {
       activeProfileId: "route-a",
       codeyUpdatePolicy: "stable",
+      codeyUpdateDownloadSource: "github",
       codexAppPath: "",
       declaredOfficialModelsByProvider: {},
       defaultModel: "route-a/k3",

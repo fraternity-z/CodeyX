@@ -258,6 +258,7 @@ export function App({
     downloadedUpdate,
     checkForUpdates,
     changeUpdatePolicy,
+    changeUpdateDownloadSource,
   } = useAppUpdatesController({
     active: !embedded || modalVisible,
     embedded,
@@ -775,6 +776,8 @@ export function App({
         codexDirectoryNotice={codexDirectoryNotice}
         codeyUpdatePolicy={config.codeyUpdatePolicy}
         onCodeyUpdatePolicyChange={changeUpdatePolicy}
+        codeyUpdateDownloadSource={config.codeyUpdateDownloadSource ?? "github"}
+        onCodeyUpdateDownloadSourceChange={changeUpdateDownloadSource}
       />
     </main>
   );
