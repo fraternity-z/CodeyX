@@ -23,9 +23,10 @@ async function evaluateRemote(args, body) {
     // Match the shared bridge: objects are returned as references unless the
     // remote wrapper explicitly serializes them. A hand-written CDP response
     // with an object in result.value would conceal this regression.
-    session.post("Runtime.evaluate", {
+    // Avoid reentering the same-thread inspector from a Promise microtask.
+    setImmediate(() => session.post("Runtime.evaluate", {
       expression, awaitPromise: true, allowUnsafeEvalBlockedByCSP: true,
-    }, (error, response) => error ? reject(error) : resolve(response));
+    }, (error, response) => error ? reject(error) : resolve(response)));
   });
   try {
     await evaluate(`globalThis.window = { calls: 0, args: null };
