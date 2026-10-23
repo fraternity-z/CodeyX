@@ -9,6 +9,87 @@ use serde_json::{Value, json};
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[test]
+fn scheduler_owned_engine_serves_tools_without_a_detached_runtime() {
+    struct OwnedProcess(Child);
+    impl Drop for OwnedProcess {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let event_log = temp.path().join("runtime-events.log");
+    std::fs::write(temp.path().join("sample.txt"), "owned engine\n").unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_codey-fastctx"));
+    command
+        .arg("--codey-fastctx-owned-mcp")
+        .current_dir(temp.path())
+        .env("CODEY_APP_STATE_DIR", temp.path().join("state"))
+        .env("FASTCTX_TEST_RUNTIME_EVENT_LOG", &event_log)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    let mut child = OwnedProcess(command.spawn().unwrap());
+    let mut stdin = child.0.stdin.take().unwrap();
+    let stdout = child.0.stdout.take().unwrap();
+    let (sender, responses) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if sender.send(line).is_err() {
+                break;
+            }
+        }
+    });
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"owned-engine-test","version":"1"}}}),
+    );
+    assert_eq!(
+        response_with_id(&responses, 1)["result"]["capabilities"],
+        json!({"tools":{}})
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    );
+    send(
+        &mut stdin,
+        json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
+    );
+    assert_eq!(
+        response_with_id(&responses, 2)["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .len(),
+        4
+    );
+    for id in 3..=6 {
+        send(
+            &mut stdin,
+            json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":"glob","arguments":{"pattern":["*.txt"]}}}),
+        );
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for _ in 3..=6 {
+        let response: Value =
+            serde_json::from_str(&responses.recv_timeout(PROCESS_TIMEOUT).unwrap().unwrap())
+                .unwrap();
+        assert_eq!(response["result"]["isError"], false, "{response}");
+        assert!(response["result"].to_string().contains("sample.txt"));
+        ids.insert(response["id"].as_u64().unwrap());
+    }
+    assert_eq!(ids, (3..=6).collect());
+    assert!(host_start_pids(&event_log).is_empty());
+    drop(stdin);
+    assert!(wait_for_child(&mut child.0).success());
+}
+
+#[test]
 fn control_center_crash_keeps_the_mcp_connection_usable() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().join("home");

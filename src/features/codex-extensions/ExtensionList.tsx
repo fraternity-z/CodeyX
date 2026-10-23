@@ -8,9 +8,9 @@ import {
   IconSettings,
   IconTrash,
 } from "@tabler/icons-react";
-import { Badge, Button, Checkbox, Switch } from "../../components/ui";
-import type { McpEntry, SkillEntry, CheckResult } from "./types";
-import { canToggle } from "./state";
+import { Badge, Button, Checkbox, Select, Switch } from "../../components/ui";
+import type { McpEntry, SkillEntry, CheckResult, McpSharingStatus } from "./types";
+import { canShareMcp, canToggle, mcpSharingSummary } from "./state";
 
 export function ExtensionList({
   kind,
@@ -23,6 +23,9 @@ export function ExtensionList({
   checks = {},
   revision,
   filtered = false,
+  onSharing,
+  sharingStatus = null,
+  sharingStatusError = "",
 }: {
   kind: "mcp" | "skill";
   entries: (McpEntry | SkillEntry)[];
@@ -34,6 +37,9 @@ export function ExtensionList({
   checks?: Record<string, CheckResult & { revision?: string }>;
   revision?: string;
   filtered?: boolean;
+  onSharing?: (entry: McpEntry, enabled: boolean, maxInstances?: number) => void;
+  sharingStatus?: McpSharingStatus | null;
+  sharingStatusError?: string;
 }) {
   const [expandedChecks, setExpandedChecks] = useState<Record<string, boolean>>({});
   const isMcp = kind === "mcp";
@@ -78,6 +84,7 @@ export function ExtensionList({
           isBuiltin || !("enabledKnown" in entry) || entry.enabledKnown !== false;
         const isManaged = "ownership" in entry && entry.ownership === "managed";
         const checkResult = checks[entry.id];
+        const sharingSummary = "transport" in entry && sharingStatus ? mcpSharingSummary(entry, sharingStatus) : null;
 
         return (
           <article
@@ -178,6 +185,32 @@ export function ExtensionList({
                   )}
                 </div>
               </div>
+
+              {"transport" in entry && entry.transport === "stdio" && onSharing && (
+                <div className="mt-3 space-y-2 rounded-lg border border-default p-3 text-xs">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium">共享实例</span>
+                    <Switch size="sm" checked={entry.sharing?.enabled === true}
+                      disabled={busy || !canShareMcp(entry, !entry.sharing?.enabled)} aria-label={`共享 ${entry.name} 实例`}
+                      onCheckedChange={enabled => onSharing(entry, enabled)} />
+                  </div>
+                  {entry.sharing?.reason && <p className="m-0 text-muted">{entry.sharing.reason}</p>}
+                  {entry.sharing?.enabled ? <>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-muted">每池实例上限</span>
+                      <Select aria-label={`${entry.name} 每池实例上限`} className="w-24 text-xs"
+                        value={String(entry.sharing.maxInstances)} disabled={busy || !canShareMcp(entry)}
+                        optionList={Array.from({ length: 8 }, (_, index) => ({ value: String(index + 1), label: `${index + 1} 个` }))}
+                        onChange={value => onSharing(entry, true, Number(value))} />
+                    </div>
+                    <p role={sharingStatusError || sharingSummary?.error ? "alert" : "status"} className="m-0 text-muted">
+                      {!entry.enabled ? "服务已禁用，共享调度暂停。" : sharingStatusError || (sharingStatus?.enabled === false ? "共享器已关闭，当前直连；共享选择已保留。" : !sharingSummary ? "正在读取共享运行状态…"
+                        : sharingSummary.error ? "共享实例运行异常，请检查服务配置后重试。"
+                          : `执行 ${sharingSummary.running} · 排队 ${sharingSummary.queued}`)}
+                    </p>
+                  </> : <p className="m-0 text-muted">当前直连；仅无状态且支持多实例的工具型服务适合共享。</p>}
+                </div>
+              )}
 
               {"description" in entry && entry.description && (
                 <p className="mb-0 mt-3 line-clamp-2 text-xs text-foreground/80 leading-relaxed">

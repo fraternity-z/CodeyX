@@ -7,6 +7,7 @@ import {
   DialogDescription,
   DialogHeader,
   DialogTitle,
+  Switch,
 } from "../../components/ui";
 import {
   IconBook2,
@@ -137,6 +138,32 @@ function CodexExtensionsPageComponent({
           onRead={() => controller.changeScope(true)}
         />
 
+        {kind === "mcp" && (
+          <div className="codey-card space-y-3 p-4" aria-label="MCP 共享器" aria-busy={controller.sharingLoading || busy}>
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="flex items-center gap-3">
+                <span className="text-sm font-medium">启用共享器</span>
+                {controller.sharingStatus && <Switch size="sm" aria-label="启用共享器"
+                  checked={controller.sharingStatus.enabled}
+                  disabled={unavailable || controller.sharingLoading || !!controller.sharingStatusError}
+                  onCheckedChange={enabled => void controller.setMcpSchedulerEnabled(enabled)} />}
+                <span role="status" className="text-xs text-muted">
+                  {controller.busyAction === "set_mcp_scheduler_enabled" ? "正在保存…"
+                    : controller.sharingStatus ? controller.sharingStatus.enabled ? "已开启 · 全局" : "已关闭 · 全局"
+                      : controller.sharingStatusError ? "状态待确认" : "正在读取状态…"}
+                </span>
+              </div>
+              <Button size="sm" variant="outline" disabled={unavailable || controller.sharingLoading || !controller.sharingStatus || !!controller.sharingStatusError}
+                loading={controller.busyAction === "release_mcp_idle"} onClick={() => void controller.releaseMcpIdle()}>
+                释放空闲实例
+              </Button>
+            </div>
+            <p className="m-0 text-xs leading-relaxed text-muted">统一管理共享 MCP 的内存；已启用的内置 FastCtx 等服务自动接入。关闭后恢复直连并保留各服务的共享选择。释放会跳过忙碌请求，下次调用按需启动。</p>
+            <p className="m-0 text-xs text-muted">配置更新后在新会话中生效；运行中的内置工具可能需要重启 Codex，请以保存结果提示为准。</p>
+            {controller.sharingStatusError && <ExtensionError message={controller.sharingStatusError} />}
+          </div>
+        )}
+
         {controller.error && !draft && (
           <div className="space-y-2">
             <ExtensionError message={controller.error} />
@@ -236,6 +263,9 @@ function CodexExtensionsPageComponent({
             checks={controller.checks}
             revision={inventory.revision}
             filtered={!!query.trim() || filter !== "all" || source !== "all"}
+            onSharing={(entry, enabled, maxInstances) => void controller.setMcpSharing(entry, enabled, maxInstances)}
+            sharingStatus={controller.sharingStatus}
+            sharingStatusError={controller.sharingStatusError}
           />
         )}
         {inventory && filtered.length > 0 && (

@@ -22,7 +22,18 @@ export interface McpEntry extends ResourceCapabilities {
   reason?: string;
   summary: string;
   scope?: "user" | "project";
+  sharing?: { enabled: boolean; maxInstances: number; registrationId?: string; canShare?: boolean; reason?: string };
 }
+export interface McpSharingPool {
+  registrationId: string;
+  id: string;
+  sourcePath: string;
+  instances: number;
+  running: number;
+  queued: number;
+  error?: string;
+}
+export interface McpSharingStatus { enabled: boolean; pools: McpSharingPool[] }
 export interface SkillEntry extends ResourceCapabilities {
   id: string;
   name: string;

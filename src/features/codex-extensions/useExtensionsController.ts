@@ -198,6 +198,7 @@ export function useExtensionsController(
     error,
     notice,
     noticeSeq,
+    postNotice,
     check,
     checks,
     refresh,

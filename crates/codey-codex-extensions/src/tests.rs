@@ -1,6 +1,35 @@
 use super::*;
 use std::{fs, io::Write};
 
+#[test]
+fn mcp_save_candidate_preserves_masked_credentials_without_writing() {
+    let f = Fixture::new(
+        "[mcp_servers.test]\ncommand='node'\n[mcp_servers.test.env]\nTOKEN='private-fixture'\n",
+    );
+    let before = fs::read(f.home.join("config.toml")).unwrap();
+    let candidate = f
+        .service
+        .mcp_save_configuration(
+            &Scope::User,
+            "test",
+            &json!({"command":"changed", "env":mcp::MASK}),
+        )
+        .unwrap();
+    assert_eq!(candidate["command"], "changed");
+    assert_eq!(candidate["env"]["TOKEN"], "private-fixture");
+    assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), before);
+    assert!(!f.data.exists());
+    assert!(
+        f.service
+            .mcp_save_configuration(
+                &Scope::User,
+                "new",
+                &json!({"command":"node","env":mcp::MASK})
+            )
+            .is_err()
+    );
+}
+
 fn cached_skill(f: &Fixture, relative: &str) -> PathBuf {
     let directory = f.home.join("plugins/cache").join(relative);
     fs::create_dir_all(&directory).unwrap();
@@ -399,6 +428,295 @@ struct Fixture {
     home: PathBuf,
     data: PathBuf,
     source: PathBuf,
+}
+
+fn shared_fixture(config: &str) -> Fixture {
+    let mut fixture = Fixture::new(config);
+    fixture.service = ExtensionService::new(
+        fixture.home.clone(),
+        fixture.data.clone(),
+        fixture.home.parent().unwrap().to_path_buf(),
+    )
+    .with_mcp_relay_executable(fixture.home.join("codey.exe"));
+    fixture
+        .mutate(json!({"action":"set_mcp_scheduler_enabled","enabled":true}))
+        .unwrap();
+    fixture
+}
+
+#[test]
+fn scheduler_toggle_restores_direct_configuration_and_remembers_choices() {
+    let original = "[mcp_servers.test]\ncommand='node' # preserve\nargs=['server.js']\n";
+    let f = shared_fixture(original);
+    f.mutate(json!({"action":"set_mcp_sharing","id":"test","enabled":true}))
+        .unwrap();
+    let registration = f.list()["mcps"][0]["sharing"]["registrationId"].clone();
+    for enabled in [false, false, true, true, false] {
+        f.mutate(json!({"action":"set_mcp_scheduler_enabled","enabled":enabled}))
+            .unwrap();
+        assert_eq!(f.service.mcp_scheduler_enabled().unwrap(), enabled);
+        assert_eq!(
+            f.list()["mcps"][0]["sharing"]["registrationId"],
+            registration
+        );
+        let disk = fs::read_to_string(f.home.join("config.toml")).unwrap();
+        assert_eq!(disk.contains("--mcp-relay"), enabled);
+        if !enabled {
+            assert_eq!(disk, original);
+        }
+        assert!(
+            f.service
+                .shared_mcp_registration(registration.as_str().unwrap())
+                .is_ok()
+        );
+    }
+    assert!(
+        !ExtensionService::new(f.home.clone(), f.data.clone(), f.home.clone())
+            .mcp_scheduler_enabled()
+            .unwrap()
+    );
+}
+
+#[test]
+fn scheduler_defaults_off_preserves_disabled_builtins_and_rejects_external_changes() {
+    let mut f = Fixture::new("[mcp_servers.codey_fastctx]\ncommand='fastctx'\nenabled=false\n");
+    f.service = ExtensionService::new(f.home.clone(), f.data.clone(), f.home.clone())
+        .with_mcp_relay_executable(f.home.join("codey.exe"));
+    assert!(!f.service.mcp_scheduler_enabled().unwrap());
+    f.mutate(
+        json!({"action":"set_mcp_scheduler_enabled","enabled":true,"builtinIds":["codey_fastctx"]}),
+    )
+    .unwrap();
+    assert_eq!(f.list()["mcps"][0]["enabled"], false);
+    assert_eq!(f.list()["mcps"][0]["sharing"]["enabled"], false);
+    f.mutate(json!({"action":"set_mcp_sharing","id":"codey_fastctx","enabled":true}))
+        .unwrap();
+    let revision = f.list()["revision"].clone();
+    let path = f.home.join("config.toml");
+    fs::write(&path, "[mcp_servers.codey_fastctx]\ncommand='external'\n").unwrap();
+    let bytes = fs::read(&path).unwrap();
+    assert!(
+        f.service
+            .dispatch(
+                json!({"action":"set_mcp_scheduler_enabled","enabled":false,"revision":revision})
+            )
+            .is_err()
+    );
+    assert!(f.service.mcp_scheduler_enabled().unwrap());
+    assert_eq!(fs::read(path).unwrap(), bytes);
+}
+
+#[test]
+fn shared_mcp_project_and_user_registrations_are_separate() {
+    let f = shared_fixture("[mcp_servers.test]\ncommand='user-node'\n");
+    let project = f.source.parent().unwrap().join("project");
+    fs::create_dir_all(project.join(".codex")).unwrap();
+    let project_config = "[mcp_servers.test]\ncommand='project-node'\n";
+    fs::write(project.join(".codex/config.toml"), project_config).unwrap();
+    let scope = json!({"kind":"project","projectPath":project});
+    f.mutate(json!({"action":"set_mcp_sharing","id":"test","enabled":true}))
+        .unwrap();
+    let user_registration = f.list()["mcps"][0]["sharing"]["registrationId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let inventory = f
+        .service
+        .dispatch(json!({"action":"list","scope":scope}))
+        .unwrap();
+    assert_eq!(inventory["mcps"][0]["sharing"]["enabled"], false);
+    let result = f.service.dispatch(json!({"action":"set_mcp_sharing","scope":scope,"id":"test","enabled":true,"confirmed":true,"revision":inventory["revision"]})).unwrap();
+    let project_registration = result["inventory"]["mcps"][0]["sharing"]["registrationId"]
+        .as_str()
+        .unwrap();
+    assert_ne!(project_registration, user_registration);
+    assert_eq!(
+        f.service
+            .shared_mcp_registration(project_registration)
+            .unwrap()
+            .config["command"],
+        "project-node"
+    );
+    assert_eq!(
+        f.service
+            .shared_mcp_registration(&user_registration)
+            .unwrap()
+            .config["command"],
+        "user-node"
+    );
+    let inventory = f
+        .service
+        .inventory(&Scope::Project {
+            project_path: project.clone(),
+        })
+        .unwrap();
+    let disabled = f.service.dispatch(json!({"action":"set_mcp_scheduler_enabled","scope":scope,"enabled":false,"revision":inventory["revision"]})).unwrap();
+    assert_eq!(disabled["inventory"]["scope"]["kind"], "project");
+    assert_eq!(
+        fs::read_to_string(project.join(".codex/config.toml")).unwrap(),
+        project_config
+    );
+    assert!(
+        !fs::read_to_string(f.home.join("config.toml"))
+            .unwrap()
+            .contains("--mcp-relay")
+    );
+    f.mutate(json!({"action":"set_mcp_scheduler_enabled","enabled":true}))
+        .unwrap();
+    let inventory = f
+        .service
+        .inventory(&Scope::Project {
+            project_path: project.clone(),
+        })
+        .unwrap();
+    f.service.dispatch(json!({"action":"set_mcp_sharing","scope":scope,"id":"test","enabled":false,"revision":inventory["revision"]})).unwrap();
+    assert_eq!(
+        fs::read_to_string(project.join(".codex/config.toml")).unwrap(),
+        project_config
+    );
+    assert!(
+        f.service
+            .shared_mcp_registration(&user_registration)
+            .is_ok()
+    );
+}
+
+#[test]
+fn shared_mcp_roundtrip_preserves_original_table_and_masks_credentials() {
+    for original in [
+        "# before\nmodel='keep'\n[mcp_servers.test]\n# secret comment\ncommand='node' # original command\nargs=['server.js','--token','private-token']\nfuture='private-future'\n[mcp_servers.test.env]\nTOKEN='private-env'\n",
+        "# inline\nmcp_servers = { test = { command = 'node', args = ['server.js'], env = { TOKEN = 'private-env' }, custom = 1 } }\n",
+    ] {
+        let f = shared_fixture(original);
+        let before = f.service.mcp_configuration(&Scope::User, "test").unwrap();
+        assert_eq!(f.list()["mcps"][0]["sharing"]["enabled"], false);
+        let enabled = f
+            .mutate(json!({"action":"set_mcp_sharing","id":"test","enabled":true}))
+            .unwrap();
+        let sharing = &enabled["inventory"]["mcps"][0]["sharing"];
+        assert_eq!(sharing["maxInstances"], 4);
+        let registration = sharing["registrationId"].as_str().unwrap();
+        assert_eq!(
+            f.service
+                .shared_mcp_registration(registration)
+                .unwrap()
+                .config,
+            before
+        );
+        assert_eq!(
+            f.service.mcp_configuration(&Scope::User, "test").unwrap(),
+            before
+        );
+        let displayed = f
+            .service
+            .dispatch(json!({"action":"get_mcp","id":"test"}))
+            .unwrap();
+        assert!(!displayed.to_string().contains("private-"));
+        assert_eq!(displayed["configJson"]["command"], "node");
+        assert!(
+            fs::read_to_string(f.home.join("config.toml"))
+                .unwrap()
+                .contains("--mcp-relay")
+        );
+        f.mutate(json!({"action":"set_mcp_sharing","id":"test","enabled":false}))
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(f.home.join("config.toml")).unwrap(),
+            original
+        );
+        assert!(f.service.shared_mcp_registration(registration).is_err());
+        assert!(
+            !fs::read_to_string(f.data.join("audit.jsonl"))
+                .unwrap()
+                .contains("private-")
+        );
+    }
+}
+
+#[test]
+fn shared_mcp_edit_toggle_batch_delete_and_registry_revision() {
+    let f = shared_fixture("[mcp_servers.test]\ncommand='node'\nargs=['old.js']\nenabled=false\n");
+    f.mutate(json!({"action":"set_mcp_sharing","id":"test","enabled":true,"maxInstances":2}))
+        .unwrap();
+    let registration = f.list()["mcps"][0]["sharing"]["registrationId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(f.service.shared_mcp_registration(&registration).is_err());
+    f.mutate(json!({"action":"set_mcps_enabled","ids":["test"],"enabled":true}))
+        .unwrap();
+    let mut body = f
+        .service
+        .dispatch(json!({"action":"get_mcp","id":"test"}))
+        .unwrap()["configJson"]
+        .clone();
+    body["args"] = json!(["new.js"]);
+    f.mutate(json!({"action":"save_mcp","id":"test","configJson":body}))
+        .unwrap();
+    let registration_config = f.service.shared_mcp_registration(&registration).unwrap();
+    assert_eq!(registration_config.config["args"][0], "new.js");
+    assert_eq!(registration_config.max_instances, 2);
+    f.mutate(json!({"action":"set_mcp_enabled","id":"test","enabled":false}))
+        .unwrap();
+    assert!(f.service.shared_mcp_registration(&registration).is_err());
+    let revision = f.list()["revision"].clone();
+    let registry_path = f.data.join("managed-mcps.json");
+    let mut registry: Value = serde_json::from_slice(&fs::read(&registry_path).unwrap()).unwrap();
+    registry[&registration]["max_instances"] = json!(3);
+    fs::write(&registry_path, serde_json::to_vec(&registry).unwrap()).unwrap();
+    assert!(
+        f.service
+            .dispatch(
+                json!({"action":"remove_mcp","id":"test","confirmed":true,"revision":revision})
+            )
+            .is_err()
+    );
+    f.mutate(json!({"action":"remove_mcp","id":"test"}))
+        .unwrap();
+    assert!(f.service.shared_mcp_registration(&registration).is_err());
+    assert!(f.list()["mcps"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn shared_mcp_rejects_unconfirmed_remote_limits_and_external_edits() {
+    let f = shared_fixture(
+        "[mcp_servers.test]\ncommand='node'\n[mcp_servers.remote]\nurl='https://example.invalid'\n",
+    );
+    let original = fs::read(f.home.join("config.toml")).unwrap();
+    for request in [
+        json!({"action":"set_mcp_sharing","id":"test","enabled":true,"confirmed":false}),
+        json!({"action":"set_mcp_sharing","id":"remote","enabled":true}),
+        json!({"action":"set_mcp_sharing","id":"test","enabled":true,"maxInstances":0}),
+        json!({"action":"set_mcp_sharing","id":"test","enabled":true,"maxInstances":9}),
+    ] {
+        assert!(f.mutate(request).is_err());
+    }
+    assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), original);
+    f.mutate(json!({"action":"set_mcp_sharing","id":"test","enabled":true}))
+        .unwrap();
+    let registration = f.list()["mcps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "test")
+        .unwrap()["sharing"]["registrationId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let path = f.home.join("config.toml");
+    let text = fs::read_to_string(&path)
+        .unwrap()
+        .replace("--mcp-relay", "--external");
+    fs::write(&path, &text).unwrap();
+    assert!(f.service.shared_mcp_registration(&registration).is_err());
+    assert!(
+        f.service
+            .dispatch(
+                json!({"action":"set_mcp_sharing","id":"test","enabled":false,"revision":"stale"})
+            )
+            .is_err()
+    );
+    assert_eq!(fs::read_to_string(path).unwrap(), text);
 }
 impl Fixture {
     fn new(config: &str) -> Self {

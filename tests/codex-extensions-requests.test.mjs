@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 const calls = [];
-const { readInventory, invalidateInventory, withTimeout, executeExtensionAction, extensionRequest } = createModuleGraph(
+const { readInventory, invalidateInventory, withTimeout, executeExtensionAction, extensionRequest, readMcpSharingStatus } = createModuleGraph(
   new URL("../src/features/codex-extensions/requests.ts", import.meta.url),
   { stubs: { "../../api": { invoke: async (...args) => { calls.push(args); return { ok: true }; } } } },
 ).exports;
@@ -127,4 +127,14 @@ test("timeouts describe uncertain mutations without claiming cancellation", asyn
     withTimeout(new Promise(() => {}), false, 1),
     /读取超时/,
   );
+});
+
+test("共享状态缺失启用标志不能被当作已关闭", async () => {
+  for (const status of [null, {}, { pools: [] }, { enabled: false }, { enabled: "false", pools: [] }]) {
+    await assert.rejects(readMcpSharingStatus(async () => status, scope), /共享运行状态无效/);
+  }
+  assert.deepEqual(await readMcpSharingStatus(async payload => {
+    assert.deepEqual(payload, { action: "mcp_sharing_status", scope });
+    return { enabled: false, pools: [] };
+  }, scope), { enabled: false, pools: [] });
 });

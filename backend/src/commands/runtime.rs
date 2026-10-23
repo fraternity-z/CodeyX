@@ -350,6 +350,16 @@ async fn forward_codex_exit_to_codey_shutdown(
 
 async fn launch_codey_inner_locked(state: &Arc<AppState>) -> anyhow::Result<Value> {
     ensure_runtime_can_start(state).map_err(anyhow::Error::msg)?;
+    super::extensions::ensure_scheduler(state).await?;
+    let result = launch_codey_inner_attempt(state).await;
+    if result.is_err() {
+        super::extensions::stop_scheduler(state).await;
+    }
+    result
+}
+
+async fn launch_codey_inner_attempt(state: &Arc<AppState>) -> anyhow::Result<Value> {
+    ensure_runtime_can_start(state).map_err(anyhow::Error::msg)?;
     if state.runtime.lock().await.is_some() {
         return Ok(json!({"status":"already_running"}));
     }
@@ -386,6 +396,7 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> anyhow::Result<Valu
     let routes_ms = launch_started.elapsed().as_millis() as u64;
     let imported_default_route = super::ensure_default_route_imported(state).await;
     let config = sync_provider_models_for_launch(state, imported_default_route).await;
+    super::extensions::prepare_shared_fastctx(state, config.fast_context_tools).await?;
     let model_sync_ms = launch_started.elapsed().as_millis() as u64 - routes_ms;
     let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
         "launcher.prelaunch_timings",
@@ -636,6 +647,7 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
 }
 
 async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, String> {
+    super::extensions::stop_scheduler(state).await;
     super::stop_wechat_claw_service(state).await;
     stop_waiting_webhook_watcher(state).await;
     let runtime = state.runtime.lock().await.take();
@@ -662,6 +674,7 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
 
 pub(crate) async fn reap_runtime_child_before_exit(state: &Arc<AppState>) -> Result<(), String> {
     let _operation = state.runtime_operation.lock().await;
+    super::extensions::stop_scheduler(state).await;
     let runtime = state.runtime.lock().await.clone();
     if let Some(runtime) = runtime {
         runtime

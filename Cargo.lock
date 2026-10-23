@@ -771,6 +771,7 @@ dependencies = [
  "codey-error-log",
  "fastctx",
  "libc",
+ "rmcp",
  "serde",
  "serde_json",
  "tempfile",

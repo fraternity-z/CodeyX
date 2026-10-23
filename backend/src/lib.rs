@@ -27,6 +27,7 @@ mod launch_proxy;
 mod launcher;
 mod local_router;
 mod maintenance_lock;
+pub mod mcp_scheduler;
 mod model_catalog;
 mod model_id;
 mod model_list;
@@ -79,6 +80,10 @@ enum ShutdownReason {
 
 pub fn run_update_helper_if_requested() -> Result<bool> {
     update_helper::run_if_requested().map_err(anyhow::Error::msg)
+}
+
+pub fn run_mcp_relay_if_requested() -> Result<bool> {
+    mcp_scheduler::run_relay_if_requested()
 }
 
 pub fn run_error_log_helper_if_requested() -> Result<bool> {

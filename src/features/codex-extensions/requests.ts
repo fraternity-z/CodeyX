@@ -1,5 +1,5 @@
 import { invoke } from "../../api";
-import type { ExtensionTransport, Inventory, Scope, SkillCacheInventory } from "./types";
+import type { ExtensionTransport, Inventory, McpSharingStatus, Scope, SkillCacheInventory } from "./types";
 
 export const extensionRequest: ExtensionTransport = request => invoke("codex_extensions", { request });
 const pendingMutations = new WeakMap<ExtensionTransport, Promise<unknown>>();
@@ -10,7 +10,7 @@ export function waitForExtensionMutation(request: ExtensionTransport) {
 }
 
 export function isExtensionMutation(action: string) {
-  return !["get_mcp", "read_skill", "export_skill", "pick_project", "pick_skill", "test_mcp", "validate_skill"].includes(action);
+  return !["get_mcp", "read_skill", "export_skill", "pick_project", "pick_skill", "test_mcp", "validate_skill", "mcp_sharing_status"].includes(action);
 }
 
 export function executeExtensionAction<T>(
@@ -25,7 +25,7 @@ export function executeExtensionAction<T>(
     return Promise.reject(new Error("上次操作仍在执行，请刷新确认后再提交修改。"));
   }
   const timeout = name === "test_mcp" ? 35000
-    : ["save_mcp", "set_mcp_enabled", "set_mcps_enabled", "remove_mcp"].includes(name) ? 45000
+    : ["save_mcp", "set_mcp_enabled", "set_mcps_enabled", "remove_mcp", "set_mcp_sharing", "set_mcp_scheduler_enabled"].includes(name) ? 45000
       : name.startsWith("pick_") ? 120000 : mutation ? 30000 : 15000;
   const operation = request<T>({ scope, revision, ...action });
   if (mutation) {
@@ -38,6 +38,13 @@ export function executeExtensionAction<T>(
     void operation.then(release, release);
   }
   return withTimeout(operation, mutation, timeout);
+}
+
+export function readMcpSharingStatus(request: ExtensionTransport, scope: Scope) {
+  return withTimeout(request<McpSharingStatus>({ action: "mcp_sharing_status", scope })).then(result => {
+    if (!result || typeof result.enabled !== "boolean" || !Array.isArray(result.pools)) throw new Error("共享运行状态无效，请刷新后重试。");
+    return result;
+  });
 }
 
 // 缓存删除独立于普通库存；关闭窗口也不能绕过未完成写入的检查。

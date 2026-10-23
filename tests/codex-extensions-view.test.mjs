@@ -55,3 +55,71 @@ test("缓存弹窗将读取、刷新和确认删除接到 controller，删除时
   elementProps(dialog).onOpenChange(false); assert.equal(closed, 0);
   assert.equal(graph.exports.SkillCacheDialog({ open: false, onClose() {} }), null);
 });
+
+test("本地 MCP 共享控件接线并展示聚合状态，读取失败不显示健康零值", () => {
+  const calls = [];
+  const graph = createModuleGraph(new URL("../src/features/codex-extensions/ExtensionList.tsx", import.meta.url), {
+    stubs: { "../../components/ui": ui, "@tabler/icons-react": autoStubModule("icon") },
+  });
+  const entry = { id: "local", name: "local", sourcePath: "/config", enabled: true, transport: "stdio", readOnly: false,
+    sharing: { enabled: true, maxInstances: 4, registrationId: "registered" } };
+  const props = { kind: "mcp", entries: [entry, { ...entry, id: "http", transport: "http" }], busy: false,
+    onAction() {}, onSharing: (...args) => calls.push(args), sharingStatus: { pools: [
+      { registrationId: "registered", id: "local", sourcePath: "/config", instances: 2, running: 1, queued: 3 },
+    ] } };
+  const tree = graph.exports.ExtensionList(props);
+  const share = collectElements(tree, node => elementType(node) === ui.Switch && elementProps(node)["aria-label"] === "共享 local 实例");
+  assert.equal(share.length, 1);
+  elementProps(share[0]).onCheckedChange(false);
+  const limit = collectElements(tree, node => elementType(node) === ui.Select)[0];
+  assert.deepEqual(elementProps(limit).optionList.map(item => item.value), ["1", "2", "3", "4", "5", "6", "7", "8"]);
+  elementProps(limit).onChange("8");
+  assert.deepEqual(calls, [[entry, false], [entry, true, 8]]);
+  assert.match(textContent(tree), /执行 1 · 排队 3/);
+  const failed = graph.exports.ExtensionList({ ...props, sharingStatus: null, sharingStatusError: "未能读取共享运行状态，请刷新后重试。" });
+  assert.match(textContent(failed), /未能读取共享运行状态/);
+  assert.doesNotMatch(textContent(failed), /实例 0/);
+});
+
+test("内置 MCP 显示共享限制，已共享时只允许关闭且不可调整上限", () => {
+  const graph = createModuleGraph(new URL("../src/features/codex-extensions/ExtensionList.tsx", import.meta.url), {
+    stubs: { "../../components/ui": ui, "@tabler/icons-react": autoStubModule("icon") },
+  });
+  for (const enabled of [false, true]) {
+    const entry = { id: "codey_fastctx", name: "codey_fastctx", transport: "stdio", readOnly: false,
+      sharing: { enabled, maxInstances: 4, canShare: false, reason: "内置服务不支持共享" } };
+    const tree = graph.exports.ExtensionList({ kind: "mcp", entries: [entry], busy: false, onAction() {}, onSharing() {} });
+    const toggle = collectElements(tree, node => elementType(node) === ui.Switch && elementProps(node)["aria-label"] === "共享 codey_fastctx 实例")[0];
+    assert.equal(elementProps(toggle).disabled, !enabled);
+    assert.match(textContent(tree), /内置服务不支持共享/);
+    if (enabled) assert.equal(elementProps(collectElements(tree, node => elementType(node) === ui.Select)[0]).disabled, true);
+  }
+});
+
+test("共享器卡片连接总开关和释放操作，未知状态不显示关闭开关，Skill 页隐藏卡片", () => {
+  const calls = [];
+  const controller = {
+    inventory: { revision: "r1", warnings: [] }, scope: { kind: "user" }, entries: [], filtered: [], currentPage: { entries: [], page: 1, pages: 1 },
+    selected: [], query: "", filter: "all", source: "all", sort: "name", busy: false, loading: false, notice: "", noticeSeq: 0,
+    sharingStatus: { enabled: true, pools: [] }, sharingLoading: false, sharingStatusError: "",
+    setMcpSchedulerEnabled: value => calls.push(["enabled", value]), releaseMcpIdle: () => calls.push(["release"]),
+  };
+  const graph = createModuleGraph(new URL("../src/features/codex-extensions/CodexExtensionsPage.tsx", import.meta.url), {
+    stubs: { ...common, "./useExtensionsPageController": { useExtensionsPageController: () => controller } },
+  });
+  let tree = graph.exports.CodexExtensionsPage({ kind: "mcp" });
+  const switchOf = tree => collectElements(tree, node => elementType(node) === ui.Switch && elementProps(node)["aria-label"] === "启用共享器");
+  assert.equal(elementProps(switchOf(tree)[0]).checked, true);
+  elementProps(switchOf(tree)[0]).onCheckedChange(false);
+  elementProps(collectElements(tree, node => elementType(node) === ui.Button && textContent(node) === "释放空闲实例")[0]).onClick();
+  assert.deepEqual(calls, [["enabled", false], ["release"]]);
+  controller.unavailable = true;
+  assert.equal(elementProps(switchOf(graph.exports.CodexExtensionsPage({ kind: "mcp" }))[0]).disabled, true);
+  controller.sharingStatus = null;
+  controller.sharingStatusError = "未能读取共享运行状态，请刷新后重试。";
+  tree = graph.exports.CodexExtensionsPage({ kind: "mcp" });
+  assert.equal(switchOf(tree).length, 0);
+  assert.match(textContent(tree), /状态待确认/);
+  assert.doesNotMatch(textContent(tree), /已关闭 · 全局/);
+  assert.equal(switchOf(graph.exports.CodexExtensionsPage({ kind: "skill" })).length, 0);
+});

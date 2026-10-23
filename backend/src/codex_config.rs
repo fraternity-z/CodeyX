@@ -390,7 +390,7 @@ fn resolve_fastctx_command(fast_context_tools: bool) -> Option<PathBuf> {
     }
 }
 
-fn fastctx_server_command() -> Result<PathBuf> {
+pub(crate) fn fastctx_server_command() -> Result<PathBuf> {
     let current = std::env::current_exe().context("定位 Codey FastCtx 服务失败")?;
     current
         .parent()
@@ -399,6 +399,55 @@ fn fastctx_server_command() -> Result<PathBuf> {
         .ok_or_else(|| {
             anyhow::anyhow!("未在 Codey 程序目录找到 FastCtx 服务程序 {FASTCTX_SERVER_BINARY}")
         })
+}
+
+pub(crate) fn prepare_shared_fastctx(
+    home: &Path,
+    data_dir: PathBuf,
+    user_home: PathBuf,
+    command: Option<&Path>,
+) -> Result<()> {
+    let service =
+        codey_codex_extensions::ExtensionService::new(home.to_path_buf(), data_dir, user_home)
+            .with_mcp_relay_executable(std::env::current_exe()?);
+    if command.is_some() && !service.mcp_scheduler_enabled()? {
+        return Ok(());
+    }
+    let inventory = service.inventory(&codey_codex_extensions::Scope::User)?;
+    let mut document = parse_document(&service.logical_user_mcp_document()?)?;
+    let Some(command) = command else {
+        if document
+            .get("mcp_servers")
+            .and_then(Item::as_table)
+            .and_then(|servers| servers.get(CODEY_FASTCTX_SERVER_ID))
+            .and_then(Item::as_table)
+            .is_some_and(fastctx_table_server_is_codey_owned)
+        {
+            service.dispatch(serde_json::json!({"action":"remove_mcp","id":CODEY_FASTCTX_SERVER_ID,"confirmed":true,"revision":inventory["revision"]}))?;
+        }
+        return Ok(());
+    };
+    if fastctx::configured_user_fastctx_server_id(&document).is_some() {
+        return Ok(());
+    }
+    if document
+        .get("mcp_servers")
+        .and_then(Item::as_table_like)
+        .and_then(|servers| servers.get(CODEY_FASTCTX_SERVER_ID))
+        .and_then(Item::as_table_like)
+        .and_then(|server| server.get("enabled"))
+        .and_then(Item::as_bool)
+        == Some(false)
+    {
+        return Ok(());
+    }
+    enable_fast_context_tools(&mut document, command)?;
+    service.synchronize_builtin_mcp(
+        CODEY_FASTCTX_SERVER_ID,
+        &document.to_string(),
+        inventory["revision"].as_str().context("MCP 版本无效")?,
+    )?;
+    Ok(())
 }
 
 fn apply_isolated_runtime_router_config(
@@ -2259,10 +2308,11 @@ fn restore_runtime_hooks_file(home: &Path, state: &RuntimeConfigLease) -> Result
 }
 
 fn fastctx_table_server_is_codey_owned(server: &Table) -> bool {
-    server
-        .get("args")
-        .and_then(Item::as_array)
-        .is_some_and(arguments_have_codey_fastctx_marker)
+    fastctx::fastctx_table_is_relay(server)
+        || server
+            .get("args")
+            .and_then(Item::as_array)
+            .is_some_and(arguments_have_codey_fastctx_marker)
 }
 
 fn ensure_child_table<'a>(parent: &'a mut Table, key: &str) -> Result<&'a mut Table> {

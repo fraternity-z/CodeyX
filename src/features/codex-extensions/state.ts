@@ -1,4 +1,4 @@
-import type { EditorDraft, Inventory, McpEntry, SkillEntry } from "./types";
+import type { EditorDraft, Inventory, McpEntry, McpSharingStatus, SkillEntry } from "./types";
 
 const CONTENT_BYTE_LIMIT = 1024 * 1024;
 const encoder = new TextEncoder();
@@ -138,6 +138,18 @@ export function canToggle(entry: McpEntry | SkillEntry): boolean {
     !("enabledKnown" in entry && entry.enabledKnown === false) &&
     (entry.enabled || entry.configurationStatus !== "invalid")
   );
+}
+export function canShareMcp(entry: McpEntry, enabled = true) {
+  return entry.transport === "stdio" && !entry.readOnly && entry.canEdit !== false && entry.configurationStatus !== "invalid"
+    && (!enabled || entry.sharing?.canShare !== false);
+}
+export function mcpSharingSummary(entry: McpEntry, status: McpSharingStatus) {
+  const pools = status.pools.filter(pool => entry.sharing?.registrationId
+    ? pool.registrationId === entry.sharing.registrationId
+    : pool.sourcePath === entry.sourcePath && pool.id === entry.id);
+  return pools.reduce((total, pool) => ({ instances: total.instances + pool.instances,
+    running: total.running + pool.running, queued: total.queued + pool.queued, error: total.error || !!pool.error }),
+  { instances: 0, running: 0, queued: 0, error: false });
 }
 export function selectResources(
   entries: (McpEntry | SkillEntry)[],

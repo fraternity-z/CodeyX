@@ -63,6 +63,8 @@ export function createCodexExtensionsPreview(platform: string) {
   const scenario = parameters.get("extensions");
   let cacheVersion = 1;
   let cacheConflictOnce = scenario === "cache-conflict";
+  let schedulerEnabled = false;
+  let idleReleased = false;
   const cache: SkillCacheInventory = {
     revision: "cache-preview-1",
     warnings: ["开发预览：缓存操作仅修改内存模拟数据。"],
@@ -217,6 +219,17 @@ export function createCodexExtensionsPreview(platform: string) {
     if (scenario === "timeout")
       await new Promise((resolve) => setTimeout(resolve, 20000));
     if (action === "list_skill_cache") return structuredClone(cache);
+    if (action === "mcp_sharing_status") return {
+      enabled: schedulerEnabled,
+      pools: schedulerEnabled ? state.inventory.mcps.filter(entry => entry.enabled && entry.sharing?.enabled).map(entry => ({
+        registrationId: entry.sharing!.registrationId, id: entry.id, sourcePath: entry.sourcePath,
+        instances: idleReleased ? 0 : 1, running: 0, queued: 0,
+      })) : [],
+    };
+    if (action === "release_mcp_idle") {
+      idleReleased = true;
+      return { status: "success", message: "空闲实例已释放，下次调用时按需启动。" };
+    }
     if (action === "read_skill_cache" || action === "remove_skill_cache") {
       const entry = cache.skills.find((item) => item.id === id);
       if (!entry) throw new Error("缓存 Skill 不存在，请刷新列表");
@@ -338,6 +351,20 @@ export function createCodexExtensionsPreview(platform: string) {
     )
       throw new Error("请先确认操作影响");
     switch (action) {
+      case "set_mcp_scheduler_enabled":
+        if (typeof request.enabled !== "boolean") throw new Error("共享器启用状态必须为布尔值");
+        schedulerEnabled = request.enabled;
+        idleReleased = false;
+        break;
+      case "set_mcp_sharing": {
+        const entry = mcp();
+        if (entry.transport !== "stdio" || entry.readOnly || entry.canEdit === false) throw new Error("此服务不支持共享");
+        const maxInstances = request.maxInstances;
+        if (typeof request.enabled !== "boolean" || typeof maxInstances !== "number" || !Number.isInteger(maxInstances) || maxInstances < 1 || maxInstances > 8) throw new Error("共享设置无效");
+        if (request.enabled && !entry.sharing?.enabled && request.confirmed !== true) throw new Error("请先确认共享实例");
+        entry.sharing = { enabled: request.enabled, maxInstances, registrationId: `preview-${key}-${id}` };
+        break;
+      }
       case "save_mcp": {
         if ("configToml" in request) throw new Error("仅支持 configJson 配置");
         const json = request.configJson;
@@ -529,7 +556,7 @@ export function createCodexExtensionsPreview(platform: string) {
         throw new Error("不支持的预览操作");
     }
     state.inventory.revision = `preview-${++state.version}`;
-    const mcpMutation = ["save_mcp", "set_mcp_enabled", "set_mcps_enabled", "remove_mcp"].includes(action);
+    const mcpMutation = ["save_mcp", "set_mcp_enabled", "set_mcps_enabled", "remove_mcp", "set_mcp_sharing", "set_mcp_scheduler_enabled"].includes(action);
     return {
       inventory: structuredClone(state.inventory),
       applyStatus: mcpMutation ? "applied" : "restart-required",

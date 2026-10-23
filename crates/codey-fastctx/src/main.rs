@@ -10,6 +10,7 @@ use std::ffi::OsStr;
 mod fastctx_supervisor;
 
 const CODEY_FASTCTX_MCP_ARGUMENT: &str = "--codey-fastctx-mcp";
+const CODEY_FASTCTX_OWNED_MCP_ARGUMENT: &str = "--codey-fastctx-owned-mcp";
 const CODEY_FASTCTX_MCP_WORKER_ARGUMENT: &str = "--codey-fastctx-mcp-worker";
 // 集成测试（tests/fastctx_supervisor.rs）专用：监督器通过
 // CODEY_FASTCTX_TEST_WORKER_ARGUMENT 把 worker 子进程换成该模式的可脚本化
@@ -51,6 +52,16 @@ fn run(mode: FastCtxMode) -> anyhow::Result<()> {
         .build()?;
     let result = runtime.block_on(async move {
         match mode {
+            FastCtxMode::OwnedMcp => {
+                use rmcp::ServiceExt;
+                // Keep the heavy engine inside the scheduler-owned process so releasing it cannot affect other clients.
+                fastctx::server::FastCtxServer::new()
+                    .serve(rmcp::transport::stdio())
+                    .await?
+                    .waiting()
+                    .await?;
+                Ok(())
+            }
             FastCtxMode::Mcp => {
                 let worker_argument = std::env::var(TEST_WORKER_ARGUMENT_ENV)
                     .ok()
@@ -201,6 +212,7 @@ fn write_large_test_response(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum FastCtxMode {
     Mcp,
+    OwnedMcp,
     McpWorker,
     TestWorker,
     RuntimeBootstrap,
@@ -216,6 +228,9 @@ impl FastCtxMode {
     {
         match arguments.into_iter().nth(1).as_ref().map(AsRef::as_ref) {
             Some(argument) if argument == OsStr::new(CODEY_FASTCTX_MCP_ARGUMENT) => Self::Mcp,
+            Some(argument) if argument == OsStr::new(CODEY_FASTCTX_OWNED_MCP_ARGUMENT) => {
+                Self::OwnedMcp
+            }
             Some(argument) if argument == OsStr::new(CODEY_FASTCTX_MCP_WORKER_ARGUMENT) => {
                 Self::McpWorker
             }
@@ -231,6 +246,7 @@ impl FastCtxMode {
     const fn stage(self) -> &'static str {
         match self {
             Self::Mcp => "runtime.fastctx_mcp",
+            Self::OwnedMcp => "runtime.fastctx_owned_mcp",
             Self::McpWorker => "runtime.fastctx_mcp_worker",
             Self::TestWorker => "runtime.fastctx_test_worker",
             Self::RuntimeBootstrap => "runtime.fastctx_bootstrap",
@@ -242,6 +258,7 @@ impl FastCtxMode {
     const fn operation(self) -> &'static str {
         match self {
             Self::Mcp => "run_fastctx_mcp",
+            Self::OwnedMcp => "run_fastctx_owned_mcp",
             Self::McpWorker => "run_fastctx_mcp_worker",
             Self::TestWorker => "run_fastctx_test_worker",
             Self::RuntimeBootstrap => "run_fastctx_runtime_bootstrap",
@@ -304,6 +321,10 @@ mod tests {
 
     #[test]
     fn supervisor_and_worker_arguments_have_distinct_modes() {
+        assert_eq!(
+            FastCtxMode::from_arguments(["codey-fastctx", CODEY_FASTCTX_OWNED_MCP_ARGUMENT]),
+            FastCtxMode::OwnedMcp
+        );
         assert_eq!(
             FastCtxMode::from_arguments(["codey-fastctx", CODEY_FASTCTX_MCP_ARGUMENT]),
             FastCtxMode::Mcp

@@ -215,11 +215,7 @@ fn is_codegraph(id: &str, config: &Value) -> bool {
 }
 
 fn is_managed(id: &str, config: &Value, root: &Path) -> bool {
-    let expected = runtime::mcp_config(root);
-    id == SERVER_ID
-        && config["command"] == expected["command"]
-        && config.get("cwd").is_none_or(Value::is_null)
-        && (config["args"] == expected["args"] || config["args"] == runtime::legacy_mcp_args(root))
+    id == SERVER_ID && runtime::is_managed_mcp(config, root)
 }
 
 // 人工配置（包括停用状态）优先，只有 Codey 创建且启动参数未改写的条目可切换。

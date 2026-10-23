@@ -47,6 +47,13 @@ pub(super) fn legacy_mcp_args(root: &Path) -> Value {
     ])
 }
 
+pub(crate) fn is_managed_mcp(config: &Value, root: &Path) -> bool {
+    let expected = mcp_config(root);
+    config["command"] == expected["command"]
+        && config.get("cwd").is_none_or(Value::is_null)
+        && (config["args"] == expected["args"] || config["args"] == legacy_mcp_args(root))
+}
+
 pub(super) fn prepare_launcher(root: &Path) -> Result<()> {
     crate::fs_util::atomic_write_private_with_parent(
         &root.join("auto-mcp-v1.cjs"),

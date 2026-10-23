@@ -215,3 +215,21 @@ test("external skills can be removed while builtin and cached ones stay read-onl
     false,
   );
 });
+
+test("sharing preview persists the global switch across scopes and retains service choices", async () => {
+  const request = preview();
+  const initial = await request({ action: "list" });
+  assert.deepEqual(await request({ action: "mcp_sharing_status" }), { enabled: false, pools: [] });
+  await assert.rejects(request({ action: "set_mcp_scheduler_enabled", enabled: "true", revision: initial.revision }), /布尔值/);
+  const selected = await request({ action: "set_mcp_sharing", id: "local", enabled: true, maxInstances: 4, confirmed: true, revision: initial.revision });
+  const on = await request({ action: "set_mcp_scheduler_enabled", enabled: true, revision: selected.inventory.revision });
+  assert.equal(on.applyStatus, "applied");
+  assert.equal((await request({ action: "mcp_sharing_status", scope: { kind: "project", projectPath: "/fixture" } })).enabled, true);
+  const enabled = await request({ action: "set_mcp_enabled", id: "local", enabled: true, confirmed: true, revision: on.inventory.revision });
+  assert.equal((await request({ action: "mcp_sharing_status" })).pools.length, 1);
+  assert.equal((await request({ action: "release_mcp_idle", revision: enabled.inventory.revision })).status, "success");
+  assert.equal((await request({ action: "mcp_sharing_status" })).pools[0].instances, 0);
+  const off = await request({ action: "set_mcp_scheduler_enabled", enabled: false, revision: enabled.inventory.revision });
+  assert.equal(off.inventory.mcps.find(entry => entry.id === "local").sharing.enabled, true);
+  assert.deepEqual(await request({ action: "mcp_sharing_status" }), { enabled: false, pools: [] });
+});

@@ -362,6 +362,27 @@ fn resume_process(child: &Child) -> Result<()> {
 }
 
 async fn probe_stdio(config: &Value, project_dir: Option<PathBuf>) -> Result<ProbeSuccess> {
+    probe_stdio_with_mode(config, project_dir, false).await
+}
+
+pub(super) async fn validate_sharing(config: &Value, project_dir: Option<PathBuf>) -> Result<()> {
+    if config.get("url").is_some() || config.get("command").is_none() {
+        bail!("共享实例仅支持本地 stdio MCP");
+    }
+    tokio::time::timeout(
+        crate::mcp_scheduler::startup_timeout(config),
+        probe_stdio_with_mode(config, project_dir, true),
+    )
+    .await
+    .map_err(|_| anyhow!("共享能力检查超过启动超时限制，已停止检查进程"))??;
+    Ok(())
+}
+
+async fn probe_stdio_with_mode(
+    config: &Value,
+    project_dir: Option<PathBuf>,
+    sharing: bool,
+) -> Result<ProbeSuccess> {
     let executable = required_string(config, "command")?;
     #[cfg(windows)]
     if [
@@ -486,9 +507,15 @@ async fn probe_stdio(config: &Value, project_dir: Option<PathBuf>) -> Result<Pro
     );
     let result = async {
         write_message(&mut input, initialize()).await?;
-        let (protocol, has_tools, server_info) = handshake(&stdio_response(&mut output, 1).await?)?;
+        let initialized_result = stdio_response(&mut output, 1).await?;
+        let (protocol, has_tools, server_info) = handshake(&initialized_result)?;
+        if sharing {
+            crate::mcp_scheduler::validate_capabilities(&initialized_result)?;
+        }
         write_message(&mut input, initialized()).await?;
-        let message = if has_tools {
+        let message = if sharing {
+            "共享能力握手通过，未执行工具".into()
+        } else if has_tools {
             write_message(&mut input, tools_request()).await?;
             tools_summary(&stdio_response(&mut output, 2).await?)?
         } else {

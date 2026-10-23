@@ -1,15 +1,22 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
 import { createControllerHarness, deferred } from "./helpers/controller-harness.mjs";
 
 const mcp = (id, patch = {}) => ({ id, name: id, enabled: false, readOnly: false, transport: "stdio", sourcePath: "/fixture/config.toml", summary: "fixture", ...patch });
 const skill = (id, patch = {}) => ({ id, name: id, description: "fixture", enabled: false, readOnly: false, sourcePath: `/fixture/${id}`, manifestPath: `/fixture/${id}/SKILL.md`, scope: "user", ownership: "managed", ...patch });
 const inventory = (revision = "r1", patch = {}) => ({ revision, scope: { kind: "user" }, configPath: "/fixture/config.toml", mcps: [mcp("demo")], skills: [skill("demo")], warnings: [], applyNotice: "", ...patch });
 const skillContent = "---\nname: demo\ndescription: fixture\n---\n\n# Fixture\n";
+const harnesses = [];
+afterEach(() => { for (const h of harnesses.splice(0)) h.unmount(); });
 
 function harness(kind = "mcp", active = true) {
-  const calls = [], downloads = [];
+  const calls = [], downloads = [], sharingCalls = [];
+  let sharingStatus = { enabled: false, pools: [] };
   const request = payload => {
+    if (payload.action === "mcp_sharing_status") {
+      sharingCalls.push(payload);
+      return Promise.resolve(sharingStatus);
+    }
     const pending = deferred();
     calls.push({ payload, ...pending, completed: false });
     return pending.promise;
@@ -17,6 +24,7 @@ function harness(kind = "mcp", active = true) {
   const h = createControllerHarness(new URL("../src/features/codex-extensions/useExtensionsPageController.ts", import.meta.url), "useExtensionsPageController", {
     "../../api": { invoke: () => { throw new Error("测试不得访问真实后端"); } },
   });
+  harnesses.push(h);
   let options = { kind, active, request, onDownload: (...args) => downloads.push(args) };
   const render = patch => { if (patch) options = { ...options, ...patch }; return h.render(options); };
   render();
@@ -27,7 +35,7 @@ function harness(kind = "mcp", active = true) {
     if (error) call.reject(result); else call.resolve(result);
     return h.flush();
   };
-  return { ...h, render, calls, downloads, respond };
+  return { ...h, render, calls, downloads, sharingCalls, respond, setSharingStatus: value => { sharingStatus = value; } };
 }
 
 async function loaded(kind = "mcp", data = inventory()) {
@@ -96,6 +104,7 @@ test("禁用的 MCP 可直接保存，外部 Skill 只读，托管 Skill 保留�
   await h.respond("get_mcp", { id: "demo", configJson: { command: "fixture", enabled: false }, revision: "r1" });
   const saving = h.render().save();
   assert.equal(h.render().confirmation, null);
+  assert.equal(h.calls.at(-1).payload.confirmed, false);
   await h.respond("save_mcp", { inventory: inventory("r2"), message: "已保存" }); await saving;
 
   const s = await loaded("skill");
@@ -286,4 +295,126 @@ test("确认期间新的草稿变更作废旧保存确认", async () => {
   assert.equal(h.render().confirmation, null);
   assert.equal(h.calls.length, 2);
   assert.match(h.render().draft.content, /newer-draft/);
+});
+
+test("共享启用先确认，实例上下限拒绝越界，失败保留已保存配置", async () => {
+  const h = await loaded();
+  const entry = mcp("demo");
+  for (const limit of [0, 9, 1.5, NaN]) h.render().setMcpSharing(entry, true, limit);
+  h.render().setMcpSharing(mcp("http", { transport: "http" }), true);
+  assert.equal(h.render().confirmation, null);
+  assert.equal(h.calls.length, 1);
+  h.render().setMcpSharing(entry, true);
+  assert.match(h.render().confirmation.description, /无会话状态/);
+  assert.match(h.render().confirmation.description, /客户端回调、资源订阅或持续任务/);
+  const enable = h.render().confirmAction();
+  assert.deepEqual(h.calls.at(-1).payload, { scope: { kind: "user" }, revision: "r1", action: "set_mcp_sharing", id: "demo", enabled: true, maxInstances: 4, confirmed: true });
+  await h.respond("set_mcp_sharing", new Error("配置回滚失败，请重新读取确认"), true); await enable;
+  assert.equal(h.render().inventory.revision, "r1");
+  assert.equal(h.render().inventory.mcps[0].sharing, undefined);
+  assert.match(h.render().error, /回滚失败/);
+  for (const limit of [1, 8]) {
+    const save = h.render().setMcpSharing(mcp("demo", { sharing: { enabled: true, maxInstances: 4 } }), false, limit);
+    assert.equal(h.render().confirmation, null);
+    assert.equal(h.calls.at(-1).payload.maxInstances, limit);
+    await h.respond("set_mcp_sharing", { inventory: inventory(`r${limit + 1}`), message: "已恢复直连", applyStatus: "applied" }); await save;
+  }
+  h.unmount();
+});
+
+test("宿主禁止共享时不发启用请求，但已共享服务可关闭恢复直连", async () => {
+  const h = await loaded();
+  const entry = mcp("codey_fastctx", { sharing: { enabled: true, maxInstances: 4, canShare: false, reason: "内置服务不支持共享" } });
+  h.render().setMcpSharing(entry, true, 8);
+  h.render().setMcpSharing({ ...entry, sharing: { ...entry.sharing, enabled: false } }, true);
+  assert.equal(h.calls.length, 1);
+  assert.equal(h.render().confirmation, null);
+  const restoring = h.render().setMcpSharing(entry, false);
+  assert.equal(h.calls.at(-1).payload.enabled, false);
+  await h.respond("set_mcp_sharing", { inventory: inventory("r2"), message: "已恢复直连" }); await restoring;
+  h.unmount();
+});
+
+test("已共享的禁用 MCP 编辑保存携带确认标记且不追加确认弹窗", async () => {
+  const h = await loaded();
+  h.render().onAction("edit", mcp("demo", { sharing: { enabled: true, maxInstances: 4 } }));
+  await h.respond("get_mcp", { id: "demo", configJson: { command: "fixture", enabled: false }, revision: "r1" });
+  const saving = h.render().save();
+  assert.equal(h.render().confirmation, null);
+  assert.equal(h.calls.at(-1).payload.confirmed, true);
+  await h.respond("save_mcp", { inventory: inventory("r2"), message: "已保存" }); await saving;
+  h.unmount();
+});
+
+test("总开关读取已保存状态，失败不翻转，成功刷新状态并保留服务共享选择", async () => {
+  const data = inventory("r1", { mcps: [mcp("demo", { sharing: { enabled: true, maxInstances: 4 } })] });
+  const h = await loaded("mcp", data);
+  assert.equal(h.render().sharingStatus.enabled, false);
+  const saving = h.render().setMcpSchedulerEnabled(true);
+  await h.render().setMcpSchedulerEnabled(true);
+  assert.equal(h.calls.filter(call => call.payload.action === "set_mcp_scheduler_enabled").length, 1);
+  assert.deepEqual(h.calls.at(-1).payload, { scope: { kind: "user" }, revision: "r1", action: "set_mcp_scheduler_enabled", enabled: true });
+  await h.respond("set_mcp_scheduler_enabled", new Error("启用失败"), true); await saving;
+  assert.equal(h.render().sharingStatus.enabled, false);
+  assert.equal(h.render().error, "启用失败");
+  const enabling = h.render().setMcpSchedulerEnabled(true);
+  h.setSharingStatus({ enabled: true, pools: [] });
+  await h.respond("set_mcp_scheduler_enabled", { inventory: { ...data, revision: "r2" }, message: "已保存，请重启 Codex", applyStatus: "applied" }); await enabling; await h.flush();
+  assert.equal(h.render().sharingStatus.enabled, true);
+  assert.equal(h.render().notice, "已保存，请重启 Codex");
+  const disabling = h.render().setMcpSchedulerEnabled(false);
+  h.setSharingStatus({ enabled: false, pools: [] });
+  await h.respond("set_mcp_scheduler_enabled", { inventory: { ...data, revision: "r3" }, message: "已恢复直连，共享选择已保留", applyStatus: "applied" }); await disabling; await h.flush();
+  assert.equal(h.render().sharingStatus.enabled, false);
+  assert.equal(h.render().inventory.mcps[0].sharing.enabled, true);
+});
+
+test("释放空闲实例防重复提交并刷新统计，失败不报告成功", async () => {
+  const h = await loaded();
+  const before = h.sharingCalls.length;
+  const release = h.render().releaseMcpIdle();
+  await h.render().releaseMcpIdle();
+  assert.equal(h.calls.filter(call => call.payload.action === "release_mcp_idle").length, 1);
+  assert.deepEqual(h.calls.at(-1).payload, { scope: { kind: "user" }, revision: "r1", action: "release_mcp_idle" });
+  await h.respond("release_mcp_idle", { status: "success", message: "空闲实例已释放" }); await release; await h.flush();
+  assert.equal(h.render().notice, "空闲实例已释放");
+  assert.ok(h.sharingCalls.length > before);
+  const failed = h.render().releaseMcpIdle();
+  await h.respond("release_mcp_idle", { status: "failed", message: "释放失败" }); await failed;
+  assert.equal(h.render().error, "释放失败");
+  assert.equal(h.render().noticeSeq, 1);
+});
+
+test("非 MCP 页不读取或修改共享器，隐藏后的旧写入不刷新统计或提示成功", async () => {
+  const skill = await loaded("skill");
+  await skill.render().setMcpSchedulerEnabled(true); await skill.render().releaseMcpIdle();
+  assert.equal(skill.sharingCalls.length, 0);
+  assert.equal(skill.calls.length, 1);
+  const h = await loaded();
+  const saving = h.render().setMcpSchedulerEnabled(true);
+  h.render({ active: false });
+  const reads = h.sharingCalls.length;
+  await h.respond("set_mcp_scheduler_enabled", { inventory: inventory("r2"), message: "过期成功", applyStatus: "applied" }); await saving; await h.flush();
+  assert.equal(h.sharingCalls.length, reads);
+  assert.equal(h.render().notice, "");
+  assert.equal(h.render().sharingStatus, null);
+});
+
+test("项目页操作全局开关沿用当前范围与清单版本，不跳回用户范围", async () => {
+  const h = await loaded();
+  const scope = { kind: "project", projectPath: "/fixture/project" };
+  h.render().changeMode(true);
+  h.render().setProjectPath(scope.projectPath);
+  h.render().changeScope(true);
+  h.render();
+  await h.respond("list", inventory("project-r1", { scope }));
+  const saving = h.render().setMcpSchedulerEnabled(true);
+  assert.deepEqual(h.calls.at(-1).payload, { scope, revision: "project-r1", action: "set_mcp_scheduler_enabled", enabled: true });
+  h.setSharingStatus({ enabled: true, pools: [] });
+  await h.respond("set_mcp_scheduler_enabled", { inventory: inventory("project-r2", { scope }), message: "全局共享器已开启", applyStatus: "applied" });
+  await saving; await h.flush();
+  assert.deepEqual(h.render().scope, scope);
+  assert.deepEqual(h.render().inventory.scope, scope);
+  assert.equal(h.render().inventory.revision, "project-r2");
+  assert.equal(h.render().sharingStatus.enabled, true);
 });

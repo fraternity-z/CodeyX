@@ -1,10 +1,11 @@
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { useStableEvent } from "../../useStableEvent";
 import { extensionRequest } from "./requests";
-import { batchTargets, canToggle, draftChanged, editorError, pageResources, selectResources } from "./state";
+import { batchTargets, canShareMcp, canToggle, draftChanged, editorError, pageResources, selectResources } from "./state";
 import { exportMcpJson, mcpJsonError, NEW_MCP_JSON, selectedMcpJson } from "./mcpJson";
 import type { Confirmation, EditorDraft, ExtensionTransport, McpEntry, Scope, SkillEntry } from "./types";
 import { useExtensionsController } from "./useExtensionsController";
+import { useMcpSharingController } from "./useMcpSharingController";
 
 type Kind = "mcp" | "skill";
 type Transition = { kind: "close" } | { kind: "scope"; scope: Scope } | { kind: "draft"; draftKind: EditorDraft["kind"] };
@@ -18,6 +19,8 @@ type Options = {
 export function useExtensionsPageController({ kind, active, request = extensionRequest, onDownload }: Options) {
   const controller = useExtensionsController(request, active);
   const { inventory, scope, busy, loading } = controller;
+  const sharing = useMcpSharingController(request, scope,
+    active && kind === "mcp" && !!inventory, inventory?.revision);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState("all");
   const [source, setSource] = useState("all");
@@ -157,13 +160,40 @@ export function useExtensionsPageController({ kind, active, request = extensionR
       });
     }
   });
+  const setMcpSharing = useStableEvent((entry: McpEntry, enabled: boolean, maxInstances: number = entry.sharing?.maxInstances ?? 4) => {
+    if (kind !== "mcp" || !available() || unavailable || !canShareMcp(entry, enabled) || !Number.isInteger(maxInstances) || maxInstances < 1 || maxInstances > 8) return;
+    const action = { action: "set_mcp_sharing", id: entry.id, enabled, maxInstances, revision: inventory?.revision, confirmed: true };
+    if (!enabled || entry.sharing?.enabled) return controller.mutate(action);
+    setConfirmation({ title: `共享 ${entry.name} 实例`,
+      description: "仅适合已确认无会话状态、可运行多个独立实例的工具型 MCP。不支持客户端回调、资源订阅或持续任务；未知或有状态服务请保持直连。开启后多个会话将复用后端，扩容实例空闲后自动回收。", action });
+  });
+  const setMcpSchedulerEnabled = useStableEvent(async (enabled: boolean) => {
+    if (kind !== "mcp" || !available() || unavailable || sharing.loading || !sharing.status || sharing.error || sharing.status.enabled === enabled) return;
+    const currentSession = session.current;
+    const outcome = await controller.mutate({ action: "set_mcp_scheduler_enabled", enabled });
+    if (outcome === "ok" && session.current === currentSession) sharing.refresh();
+  });
+  const releaseMcpIdle = useStableEvent(async () => {
+    if (kind !== "mcp" || !available() || unavailable || sharing.loading || !sharing.status || sharing.error) return;
+    const currentSession = session.current;
+    const outcome = await controller.run<{ status: string; message: string }>({ action: "release_mcp_idle" }, result => {
+      if (result.status !== "success") throw new Error(result.message || "释放空闲实例失败，请刷新后重试。");
+      controller.postNotice(result.message);
+    });
+    if (outcome === "ok" && session.current === currentSession) sharing.refresh();
+  });
+  const refresh = useStableEvent(() => {
+    if (!available()) return;
+    if (kind === "mcp") sharing.refresh();
+    return controller.refresh();
+  });
   const save = useStableEvent(async () => {
     const editing = draftRef.current;
     if (!available() || unavailable || !editing || editing.readOnly || mcpJsonError(editing) || editorError(editing)) return;
     if (editing.kind === "mcp" && editing.isNew && inventory?.mcps.some(entry => entry.id === editing.id)) return;
     const action = editing.kind === "install" ? { action: "install_skill", sourcePath: editing.content.trim() }
       : editing.kind === "mcp" ? { action: "save_mcp", id: editing.id, configJson: selectedMcpJson(editing).config,
-        createOnly: editing.isNew === true, confirmed: editing.isNew === true }
+        createOnly: editing.isNew === true, confirmed: editing.isNew === true || (editing.entry !== undefined && "sharing" in editing.entry && editing.entry.sharing?.enabled === true) }
         : { action: editing.isNew ? "create_skill" : "save_skill", id: editing.id, content: editing.content };
     if (editing.kind === "mcp" && !editing.isNew && (editing.entry?.enabled || selectedMcpJson(editing).config.enabled !== false)) {
       setConfirmation({ title: "保存 MCP 配置",
@@ -233,7 +263,7 @@ export function useExtensionsPageController({ kind, active, request = extensionR
     inventory, scope, busy, loading, unavailable, error: controller.error, uncertain: controller.uncertain,
     notice: controller.notice, noticeSeq: controller.noticeSeq, checks: controller.checks, busyAction: controller.busyAction,
     saving: ["save_mcp", "save_skill", "create_skill", "install_skill"].includes(controller.busyAction),
-    refresh: controller.refresh, query, filter, source, sort, setQuery, setFilter, setSource, setSort, setPage,
+    refresh, query, filter, source, sort, setQuery, setFilter, setSource, setSort, setPage,
     clearFilters: () => { setQuery(""); setFilter("all"); setSource("all"); },
     selected, entries, filtered, currentPage, canSelectPage: currentPage.entries.some(canToggle), selectPage, selectEntry,
     clearSelection: () => setSelected([]), canEnable: enableTargets.length > 0, canDisable: disableTargets.length > 0, batch,
@@ -241,5 +271,7 @@ export function useExtensionsPageController({ kind, active, request = extensionR
     draft, changeDraft, startDraft, closeDraft, save, loadLatest, comparison, adoptComparison,
     confirmation, confirmAction, cancelConfirmation: () => { if (available()) setConfirmation(null); },
     discard, confirmDiscard, cancelDiscard: () => setDiscard(null), onAction,
+    setMcpSharing, setMcpSchedulerEnabled, releaseMcpIdle, sharingStatus: sharing.status, sharingStatusError: sharing.error,
+    sharingLoading: sharing.loading,
   };
 }

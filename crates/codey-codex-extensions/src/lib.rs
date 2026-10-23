@@ -1,6 +1,8 @@
 //! Independent, filesystem-based Codex extension management. No process execution.
 mod fsutil;
 mod mcp;
+mod shared_mcp;
+pub use shared_mcp::SharedMcpRegistration;
 mod skill_cache;
 mod skill_config;
 mod skills;
@@ -31,6 +33,7 @@ pub struct ExtensionService {
     codex_home: PathBuf,
     data_dir: PathBuf,
     user_home: PathBuf,
+    mcp_relay_executable: Option<PathBuf>,
 }
 
 impl ExtensionService {
@@ -39,6 +42,7 @@ impl ExtensionService {
             codex_home,
             data_dir,
             user_home,
+            mcp_relay_executable: None,
         }
     }
 
@@ -104,7 +108,8 @@ impl ExtensionService {
     pub fn inventory(&self, scope: &Scope) -> Result<Value> {
         let config_path = self.config_path(scope)?;
         let mut cache = fsutil::ReadCache::default();
-        let doc = mcp::parse(cache.read(&config_path)?)?;
+        let doc =
+            self.logical_mcp_document(&config_path, mcp::parse(cache.read(&config_path)?)?)?;
         let registry: skills::Registry = cache
             .read(&self.registry_path())?
             .map(serde_json::from_slice)
@@ -162,7 +167,12 @@ impl ExtensionService {
             config_path.to_string_lossy().into_owned(),
             cache.read(&config_path)?.map(fsutil::digest),
         )];
-        for path in [self.codex_home.join("config.toml"), self.registry_path()] {
+        for path in [
+            self.codex_home.join("config.toml"),
+            self.registry_path(),
+            self.shared_mcp_path(),
+            self.mcp_scheduler_settings_path(),
+        ] {
             fingerprints.push((
                 path.to_string_lossy().into_owned(),
                 cache.read(&path)?.map(fsutil::digest),
@@ -239,6 +249,7 @@ impl ExtensionService {
         let revision = fsutil::digest(&serde_json::to_vec(&fingerprints)?);
         let mut mcps = mcp::list(&doc, &config_path.to_string_lossy())?;
         for entry in &mut mcps {
+            entry["sharing"] = self.mcp_sharing(&config_path, entry["id"].as_str().unwrap())?;
             entry["scope"] = json!(if matches!(scope, Scope::User) {
                 "user"
             } else {
@@ -254,15 +265,25 @@ impl ExtensionService {
             }
         }
         Ok(
-            json!({"scope":scope,"configPath":config_path,"skillConfigPath":self.codex_home.join("config.toml"),"revision":revision,"mcps":mcps,"skills":entries,"warnings":warnings,"applyNotice":"MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。当前 Codey 启动覆盖可能优先生效。"}),
+            json!({"scope":scope,"configPath":config_path,"skillConfigPath":self.codex_home.join("config.toml"),"revision":revision,"mcpSchedulerEnabled":self.mcp_scheduler_enabled()?,"mcps":mcps,"skills":entries,"warnings":warnings,"applyNotice":"MCP 保存后自动刷新 Codex 配置；Skill 变更请在新会话中确认。当前 Codey 启动覆盖可能优先生效。"}),
         )
     }
 
     pub fn mcp_configuration(&self, scope: &Scope, id: &str) -> Result<Value> {
-        let doc = mcp::parse(fsutil::read(&self.config_path(scope)?)?.as_deref())?;
+        let path = self.config_path(scope)?;
+        let doc = self.logical_mcp_document(&path, mcp::parse(fsutil::read(&path)?.as_deref())?)?;
         let config = mcp::object(&mcp::table(&doc, id)?)?;
         mcp::validate_existing(&config)?;
         Ok(config)
+    }
+
+    /// Resolve the same preserved credentials as save, without changing files.
+    pub fn mcp_save_configuration(&self, scope: &Scope, id: &str, config: &Value) -> Result<Value> {
+        let path = self.config_path(scope)?;
+        let mut doc =
+            self.logical_mcp_document(&path, mcp::parse(fsutil::read(&path)?.as_deref())?)?;
+        mcp::save(&mut doc, id, mcp::json_table(config)?)?;
+        mcp::object(&mcp::table(&doc, id)?)
     }
 
     fn entry(&self, inventory: &Value, id: &str) -> Result<Value> {
@@ -341,7 +362,10 @@ impl ExtensionService {
         if action == "get_mcp" {
             let inventory = self.inventory(&scope)?;
             let id = Self::required(&request, "id")?;
-            let doc = mcp::parse(fsutil::read(&config_path)?.as_deref())?;
+            let doc = self.logical_mcp_document(
+                &config_path,
+                mcp::parse(fsutil::read(&config_path)?.as_deref())?,
+            )?;
             return Ok(
                 json!({"id":id,"configJson":mcp::redacted(&mcp::table(&doc,id)?)?,"revision":inventory["revision"]}),
             );
@@ -366,6 +390,8 @@ impl ExtensionService {
         ensure!(
             [
                 "save_mcp",
+                "set_mcp_sharing",
+                "set_mcp_scheduler_enabled",
                 "set_mcp_enabled",
                 "set_mcps_enabled",
                 "remove_mcp",
@@ -395,11 +421,19 @@ impl ExtensionService {
             );
         }
         Self::required(&request, "revision")?;
-        let _locks = transaction::lock(&[
+        let mut lock_paths = vec![
             self.data_dir.join("extensions.lock"),
             config_path.with_extension("toml.lock"),
             self.codex_home.join("config.toml.lock"),
-        ])?;
+        ];
+        if action == "set_mcp_scheduler_enabled" {
+            lock_paths.extend(
+                self.shared_mcp_source_paths()?
+                    .into_iter()
+                    .map(|p| p.with_extension("toml.lock")),
+            );
+        }
+        let _locks = transaction::lock(&lock_paths)?;
         let inventory = self.inventory(&scope)?;
         ensure!(
             request["revision"] == inventory["revision"],
@@ -407,14 +441,21 @@ impl ExtensionService {
         );
         let mut changes = Vec::new();
         match action {
-            "save_mcp" | "set_mcp_enabled" | "remove_mcp" => {
+            "set_mcp_scheduler_enabled" => self.prepare_scheduler_toggle(&request, &mut changes)?,
+            "save_mcp" | "set_mcp_enabled" | "remove_mcp" | "set_mcp_sharing" => {
                 ensure!(
                     fsutil::writable(&config_path),
                     "MCP 配置文件或所在目录不可写"
                 );
                 let id = Self::required(&request, "id")?;
-                let mut doc = mcp::parse(fsutil::read(&config_path)?.as_deref())?;
-                if action == "save_mcp" {
+                let mut doc = self.logical_mcp_document(
+                    &config_path,
+                    mcp::parse(fsutil::read(&config_path)?.as_deref())?,
+                )?;
+                let mut shared = self.shared_mcp_registry()?;
+                if action == "set_mcp_sharing" {
+                    self.set_mcp_sharing(&request, &config_path, &doc, &mut shared)?;
+                } else if action == "save_mcp" {
                     if request.get("createOnly").and_then(Value::as_bool) == Some(true) {
                         ensure!(
                             mcp::table(&doc, id).is_err(),
@@ -461,6 +502,10 @@ impl ExtensionService {
                             .insert("enabled", toml_edit::value(enabled));
                     }
                 }
+                if self.mcp_scheduler_enabled()? {
+                    self.register_builtin_mcps(&request, &config_path, &doc, &mut shared)?;
+                }
+                self.prepare_shared_mcp_write(&config_path, &mut doc, &mut shared, &mut changes)?;
                 changes.push(Change::new(
                     config_path,
                     Some(doc.to_string().into_bytes()),
@@ -476,7 +521,10 @@ impl ExtensionService {
                     .get("enabled")
                     .and_then(Value::as_bool)
                     .context("缺少 enabled")?;
-                let mut doc = mcp::parse(fsutil::read(&config_path)?.as_deref())?;
+                let mut doc = self.logical_mcp_document(
+                    &config_path,
+                    mcp::parse(fsutil::read(&config_path)?.as_deref())?,
+                )?;
                 for id in ids {
                     let item = mcp::table(&doc, &id)?;
                     ensure!(
@@ -491,6 +539,11 @@ impl ExtensionService {
                         .context("MCP 配置必须为表")?
                         .insert("enabled", toml_edit::value(enabled));
                 }
+                let mut shared = self.shared_mcp_registry()?;
+                if self.mcp_scheduler_enabled()? {
+                    self.register_builtin_mcps(&request, &config_path, &doc, &mut shared)?;
+                }
+                self.prepare_shared_mcp_write(&config_path, &mut doc, &mut shared, &mut changes)?;
                 changes.push(Change::new(
                     config_path,
                     Some(doc.to_string().into_bytes()),
@@ -738,7 +791,7 @@ impl ExtensionService {
             .inspect_err(|_| self.clean_empty_skill_dirs(&scope, &created))?;
         self.clean_empty_skill_dirs(&scope, &removed);
         Ok(
-            json!({"inventory":self.inventory(&scope)?,"applyStatus":if matches!(action, "save_mcp" | "set_mcp_enabled" | "set_mcps_enabled" | "remove_mcp") {"reload-required"} else {"restart-required"},"message":"配置已保存。"}),
+            json!({"inventory":self.inventory(&scope)?,"applyStatus":if matches!(action, "save_mcp" | "set_mcp_enabled" | "set_mcps_enabled" | "remove_mcp" | "set_mcp_sharing" | "set_mcp_scheduler_enabled") {"reload-required"} else {"restart-required"},"message":"配置已保存。"}),
         )
     }
 

@@ -41,10 +41,12 @@ pub(super) fn enable_fast_context_tools(
         .ok_or_else(|| {
             anyhow::anyhow!("mcp_servers.{CODEY_FASTCTX_SERVER_ID} 必须是 TOML table")
         })?;
-    server["command"] = value(command.to_string_lossy().to_string());
-    let mut args = Array::new();
-    args.push(CODEY_FASTCTX_ARG_MARKER);
-    server["args"] = Item::Value(toml_edit::Value::Array(args));
+    if !fastctx_table_is_relay(server) {
+        server["command"] = value(command.to_string_lossy().to_string());
+        let mut args = Array::new();
+        args.push(CODEY_FASTCTX_ARG_MARKER);
+        server["args"] = Item::Value(toml_edit::Value::Array(args));
+    }
     server["startup_timeout_sec"] = value(CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS);
     server["tool_timeout_sec"] = value(CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS);
     let mut env = server
@@ -347,15 +349,29 @@ fn fastctx_item_server_is_codey_owned(server: &Item) -> bool {
         || matches!(server, Item::Value(value) if fastctx_value_server_is_codey_owned(value))
 }
 
+pub(super) fn fastctx_table_is_relay(server: &Table) -> bool {
+    server
+        .get("args")
+        .and_then(Item::as_array)
+        .is_some_and(|args| {
+            args.len() == 5 && args.get(0).and_then(Value::as_str) == Some("--mcp-relay")
+        })
+        && std::env::current_exe().ok().is_some_and(|executable| {
+            server.get("command").and_then(Item::as_str) == executable.to_str()
+        })
+}
+
 fn fastctx_value_server_is_codey_owned(server: &Value) -> bool {
-    matches!(
-        server,
-        Value::InlineTable(server)
-            if server
-                .get("args")
-                .and_then(Value::as_array)
-                .is_some_and(arguments_have_codey_fastctx_marker)
-    )
+    item_table_clone(&Item::Value(server.clone()))
+        .is_some_and(|table| fastctx_table_is_relay(&table))
+        || matches!(
+            server,
+            Value::InlineTable(server)
+                if server
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .is_some_and(arguments_have_codey_fastctx_marker)
+        )
 }
 
 fn mcp_server_is_codey_owned_by_id(doc: &DocumentMut, server_id: &str) -> bool {

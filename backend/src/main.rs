@@ -1,6 +1,14 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 fn main() {
+    match codey_lib::run_mcp_relay_if_requested() {
+        Ok(true) => return,
+        Ok(false) => {}
+        Err(error) => {
+            eprintln!("MCP 转发失败：{error}");
+            std::process::exit(1);
+        }
+    }
     match codey_lib::run_plugin_log_terminal_if_requested() {
         Ok(true) => return,
         Ok(false) => {}

@@ -2438,6 +2438,80 @@ args = ["serve"]
 }
 
 #[test]
+fn shared_fastctx_runtime_patch_preserves_relay_and_switches_back_to_direct() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap();
+    let data = home.join("extensions");
+    let service =
+        codey_codex_extensions::ExtensionService::new(home.clone(), data.clone(), home.clone())
+            .with_mcp_relay_executable(std::env::current_exe().unwrap());
+    let toggle = |enabled| {
+        let inventory = service
+            .inventory(&codey_codex_extensions::Scope::User)
+            .unwrap();
+        service.dispatch(serde_json::json!({"action":"set_mcp_scheduler_enabled","enabled":enabled,"revision":inventory["revision"]})).unwrap();
+    };
+    toggle(true);
+    let command = home.join("fastctx-server.exe");
+    prepare_shared_fastctx(&home, data.clone(), home.clone(), Some(&command)).unwrap();
+    let existing = fs::read_to_string(home.join("config.toml")).unwrap();
+    let patched = patch_config_with_fastctx(&existing, None, None, Some(&command), false).unwrap();
+    let doc = parse_document(&patched).unwrap();
+    assert_eq!(
+        doc["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["args"][0].as_str(),
+        Some("--mcp-relay")
+    );
+    assert!(!fast_context_tools_status_from_document(&doc).user_configured);
+    toggle(false);
+    let existing = fs::read_to_string(home.join("config.toml")).unwrap();
+    let patched = patch_config_with_fastctx(&existing, None, None, Some(&command), false).unwrap();
+    let doc = parse_document(&patched).unwrap();
+    assert_eq!(
+        doc["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["args"][0].as_str(),
+        Some(CODEY_FASTCTX_ARG_MARKER)
+    );
+    prepare_shared_fastctx(&home, data, home.clone(), None).unwrap();
+    assert!(
+        !service
+            .logical_user_mcp_document()
+            .unwrap()
+            .contains(CODEY_FASTCTX_SERVER_ID)
+    );
+}
+
+#[test]
+fn shared_fastctx_prepare_preserves_user_configuration_and_disabled_state() {
+    for original in [
+        "[mcp_servers.codey_fastctx]\ncommand='custom'\nargs=['serve']\n",
+        "[mcp_servers.codey_fastctx]\ncommand='builtin'\nargs=['--codey-fastctx-mcp']\nenabled=false\n",
+        "",
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let data = home.join("extensions");
+        fs::write(home.join("config.toml"), original).unwrap();
+        let service =
+            codey_codex_extensions::ExtensionService::new(home.clone(), data.clone(), home.clone());
+        let inventory = service
+            .inventory(&codey_codex_extensions::Scope::User)
+            .unwrap();
+        service.dispatch(serde_json::json!({"action":"set_mcp_scheduler_enabled","enabled":true,"revision":inventory["revision"]})).unwrap();
+        let command = home.join("fastctx-server.exe");
+        prepare_shared_fastctx(
+            &home,
+            data,
+            home.clone(),
+            (!original.is_empty()).then_some(command.as_path()),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(home.join("config.toml")).unwrap(),
+            original
+        );
+    }
+}
+
+#[test]
 fn fast_context_tools_detect_root_inline_user_servers() {
     let existing = r#"
 mcp_servers = { context_tools = { command = "uvx", args = ["fastctx", "--stdio"] } }
