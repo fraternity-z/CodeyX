@@ -269,6 +269,20 @@ impl ExtensionService {
         )
     }
 
+    /// Read status from one logical configuration without scanning Skills or computing edit revisions.
+    pub fn mcp_status_configurations(&self, scope: &Scope) -> Result<Vec<Result<Value>>> {
+        let path = self.config_path(scope)?;
+        let doc = self.logical_mcp_document(&path, mcp::parse(fsutil::read(&path)?.as_deref())?)?;
+        // Preserve ordered, per-entry failures so a caller can stop at a higher-priority manual entry.
+        Ok(mcp::list(&doc, &path.to_string_lossy())?
+            .into_iter()
+            .map(|entry| {
+                let id = entry["id"].as_str().context("MCP 标识无效")?;
+                Ok(json!({"id":id,"enabled":entry["enabled"],"configJson":mcp::redacted(&mcp::table(&doc, id)?)?}))
+            })
+            .collect())
+    }
+
     pub fn mcp_configuration(&self, scope: &Scope, id: &str) -> Result<Value> {
         let path = self.config_path(scope)?;
         let doc = self.logical_mcp_document(&path, mcp::parse(fsutil::read(&path)?.as_deref())?)?;

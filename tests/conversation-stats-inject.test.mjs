@@ -91,7 +91,7 @@ const createEnvironment = (options = {}) => {
   const document = {
     body,
     documentElement,
-    visibilityState: "visible",
+    visibilityState: options.visibilityState ?? "visible",
     activeElement: body,
     createElement: (tagName) => Object.assign(new FakeElement(tagName), { ownerDocument: document }, options.popover ? {
       showPopover() { this.popoverOpen = true; },
@@ -136,7 +136,15 @@ const createEnvironment = (options = {}) => {
     removeEventListener: FakeElementCore.prototype.removeEventListener,
   };
 
+  const timers = new Map();
+  let timerId = 0;
+  let timerCallbacks = 0;
   const testSetTimeout = (callback, delay, ...args) => {
+    if (options.manualTimers) {
+      const id = ++timerId;
+      timers.set(id, { delay, callback: () => { timerCallbacks += 1; callback(...args); } });
+      return id;
+    }
     const timer = setTimeout(callback, delay, ...args);
     timer.unref?.();
     return timer;
@@ -149,7 +157,7 @@ const createEnvironment = (options = {}) => {
     MutationObserver: FakeMutationObserver,
     HTMLElement: FakeElement,
     setTimeout: testSetTimeout,
-    clearTimeout,
+    clearTimeout: options.manualTimers ? id => timers.delete(id) : clearTimeout,
   };
   const context = vm.createContext(sandbox);
   vm.runInContext(source, context);
@@ -162,6 +170,18 @@ const createEnvironment = (options = {}) => {
     scope,
     calls,
     statsBySession,
+    timers,
+    timerCallbacks: () => timerCallbacks,
+    runTimer: (delay) => {
+      const entry = [...timers].find(([, timer]) => timer.delay === delay);
+      assert.ok(entry, `expected a ${delay} ms timer`);
+      timers.delete(entry[0]);
+      entry[1].callback();
+    },
+    setVisibility: (state) => {
+      document.visibilityState = state;
+      document.dispatchEvent({ type: "visibilitychange" });
+    },
     bar: () => findById(documentElement, "codey-conversation-stats"),
     snapshot: () => context.window.__codeyConversationStats?.snapshot(),
     refresh: () => context.window.__codeyConversationStats.refresh(),
@@ -243,6 +263,154 @@ const observeRenderWork = (env) => {
   }
   return counts;
 };
+
+const observeAttributeWrites = (env) => {
+  const counts = { attributes: 0, properties: 0 };
+  const refs = env.bar().__codeyCs;
+  for (const element of Object.values(refs.buttons)) {
+    const original = element.setAttribute;
+    element.setAttribute = function (...args) {
+      counts.attributes += 1;
+      original.apply(this, args);
+    };
+  }
+  const watch = (object, key) => {
+    let value = object[key];
+    Object.defineProperty(object, key, {
+      configurable: true,
+      get: () => value,
+      set: next => { counts.properties += 1; value = next; },
+    });
+  };
+  for (const element of [env.bar(), ...Object.values(refs.panels), refs.buttons.codegraph]) watch(element, "hidden");
+  for (const panel of Object.values(refs.panels)) {
+    for (const key of ["left", "maxHeight", "top"]) watch(panel.style, key);
+  }
+  watch(refs.speed, "title");
+  for (const key of ["status", "state", "running"]) watch(env.bar().dataset, key);
+  return counts;
+};
+
+test("unchanged rescans do not rewrite attributes and changed values update immediately", async () => {
+  const env = createEnvironment({ manualTimers: true, statsBySession: { "conversation-1": STATS } });
+  try {
+    env.runTimer(0);
+    await flushTimers(0);
+    click(summary(env));
+    const counts = observeAttributeWrites(env);
+    for (let index = 0; index < 5; index += 1) {
+      env.emitAnchorMutation();
+      env.runTimer(120);
+    }
+    assert.deepEqual(counts, { attributes: 0, properties: 0 });
+    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, status: "running", speedIsEstimate: true } });
+    env.refresh();
+    env.runTimer(0);
+    await flushTimers(0);
+    assert.equal(env.bar().dataset.running, "true");
+    assert.match(env.bar().__codeyCs.speed.title, /含生成中的 Token 估算/);
+    assert.match(summary(env).getAttribute("aria-label"), /本轮进行中/);
+    assert.ok(counts.attributes > 0 && counts.properties > 0);
+  } finally { env.dispose(); }
+});
+
+test("initially hidden pages schedule no work and visible polling preserves both intervals", async () => {
+  const env = createEnvironment({ manualTimers: true, visibilityState: "hidden", statsBySession: { "conversation-1": STATS } });
+  try {
+    assert.equal(env.timers.size, 0);
+    assert.equal(env.bar(), null);
+    env.emitAnchorMutation();
+    env.refresh();
+    assert.equal(env.timers.size, 0);
+    env.setVisibility("visible");
+    env.runTimer(0);
+    await flushTimers(0);
+    assert.deepEqual([...env.timers.values()].map(timer => timer.delay), [3000]);
+    env.setStats("conversation-1", { ...STATS, lastTurn: { ...LAST_TURN, status: "running" } });
+    env.runTimer(3000);
+    await flushTimers(0);
+    assert.deepEqual([...env.timers.values()].map(timer => timer.delay), [1100]);
+    env.emitAnchorMutation();
+    assert.equal(env.timers.size, 2);
+    env.setVisibility("hidden");
+    const callbacks = env.timerCallbacks();
+    for (let index = 0; index < 5; index += 1) {
+      env.emitAnchorMutation();
+      env.refresh();
+      for (const type of ["focus", "pageshow"]) FakeElementCore.prototype.dispatchEvent.call(env.window, { type });
+    }
+    assert.equal(env.timers.size, 0);
+    assert.equal(env.timerCallbacks(), callbacks);
+    env.setConversation("conversation-2");
+    env.setVisibility("visible");
+    env.runTimer(0);
+    await flushTimers(0);
+    assert.equal(env.calls.at(-1).payload.sessionId, "conversation-2");
+  } finally { env.dispose(); }
+});
+
+for (const failure of [false, true]) {
+  test(`hidden in-flight ${failure ? "failure" : "response"} does not render or restart timers`, async () => {
+    let settle;
+    const env = createEnvironment({ manualTimers: true, request: () => new Promise((resolve, reject) => {
+      settle = failure ? () => reject(new Error("offline")) : () => resolve({ status: "ok", stats: STATS });
+    }) });
+    try {
+      env.runTimer(0);
+      const counts = observeRenderWork(env);
+      env.setVisibility("hidden");
+      env.setConversation("conversation-2");
+      env.emitAnchorMutation();
+      settle();
+      await flushTimers(0);
+      assert.equal(env.timers.size, 0);
+      assert.deepEqual(counts, { composerScans: 0, textWrites: 0 });
+      assert.equal(env.snapshot().stats, null);
+      env.setVisibility("visible");
+      env.runTimer(0);
+      assert.equal(env.calls.length, 2);
+      assert.equal(env.calls[1].payload.sessionId, "conversation-2");
+    } finally { env.dispose(); settle(); await flushTimers(0); }
+  });
+}
+
+test("rapid hide and show waits for one old request then refreshes immediately", async () => {
+  const pending = [];
+  const env = createEnvironment({ manualTimers: true, request: () => new Promise(resolve => pending.push(resolve)) });
+  try {
+    env.runTimer(0);
+    for (let index = 0; index < 3; index += 1) {
+      env.setVisibility("hidden");
+      env.setVisibility("visible");
+    }
+    assert.equal(env.calls.length, 1);
+    assert.equal(env.timers.size, 0);
+    pending[0]({ status: "ok", stats: STATS });
+    await flushTimers(0);
+    assert.equal(env.snapshot().stats, null);
+    assert.deepEqual([...env.timers.values()].map(timer => timer.delay), [0]);
+    env.runTimer(0);
+    assert.equal(env.calls.length, 2);
+    pending[1]({ status: "ok", stats: { ...STATS, totalTokens: 700 } });
+    await flushTimers(0);
+    assert.equal(metric(env.bar(), "total"), "700 tok");
+    env.setVisibility("hidden");
+    const oldBar = env.bar();
+    oldBar.remove();
+    env.emitMutation([{ type: "childList", removedNodes: [oldBar] }]);
+    env.markPreviousVersion();
+    env.rerun();
+    assert.equal(env.timers.size, 0);
+    env.setVisibility("visible");
+    env.runTimer(0);
+    assert.equal(env.calls.length, 3);
+    pending[2]({ status: "ok", stats: STATS });
+    await flushTimers(0);
+    assert.ok(env.bar());
+    assert.equal(env.document.querySelectorAll("#codey-conversation-stats-overlay").length, 1);
+  } finally { env.dispose(); }
+  assert.equal(env.timers.size, 0);
+});
 
 test("refreshes with one composer scan per async phase and only writes changed text", async () => {
   const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });

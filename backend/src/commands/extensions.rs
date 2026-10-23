@@ -17,6 +17,21 @@ fn paths(state: &AppState) -> anyhow::Result<(std::path::PathBuf, std::path::Pat
     Ok((data_dir, user_home))
 }
 
+pub(super) async fn mcp_status_configurations(
+    state: &AppState,
+) -> anyhow::Result<Vec<anyhow::Result<Value>>> {
+    if state.is_shutting_down() || state.restart_in_progress.load(Ordering::Acquire) {
+        anyhow::bail!("Codey 正在退出或重启，请稍后重新操作");
+    }
+    let (data_dir, user_home) = paths(state)?;
+    crate::codex_extensions::mcp_status_configurations(
+        crate::codex_config::codex_home().to_path_buf(),
+        data_dir,
+        user_home,
+    )
+    .await
+}
+
 // Caller owns runtime_operation, so stop cannot remove a newer generation's discovery.
 pub(super) async fn ensure_scheduler(state: &AppState) -> anyhow::Result<()> {
     let mut scheduler = state.mcp_scheduler.lock().await;

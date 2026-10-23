@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 8;
+  const VERSION = 9;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -37,6 +37,7 @@
   let pollTimer = 0;
   let rescanTimer = 0;
   let fetchInFlight = false;
+  let refreshPending = false;
   let lastFetchOk = false;
   let lastResult = null;
   let sessionGeneration = 0;
@@ -278,10 +279,11 @@
     if (!overlay || !computed) return;
     for (const name of ["--text-primary", "--bg-primary", "--cs-text", "--cs-muted", "--cs-line", "--cs-surface"]) {
       const value = computed.getPropertyValue(name).trim();
+      if (overlay.style.getPropertyValue(name) === value) continue;
       if (value) overlay.style.setProperty(name, value);
       else overlay.style.removeProperty(name);
     }
-    overlay.style.colorScheme = computed.colorScheme;
+    setValue(overlay.style, "colorScheme", computed.colorScheme);
   };
 
   const formatTokenCount = (value) => {
@@ -303,9 +305,9 @@
     const width = window.innerWidth || document.documentElement.clientWidth;
     // 气泡贴近入口，鼠标可以直接移入；只覆盖编辑器，不推动页面布局。
     const available = Math.max(80, rect.top - 20);
-    panel.style.left = `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`;
-    panel.style.maxHeight = `${Math.min(height - 24, available)}px`;
-    panel.style.top = `${Math.max(12, rect.top - Math.min(panelRect.height, available) - 8)}px`;
+    setValue(panel.style, "left", `${Math.max(12, Math.min(rect.left + (rect.width - panelRect.width) / 2, width - panelRect.width - 12))}px`);
+    setValue(panel.style, "maxHeight", `${Math.min(height - 24, available)}px`);
+    setValue(panel.style, "top", `${Math.max(12, rect.top - Math.min(panelRect.height, available) - 8)}px`);
   };
 
   const setExpanded = (expanded, restoreFocus = false, kind = null) => {
@@ -319,11 +321,11 @@
       const panel = refs.panels[key];
       const visible = expanded && key === active;
       if (!visible && panel.hasAttribute("popover") && panel.matches(":popover-open")) panel.hidePopover();
-      panel.hidden = !visible;
+      setValue(panel, "hidden", !visible);
       if (visible && panel.hasAttribute("popover") && !panel.matches(":popover-open")) {
         try { panel.showPopover(); } catch { panel.removeAttribute("popover"); }
       }
-      refs.buttons[key].setAttribute("aria-expanded", String(visible));
+      setAttribute(refs.buttons[key], "aria-expanded", String(visible));
     }
     if (expanded) positionPanel();
     else if (restoreFocus) {
@@ -362,16 +364,24 @@
     if (element.textContent !== value) element.textContent = value;
   };
 
+  const setValue = (object, key, value) => {
+    if (object[key] !== value) object[key] = value;
+  };
+
+  const setAttribute = (element, name, value) => {
+    if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+  };
+
   const render = (anchor) => {
-    if (disposed) return;
+    if (disposed || document.visibilityState === "hidden") return;
     const bar = ensureBar(anchor);
     if (!bar) {
       // 输入框不可见（例如离开会话页）时，若旧宿主仍在隐藏会话里，显式
       // 隐藏状态条，避免恢复可见时短暂展示过期数据。
-      if (statsElement) { statsElement.hidden = true; setExpanded(false); }
+      if (statsElement) { setValue(statsElement, "hidden", true); setExpanded(false); }
       return;
     }
-    bar.hidden = false;
+    setValue(bar, "hidden", false);
     const data = { ...stats };
     const sessionUsage = data.usageSource === "rollout" && data.usageScope === "session";
     const runtimeRequests = data.requestsScope === "runtime"
@@ -404,7 +414,7 @@
     const rate = cacheRatePercent(data.inputTokens, data.cachedInputTokens) || "—";
     const refs = bar.__codeyCs;
     const projectVisible = typeof codegraph?.projectPath === "string" && Boolean(codegraph.projectPath);
-    refs.buttons.codegraph.hidden = !projectVisible;
+    setValue(refs.buttons.codegraph, "hidden", !projectVisible);
     if (!projectVisible && refs.active === "codegraph") setExpanded(false);
     const graphPhase = stale ? "unavailable" : codegraph?.phase;
     const graphLabels = { watching: "已接入", indexing: "索引中", failed: "索引失败", waiting: "待索引", disabled: "未启用", uninstalled: "待安装", external: "MCP 管理" };
@@ -413,9 +423,9 @@
     setText(refs.codegraph, projectVisible ? `CodeGraph ${graphLabel}` : "");
     setText(refs.projectPath, projectVisible ? codegraph.projectPath : "");
     setText(refs.notes.codegraph, projectVisible ? graphMessage : "");
-    refs.buttons.codegraph.setAttribute("aria-label", `CodeGraph ${graphLabel}，查看当前项目索引状态`);
+    setAttribute(refs.buttons.codegraph, "aria-label", `CodeGraph ${graphLabel}，查看当前项目索引状态`);
     setText(refs.speed, speedText);
-    refs.speed.title = speedNote;
+    setValue(refs.speed, "title", speedNote);
     setText(refs["cache-rate"], rate);
     setText(refs.total, data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} tok`);
     const finite = value => Number.isFinite(value) && value >= 0;
@@ -435,7 +445,7 @@
       waiting: "等待会话", loading: "读取统计中", stale: "统计暂不可用", empty: "暂无统计",
       ok: fetchInFlight ? "更新统计中" : running ? "本轮进行中" : turn?.status === "aborted" ? "本轮已中止" : (sessionUsage ? "历史统计" : "运行期统计"),
     }[state];
-    bar.dataset.status = status;
+    setValue(bar.dataset, "status", status);
     const tokenValue = value => finite(value) ? `${count(value)} tok` : "—";
     data.uncachedInputTokens = finite(data.inputTokens) && finite(data.cachedInputTokens) && data.cachedInputTokens <= data.inputTokens ? data.inputTokens - data.cachedInputTokens : null;
     for (const [key, element] of Object.entries(refs.fields)) {
@@ -447,28 +457,29 @@
     const toolNote = finite(turn?.toolDurationMs) ? "工具用时为本轮累计值，并行调用可能重叠。" : "";
     setText(refs.notes.activity, `${pendingNote}${activityNote}${toolNote}${speedNote}。`);
     setText(refs.notes.tokens, `${pendingNote}${sourceNote}`);
-    refs.buttons.activity.setAttribute("aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
-    refs.buttons.tokens.setAttribute("aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
-    bar.dataset.running = running ? "true" : "false";
-    bar.dataset.state = state;
+    setAttribute(refs.buttons.activity, "aria-label", `会话总轮数 ${count(data.turnCount)} 轮，最近一轮统计 ${count(turn?.stepCount)} 步，本轮平均速度 ${speedText}，${status}。${speedNote}。查看统计详情`);
+    setAttribute(refs.buttons.tokens, "aria-label", `Token 用量，${scopeLabel} ${refs.total.textContent}，缓存命中 ${rate}，${status}。查看统计详情`);
+    setValue(bar.dataset, "running", running ? "true" : "false");
+    setValue(bar.dataset, "state", state);
     positionPanel();
   };
 
   const schedulePoll = (delay) => {
-    if (disposed) return;
     clearTimeout(pollTimer);
-    pollTimer = setTimeout(poll, delay);
+    pollTimer = 0;
+    if (disposed || document.visibilityState === "hidden") return;
+    if (fetchInFlight) {
+      if (delay === 0) refreshPending = true;
+      return;
+    }
+    pollTimer = setTimeout(() => { pollTimer = 0; void poll(); }, delay);
   };
 
   const pollInterval = () => stats?.lastTurn?.status === "running" || stats?.inFlight > 0
     ? POLL_ACTIVE_MS : POLL_IDLE_MS;
 
   const poll = async () => {
-    if (disposed) return;
-    if (document.visibilityState === "hidden") {
-      schedulePoll(POLL_IDLE_MS);
-      return;
-    }
+    if (disposed || document.visibilityState === "hidden") return;
     const { anchor, sessionId } = resolveSessionContext();
     if (sessionId !== currentSessionId) {
       resetSession(sessionId);
@@ -486,7 +497,7 @@
       let completedContext = null;
       try {
         const result = await callBridge("/session/stats", { sessionId: requestSessionId });
-        if (disposed) return;
+        if (disposed || document.visibilityState === "hidden") return;
         completedContext = resolveSessionContext();
         if (requestGeneration !== sessionGeneration || completedContext.sessionId !== requestSessionId) return;
         fetchAttempted = true;
@@ -501,16 +512,18 @@
           lastFetchOk = false;
         }
       } catch {
-        if (!disposed) completedContext = resolveSessionContext();
-        if (!disposed && requestGeneration === sessionGeneration && completedContext.sessionId === requestSessionId) {
+        if (!disposed && document.visibilityState !== "hidden") completedContext = resolveSessionContext();
+        if (completedContext && requestGeneration === sessionGeneration && completedContext.sessionId === requestSessionId) {
           fetchAttempted = true;
           lastFetchOk = false;
         }
       } finally {
         fetchInFlight = false;
-        if (!disposed) {
+        if (!disposed && document.visibilityState !== "hidden") {
           completedContext ||= resolveSessionContext();
-          schedulePoll(requestGeneration !== sessionGeneration || completedContext.sessionId !== requestSessionId ? 0 : pollInterval());
+          const immediate = refreshPending || requestGeneration !== sessionGeneration || completedContext.sessionId !== requestSessionId;
+          refreshPending = false;
+          schedulePoll(immediate ? 0 : pollInterval());
         }
       }
       render(completedContext?.anchor);
@@ -520,7 +533,7 @@
   };
 
   const scheduleRescan = () => {
-    if (disposed || rescanTimer) return;
+    if (disposed || document.visibilityState === "hidden" || rescanTimer) return;
     rescanTimer = setTimeout(() => {
       rescanTimer = 0;
       const { anchor, sessionId } = resolveSessionContext();
@@ -606,7 +619,13 @@
       window.__codeyConversationStatsObserver = observer;
     }
     listen(document, "visibilitychange", () => {
-      if (document.visibilityState !== "hidden") schedulePoll(0);
+      if (document.visibilityState === "hidden") {
+        sessionGeneration += 1;
+        refreshPending = false;
+        clearTimeout(pollTimer);
+        clearTimeout(rescanTimer);
+        pollTimer = rescanTimer = 0;
+      } else schedulePoll(0);
     });
     listen(window, "focus", () => schedulePoll(0));
     listen(window, "pageshow", () => schedulePoll(0));

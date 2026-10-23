@@ -10,6 +10,24 @@ use tokio::sync::Semaphore;
 static REQUESTS: Semaphore = Semaphore::const_new(8);
 static PROBES: Semaphore = Semaphore::const_new(2);
 
+pub(crate) async fn mcp_status_configurations(
+    codex_home: PathBuf,
+    data_dir: PathBuf,
+    user_home: PathBuf,
+) -> Result<Vec<Result<Value>>> {
+    ensure!(data_dir.is_absolute(), "扩展数据目录必须为绝对路径");
+    let permit = REQUESTS
+        .try_acquire()
+        .context("扩展管理请求过多，请稍后重试")?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        ExtensionService::new(codex_home, data_dir, user_home)
+            .mcp_status_configurations(&Scope::User)
+    })
+    .await
+    .context("读取 MCP 状态的任务异常退出")?
+}
+
 pub(crate) async fn dispatch(
     codex_home: PathBuf,
     data_dir: PathBuf,

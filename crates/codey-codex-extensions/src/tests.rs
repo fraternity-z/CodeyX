@@ -1,6 +1,126 @@
 use super::*;
 use std::{fs, io::Write};
 
+fn mcp_status_values(f: &Fixture) -> Result<Vec<Value>> {
+    f.service
+        .mcp_status_configurations(&Scope::User)?
+        .into_iter()
+        .collect()
+}
+
+#[test]
+fn mcp_status_configurations_skip_skills_and_observe_external_edits() {
+    let f = Fixture::new(
+        "[mcp_servers.test]\ncommand='node'\nargs=['--token','private-fixture']\n[mcp_servers.test.env]\nTOKEN='private-fixture'\n",
+    );
+    let before = fs::read(f.home.join("config.toml")).unwrap();
+    let expected = f
+        .service
+        .dispatch(json!({"action":"get_mcp","id":"test"}))
+        .unwrap();
+    let statuses = mcp_status_values(&f).unwrap();
+    assert_eq!(
+        statuses[0],
+        json!({"id":"test","enabled":true,"configJson":expected["configJson"]})
+    );
+    assert!(
+        !serde_json::to_string(&statuses)
+            .unwrap()
+            .contains("private-fixture")
+    );
+    for index in 0..128 {
+        let directory = f.home.join("skills").join(format!("skill-{index}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::copy(f.source.join("SKILL.md"), directory.join("SKILL.md")).unwrap();
+    }
+    fs::create_dir_all(&f.data).unwrap();
+    fs::write(f.data.join("managed-skills.json"), "broken registry").unwrap();
+    assert!(f.service.inventory(&Scope::User).is_err());
+    assert_eq!(mcp_status_values(&f).unwrap(), statuses);
+    assert_eq!(fs::read(f.home.join("config.toml")).unwrap(), before);
+    fs::write(
+        f.home.join("config.toml"),
+        "[mcp_servers.changed]\ncommand='updated'\nenabled=false\n",
+    )
+    .unwrap();
+    assert_eq!(
+        mcp_status_values(&f).unwrap(),
+        vec![
+            json!({"id":"changed","enabled":false,"configJson":{"command":"updated","enabled":false}})
+        ]
+    );
+}
+
+#[test]
+fn mcp_status_configurations_restore_shared_original_and_reject_tampering() {
+    let f = shared_fixture(
+        "[mcp_servers.test]\ncommand='node'\nargs=['codegraph.js','--token','private-fixture']\n",
+    );
+    let expected = mcp_status_values(&f).unwrap();
+    f.mutate(json!({"action":"set_mcp_sharing","id":"test","enabled":true}))
+        .unwrap();
+    assert_eq!(mcp_status_values(&f).unwrap(), expected);
+    let path = f.home.join("config.toml");
+    let changed = fs::read_to_string(&path)
+        .unwrap()
+        .replace("--mcp-relay", "--external");
+    fs::write(path, changed).unwrap();
+    assert!(f.service.mcp_status_configurations(&Scope::User).is_err());
+}
+
+#[test]
+fn mcp_status_configurations_preserve_invalid_configuration_read_semantics() {
+    for config in [
+        "[mcp_servers.test]\nenabled='unknown'\ncommand=42\n",
+        "[mcp_servers.test]\ncommand='node'\nurl='https://example.invalid'\n",
+    ] {
+        let f = Fixture::new(config);
+        let inventory = f.list();
+        assert_eq!(inventory["mcps"][0]["configurationStatus"], "invalid");
+        let old = f
+            .service
+            .dispatch(json!({"action":"get_mcp","id":"test"}))
+            .unwrap();
+        let entries = mcp_status_values(&f).unwrap();
+        assert_eq!(entries[0]["enabled"], inventory["mcps"][0]["enabled"]);
+        assert_eq!(entries[0]["configJson"], old["configJson"]);
+    }
+    for config in ["broken = [", "mcp_servers=42", "[mcp_servers]\ntest=42"] {
+        let f = Fixture::new(config);
+        assert!(mcp_status_values(&f).is_err());
+    }
+}
+
+#[test]
+#[ignore = "isolated synthetic performance sample; run explicitly with --ignored --nocapture"]
+fn mcp_status_configurations_synthetic_timing() {
+    let config = (0..12)
+        .map(|index| format!("[mcp_servers.server_{index}]\ncommand='node'\nargs=['fixture.js']\n"))
+        .collect::<String>();
+    let f = Fixture::new(&config);
+    for index in 0..128 {
+        let directory = f.home.join("skills").join(format!("skill-{index}"));
+        fs::create_dir_all(&directory).unwrap();
+        fs::copy(f.source.join("SKILL.md"), directory.join("SKILL.md")).unwrap();
+    }
+    for sample in 1..=3 {
+        let started = std::time::Instant::now();
+        let inventory = f.list();
+        for entry in inventory["mcps"].as_array().unwrap() {
+            f.service
+                .dispatch(json!({"action":"get_mcp","id":entry["id"]}))
+                .unwrap();
+        }
+        let old = started.elapsed();
+        let started = std::time::Instant::now();
+        assert_eq!(mcp_status_values(&f).unwrap().len(), 12);
+        eprintln!(
+            "synthetic sample {sample}: inventory + 12 get_mcp = {old:?}; lightweight = {:?}",
+            started.elapsed()
+        );
+    }
+}
+
 #[test]
 fn mcp_save_candidate_preserves_masked_credentials_without_writing() {
     let f = Fixture::new(

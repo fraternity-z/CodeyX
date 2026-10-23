@@ -180,7 +180,7 @@ pub(super) async fn session_status(
     let Some(mut current) = current else {
         return Ok(None);
     };
-    let (mcp, _) = mcp_status(state).await?;
+    let mcp = mcp_status(state).await?;
     if let Some((phase, message)) = if mcp["enabled"] != true {
         Some(("disabled", "CodeGraph 未启用，可在内置工具设置中开启。"))
     } else if mcp["managed"] != true || mcp["automatic"] != true {
@@ -219,36 +219,58 @@ fn is_managed(id: &str, config: &Value, root: &Path) -> bool {
 }
 
 // 人工配置（包括停用状态）优先，只有 Codey 创建且启动参数未改写的条目可切换。
-async fn mcp_status(state: &Arc<AppState>) -> Result<(Value, Value)> {
+fn classify_mcp_status(
+    entries: impl IntoIterator<Item = Result<Value>>,
+    root: &Path,
+) -> Result<Value> {
+    let mut managed = None;
+    for entry in entries {
+        let entry = entry?;
+        let id = entry["id"].as_str().context("MCP 标识无效")?;
+        let config = &entry["configJson"];
+        if !is_codegraph(id, config) {
+            continue;
+        }
+        let own = is_managed(id, config, root);
+        let status = json!({"id":id,"enabled":entry["enabled"] == true,"managed":own,
+            "automatic":own && config["args"] == runtime::mcp_config(root)["args"]});
+        if !own {
+            return Ok(status);
+        }
+        managed = Some(status);
+    }
+    Ok(managed.unwrap_or(json!({"enabled":false,"managed":false,"automatic":false})))
+}
+
+async fn mcp_status(state: &Arc<AppState>) -> Result<Value> {
+    let entries = super::extensions::mcp_status_configurations(state).await?;
+    classify_mcp_status(entries, &root(state)?)
+}
+
+async fn mcp_edit_status(state: &Arc<AppState>) -> Result<(Value, Value)> {
     let scope = json!({"kind":"user"});
     let inventory = extension(state, json!({"action":"list", "scope":scope})).await?;
     let root = root(state)?;
-    let mut managed = None;
+    let mut entries = Vec::new();
     for entry in inventory["mcps"].as_array().context("MCP 清单无效")? {
         let id = entry["id"].as_str().context("MCP 标识无效")?;
         let document =
             extension(state, json!({"action":"get_mcp", "scope":scope, "id":id})).await?;
         let config = &document["configJson"];
-        if !is_codegraph(id, config) {
-            continue;
+        entries.push(json!({"id":id,"enabled":entry["enabled"],"configJson":config}));
+        if is_codegraph(id, config) && !is_managed(id, config, &root) {
+            break;
         }
-        let own = is_managed(id, config, &root);
-        let status = json!({"id":id,"enabled":entry["enabled"] == true,"managed":own,
-            "automatic":own && config["args"] == runtime::mcp_config(&root)["args"]});
-        if !own {
-            return Ok((status, inventory));
-        }
-        managed = Some(status);
     }
     Ok((
-        managed.unwrap_or(json!({"enabled":false,"managed":false,"automatic":false})),
+        classify_mcp_status(entries.into_iter().map(Ok), &root)?,
         inventory,
     ))
 }
 
 async fn status(state: &Arc<AppState>) -> Result<Value> {
     let root = root(state)?;
-    let (mcp, _) = mcp_status(state).await?;
+    let mcp = mcp_status(state).await?;
     let installed = runtime::installed(&root);
     Ok(
         json!({"installed":installed,"version":runtime::VERSION,"mcp":mcp,
@@ -262,7 +284,7 @@ async fn enable(state: &Arc<AppState>) -> Result<String> {
     let launcher_root = root.clone();
     tokio::task::spawn_blocking(move || runtime::prepare_launcher(&launcher_root)).await??;
     // 下载可能耗时，落盘前重新读取并校验，保留期间人工配置的改动。
-    let (current, inventory) = mcp_status(state).await?;
+    let (current, inventory) = mcp_edit_status(state).await?;
     ensure!(
         !current["id"].is_string() || current["managed"] == true,
         "已存在用户管理的 CodeGraph MCP，请在 MCP 管理中处理"
@@ -327,7 +349,7 @@ async fn invoke_inner(state: &Arc<AppState>, args: &Value) -> Result<Value> {
         .clone()
         .try_acquire_owned()
         .context("已有 CodeGraph 操作进行中，请等待完成")?;
-    let (current, inventory) = mcp_status(state).await?;
+    let (current, inventory) = mcp_edit_status(state).await?;
     ensure!(
         !current["id"].is_string() || current["managed"] == true,
         "该 CodeGraph MCP 由用户管理，请到 MCP 管理中修改"
@@ -377,6 +399,64 @@ async fn invoke_inner(state: &Arc<AppState>, args: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn status_classification_keeps_manual_codegraph_priority_and_legacy_states() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        let managed = json!({"id":SERVER_ID,"enabled":true,"configJson":runtime::mcp_config(root)});
+        let external =
+            json!({"id":"manual_codegraph","enabled":false,"configJson":{"command":"custom"}});
+        let own = classify_mcp_status([Ok(managed.clone())], root).unwrap();
+        assert_eq!(
+            own,
+            json!({"id":SERVER_ID,"enabled":true,"managed":true,"automatic":true})
+        );
+        for entries in [
+            vec![managed.clone(), external.clone()],
+            vec![external.clone(), managed.clone()],
+        ] {
+            assert_eq!(
+                classify_mcp_status(entries.into_iter().map(Ok), root).unwrap(),
+                json!({"id":"manual_codegraph","enabled":false,"managed":false,"automatic":false})
+            );
+        }
+        let mut legacy = managed;
+        legacy["configJson"]["args"] = runtime::legacy_mcp_args(root);
+        let status = classify_mcp_status([Ok(legacy)], root).unwrap();
+        assert_eq!(status["managed"], true);
+        assert_eq!(status["automatic"], false);
+        assert_eq!(
+            classify_mcp_status([], root).unwrap(),
+            json!({"enabled":false,"managed":false,"automatic":false})
+        );
+        let service = codey_codex_extensions::ExtensionService::new(
+            root.to_path_buf(),
+            root.join("data"),
+            root.to_path_buf(),
+        );
+        for (config, readable) in [
+            (
+                "mcp_servers={manual_codegraph={command='custom',enabled=false},broken=42}",
+                true,
+            ),
+            (
+                "mcp_servers={broken=42,manual_codegraph={command='custom',enabled=false}}",
+                false,
+            ),
+        ] {
+            std::fs::write(root.join("config.toml"), config).unwrap();
+            let entries = service
+                .mcp_status_configurations(&codey_codex_extensions::Scope::User)
+                .unwrap();
+            let status = classify_mcp_status(entries, root);
+            assert_eq!(status.is_ok(), readable);
+            if let Ok(status) = status {
+                assert_eq!(status["id"], "manual_codegraph");
+                assert_eq!(status["enabled"], false);
+            }
+        }
+    }
 
     #[test]
     fn only_owned_launchers_and_legacy_configs_can_be_migrated() {
