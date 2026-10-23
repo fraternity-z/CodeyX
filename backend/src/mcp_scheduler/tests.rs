@@ -19,8 +19,9 @@ async fn connect(discovery: &Discovery, registration: &str) -> (TestReader, Test
 #[tokio::test]
 async fn mcp_scheduler_connections_duplicate_ids_disconnect_and_reconcile() {
     let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex");
-    let data = temp.path().join("data");
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    let data = root.join("data");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&data).unwrap();
     std::fs::write(
@@ -32,7 +33,7 @@ async fn mcp_scheduler_connections_duplicate_ids_disconnect_and_reconcile() {
         ),
     )
     .unwrap();
-    let service = ExtensionService::new(home.clone(), data.clone(), temp.path().to_path_buf())
+    let service = ExtensionService::new(home.clone(), data.clone(), root.clone())
         .with_mcp_relay_executable(std::env::current_exe().unwrap());
     let inventory = service.dispatch(json!({"action":"list"})).unwrap();
     service.dispatch(json!({"action":"set_mcp_scheduler_enabled","enabled":true,"revision":inventory["revision"]})).unwrap();
@@ -41,9 +42,7 @@ async fn mcp_scheduler_connections_duplicate_ids_disconnect_and_reconcile() {
     let registration = result["inventory"]["mcps"][0]["sharing"]["registrationId"]
         .as_str()
         .unwrap();
-    let scheduler = start(home.clone(), data.clone(), temp.path().to_path_buf())
-        .await
-        .unwrap();
+    let scheduler = start(home.clone(), data.clone(), root).await.unwrap();
     let discovery: Discovery =
         serde_json::from_slice(&std::fs::read(data.join("mcp-scheduler.json")).unwrap()).unwrap();
     let (mut first_read, mut first_write) = connect(&discovery, registration).await;

@@ -3,21 +3,22 @@ use super::*;
 #[tokio::test]
 async fn mcp_scheduler_discovery_recovers_stale_and_preserves_active_generation() {
     let temp = tempfile::tempdir().unwrap();
-    let data = temp.path().join("data");
-    let home = temp.path().join("codex");
-    let first = start(home.clone(), data.clone(), temp.path().into())
+    let root = temp.path().canonicalize().unwrap();
+    let data = root.join("data");
+    let home = root.join("codex");
+    let first = start(home.clone(), data.clone(), root.clone())
         .await
         .unwrap();
     let path = data.join("mcp-scheduler.json");
     let original = std::fs::read(&path).unwrap();
     assert!(
-        start(home.clone(), data.clone(), temp.path().into())
+        start(home.clone(), data.clone(), root.clone())
             .await
             .is_err()
     );
     assert_eq!(std::fs::read(&path).unwrap(), original);
     drop(first); // Simulate a host exit without graceful discovery removal.
-    let next = start(home.clone(), data.clone(), temp.path().into())
+    let next = start(home.clone(), data.clone(), root.clone())
         .await
         .unwrap();
     assert_ne!(std::fs::read(&path).unwrap(), original);
@@ -31,7 +32,7 @@ async fn mcp_scheduler_discovery_recovers_stale_and_preserves_active_generation(
     assert_eq!(std::fs::read(&path).unwrap(), newer);
     drop(next);
     std::fs::write(&path, b"unrelated file").unwrap();
-    let recovered = start(home.clone(), data.clone(), temp.path().into())
+    let recovered = start(home.clone(), data.clone(), root.clone())
         .await
         .unwrap();
     assert!(serde_json::from_slice::<Discovery>(&std::fs::read(&path).unwrap()).is_ok());
@@ -39,7 +40,7 @@ async fn mcp_scheduler_discovery_recovers_stale_and_preserves_active_generation(
     drop(recovered);
     std::fs::create_dir(&path).unwrap();
     assert!(
-        start(home.clone(), data.clone(), temp.path().into())
+        start(home.clone(), data.clone(), root.clone())
             .await
             .is_err()
     );
@@ -48,19 +49,19 @@ async fn mcp_scheduler_discovery_recovers_stale_and_preserves_active_generation(
     std::fs::remove_file(&lock).unwrap();
     std::fs::create_dir(&lock).unwrap();
     assert!(
-        start(home.clone(), data.clone(), temp.path().into())
+        start(home.clone(), data.clone(), root.clone())
             .await
             .is_err()
     );
     std::fs::remove_dir(&lock).unwrap();
-    let target = temp.path().join("untouched");
+    let target = root.join("untouched");
     std::fs::write(&target, b"untouched").unwrap();
     #[cfg(windows)]
     let linked = std::os::windows::fs::symlink_file(&target, &path);
     #[cfg(unix)]
     let linked = std::os::unix::fs::symlink(&target, &path);
     if linked.is_ok() {
-        assert!(start(home, data, temp.path().into()).await.is_err());
+        assert!(start(home, data, root).await.is_err());
         assert_eq!(std::fs::read(target).unwrap(), b"untouched");
     }
 }
@@ -156,9 +157,10 @@ async fn mcp_scheduler_real_relay_e2e_and_resource_comparison() {
     };
     let executable = PathBuf::from(executable);
     let temp = tempfile::tempdir().unwrap();
-    let home = temp.path().join("codex");
-    let data = temp.path().join("data");
-    let cwd = temp.path().join("workspace");
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("codex");
+    let data = root.join("data");
+    let cwd = root.join("workspace");
     std::fs::create_dir_all(&home).unwrap();
     std::fs::create_dir_all(&cwd).unwrap();
     let fixture = concat!(env!("CARGO_MANIFEST_DIR"), "/src/mcp_scheduler/fixture.cjs");
@@ -218,7 +220,7 @@ async fn mcp_scheduler_real_relay_e2e_and_resource_comparison() {
         ),
     )
     .unwrap();
-    let service = ExtensionService::new(home.clone(), data.clone(), temp.path().into())
+    let service = ExtensionService::new(home.clone(), data.clone(), root.clone())
         .with_mcp_relay_executable(executable.clone());
     let inventory = service.dispatch(json!({"action":"list"})).unwrap();
     service.dispatch(json!({"action":"set_mcp_scheduler_enabled","enabled":true,"revision":inventory["revision"]})).unwrap();
@@ -229,11 +231,10 @@ async fn mcp_scheduler_real_relay_e2e_and_resource_comparison() {
         .unwrap();
     let shared_host_before = memory(&[host_pid]);
     let cold = std::time::Instant::now();
-    let scheduler = start(home.clone(), data.clone(), temp.path().into())
+    let scheduler = start(home.clone(), data.clone(), root.clone())
         .await
         .unwrap();
-    let relay =
-        json!({"command":executable,"args":["--mcp-relay",registration,home,data,temp.path()]});
+    let relay = json!({"command":executable,"args":["--mcp-relay",registration,home,data,root]});
     let mut relays = Vec::new();
     let mut backend_pid = None;
     let mut relay_pids = Vec::new();
