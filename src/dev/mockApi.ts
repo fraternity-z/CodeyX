@@ -776,7 +776,7 @@ if (import.meta.env.DEV) {
       }
       if (command === "runtime_status") {
         const injectionRepairing = Date.now() < previewInjectionRepairUntil;
-        if (previewInjectionRepairUntil && !injectionRepairing) previewInjectionMode = "node_options";
+        if (previewInjectionRepairUntil && !injectionRepairing) previewInjectionMode = "inspector";
         const activeNotificationChannelCount =
           previewConfig.webhook.channels.filter(
             (channel) =>

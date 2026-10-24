@@ -590,7 +590,7 @@ function OperationsPanelComponent({
                           {injectionRepairing
                             ? "正在退出 Codex 并修复，成功后将自动重启…"
                             : injectionRepairAvailable
-                              ? `${injectionModeCard.description} 点击修复将退出 Codex，成功后自动重启。`
+                              ? `${injectionModeCard.description} 可手动备份并修复，确认后退出并重启 Codex。`
                               : injectionModeCard.description}
                         </p>
                       </div>
@@ -599,10 +599,10 @@ function OperationsPanelComponent({
                           className="injection-mode-repair"
                           variant="outline"
                           size="xs"
-                          disabled={isBusy || restartStatusUnknown || !injectionRepairAvailable}
+                          disabled={isBusy || injectionRepairing || restartStatusUnknown || !injectionRepairAvailable}
                           onClick={onRepairMainProcessInjection}
                           aria-label="修复主进程注入"
-                          title="自动退出 Codex，修复成功后重新启动"
+                          title="备份运行时并开启主进程调试，确认后退出并重启 Codex"
                         >
                           {injectionRepairing ? (
                             <LoaderCircle className="animate-spin" aria-hidden="true" />

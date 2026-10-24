@@ -5,9 +5,9 @@ import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 import { elementProps } from "./helpers/jsx-tree.mjs";
 
 const api = await loadTypeScriptModule(new URL("../src/api.ts", import.meta.url));
-const presentation = await loadTypeScriptModule(new URL("../src/runtimeStatusPresentation.ts", import.meta.url));
 const ready = { status: "ready", computerUse: { supported: true, ready: true } };
-function fixture(extra = {}, repairAllowed = false) {
+const fallbackStatus = { running: true, clientPlatform: "windows", maintenance: { startupInjectionMode: "cli" } };
+function fixture(extra = {}) {
   const calls = [], notices = [], busy = [], saves = [], statuses = [], restartErrors = [];
   let confirmation = null, restarts = 0;
   const options = {
@@ -24,10 +24,10 @@ function fixture(extra = {}, repairAllowed = false) {
   };
   const h = createControllerHarness(new URL("../src/features/runtime-maintenance/useRuntimeMaintenanceController.ts", import.meta.url), "useRuntimeMaintenanceController", {
     "../../api": { invoke(command, args) { const call = { command, args, ...deferred() }; calls.push(call); return call.promise; } },
-    "../../runtimeStatusPresentation": repairAllowed ? { ...presentation, canRepairMainProcessInjection: () => true } : presentation,
   });
   return { ...h, options, calls, notices, busy, saves, statuses, restartErrors,
-    render: () => h.render(options), get confirmation() { return confirmation; }, get restarts() { return restarts; } };
+    render: () => h.render(options), dismissConfirmation: () => { confirmation?.onDismiss?.(); confirmation = null; },
+    get confirmation() { return confirmation; }, get restarts() { return restarts; } };
 }
 
 test("市场读取独立于修复，过期成功、错误和加载轮次均不覆盖最新状态", async t => {
@@ -190,24 +190,85 @@ test("目录选择在隐藏重开或卸载后不采纳迟到结果", async t => 
   }
 });
 
-test("注入修复遵守平台能力，支持时区分后端拒绝与连接中断", async t => {
+test("注入修复须确认，取消无副作用，确认后才保存最新草稿并提交一次", async t => {
   installControllerWindow(t);
-  const disabled = fixture(); await disabled.render().repairMainProcessInjection(); assert.equal(disabled.calls.length, 0); disabled.unmount();
+  const save = deferred();
+  const h = fixture({ status: fallbackStatus, dirty: true, persist: config => { h.saves.push(config); return save.promise; } });
+  h.render().repairMainProcessInjection();
+  assert.equal(h.confirmation.action, "repair-main-process-injection");
+  assert.match(h.confirmation.description, /退出并重启 Codex[\s\S]*先备份[\s\S]*主进程调试[\s\S]*原厂签名失效[\s\S]*回滚/);
+  assert.deepEqual([h.calls.length, h.saves.length, h.restarts, h.busy.length], [0, 0, 0, 0]);
+  h.dismissConfirmation(); await h.flush();
+  assert.deepEqual([h.calls.length, h.saves.length, h.restarts, h.busy.length], [0, 0, 0, 0]);
+  h.render().repairMainProcessInjection();
+  const latest = { retained: "latest draft" }; h.options.config = latest; h.render();
+  h.confirmation.run(); h.confirmation.run();
+  assert.deepEqual(h.saves, [latest]); assert.equal(h.calls.length, 0);
+  save.resolve(); await h.flush(); assert.equal(h.calls[0].command, "repair_main_process_injection");
+  h.calls[0].resolve({ status: "repairing" }); await h.flush(); assert.equal(h.restarts, 1); h.unmount();
+});
+
+test("注入修复遵守平台、运行状态、忙碌和重启边界", async t => {
+  installControllerWindow(t);
+  for (const extra of [{ config: null }, { active: false }, { isBusy: true }, { restartStatusError: "unknown" },
+    ...[{ running: false }, { clientPlatform: "macos" }, { clientPlatform: "linux" }, { restartInProgress: true },
+      { maintenance: { startupInjectionMode: "inspector" } }, { maintenance: { startupInjectionMode: "node_options" } },
+      { maintenance: { startupInjectionMode: "unknown" } }, { maintenance: undefined }].map(patch => ({ status: { ...fallbackStatus, ...patch } }))]) {
+    const h = fixture({ status: fallbackStatus, ...extra }); h.render().repairMainProcessInjection();
+    assert.equal(h.confirmation, null); assert.equal(h.calls.length, 0); assert.equal(h.saves.length, 0); h.unmount();
+  }
+});
+
+test("注入修复确认重校验最新状态，隐藏重开和卸载使旧确认失效", async t => {
+  installControllerWindow(t);
+  for (const mode of ["status", "restarting", "hidden", "unmount"]) {
+    const h = fixture({ status: fallbackStatus, dirty: true }); h.render().repairMainProcessInjection();
+    const confirmation = h.confirmation;
+    if (mode === "unmount") h.unmount();
+    else if (mode === "hidden") { h.options.active = false; h.render(); h.options.active = true; h.render(); }
+    else { h.options.status = { ...fallbackStatus, ...(mode === "status" ? { maintenance: { startupInjectionMode: "inspector" } } : { restartInProgress: true }) }; h.render(); }
+    confirmation.run(); await h.flush();
+    assert.equal(h.calls.filter(call => call.command === "repair_main_process_injection").length, 0);
+    assert.equal(h.saves.length, 0); assert.equal(h.restarts, 0); assert.equal(h.writesAfterUnmount, 0);
+    if (mode !== "unmount") h.unmount();
+  }
+  const save = deferred(); const h = fixture({ status: fallbackStatus, dirty: true, persist: () => save.promise });
+  h.render().repairMainProcessInjection(); h.confirmation.run();
+  h.options.status = { ...fallbackStatus, restartInProgress: true }; h.render();
+  save.resolve(); await h.flush(); assert.equal(h.calls.length, 0); assert.equal(h.restarts, 0); h.unmount();
+});
+
+test("注入修复保留保存失败、后端拒绝与连接中断语义", async t => {
+  installControllerWindow(t);
+  const failed = fixture({ status: fallbackStatus, dirty: true, persist: async () => { throw new Error("save failed"); } });
+  failed.render().repairMainProcessInjection(); failed.confirmation.run(); await failed.flush();
+  assert.equal(failed.calls.length, 0); assert.equal(failed.restarts, 0); assert.match(failed.notices.at(-1).text, /save failed/); failed.unmount();
   for (const error of [null, new api.CodeyApiError("rejected"), new Error("disconnected")]) {
-    const h = fixture({}, true); const work = h.render().repairMainProcessInjection();
+    const h = fixture({ status: fallbackStatus }); h.render().repairMainProcessInjection(); h.confirmation.run();
     assert.equal(h.calls[0].command, "repair_main_process_injection");
-    if (error) h.calls[0].reject(error); else h.calls[0].resolve(); await work;
+    if (error) h.calls[0].reject(error); else h.calls[0].resolve({ status: "repairing" }); await h.flush();
     if (error instanceof api.CodeyApiError) { assert.equal(h.restarts, 0); assert.match(h.notices.at(-1).text, /被拒绝/); }
     else {
       assert.equal(h.restarts, 1);
+      assert.equal(h.render().injectionRepairRequested, true);
       if (error) assert.match(h.notices.at(-1).text, /待确认/);
-      else {
-        assert.equal(h.render().injectionRepairRequested, true);
-        h.options.status = { running: true, restartInProgress: false, maintenance: { startupInjectionMode: "inspector" } };
-        h.render(); assert.match(h.notices.at(-1).text, /已修复.*已自动重启/);
-      }
     }
     h.unmount();
+  }
+});
+
+test("注入修复仅以运行中的主进程注入标记确认成功，CLI或启动失败保留错误", async t => {
+  installControllerWindow(t);
+  for (const [mode, running, startupError, tone] of [["inspector", true, undefined, "success"], ["node_options", true, undefined, "success"],
+    ["cli", true, undefined, "error"], ["inspector", false, undefined, "error"], ["inspector", true, "修复失败，已恢复启动", "error"]]) {
+    const h = fixture({ status: fallbackStatus }); h.render().repairMainProcessInjection(); h.confirmation.run();
+    h.calls[0].resolve({ status: "restarting" }); await h.flush();
+    assert.equal(h.render().injectionRepairRequested, true);
+    assert.equal(h.notices.some(notice => notice.tone === "success"), false);
+    h.options.status = { running, restartInProgress: false, startupError, maintenance: { startupInjectionMode: mode } };
+    h.render(); assert.equal(h.notices.at(-1).tone, tone);
+    assert.match(h.notices.at(-1).text, tone === "success" ? /已修复.*已自动重启/ : startupError ? /修复失败/ : /尚未确认/);
+    assert.equal(h.render().injectionRepairRequested, false); h.unmount();
   }
 });
 

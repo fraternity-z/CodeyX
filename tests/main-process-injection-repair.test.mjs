@@ -7,12 +7,12 @@ const { canRepairMainProcessInjection, isMainProcessInjectionConfirmed } = await
 );
 const failed = { running: true, clientPlatform: "windows", maintenance: { startupInjectionMode: "cli" } };
 
-test("binary repair is unavailable even for confirmed Windows fallback", () => {
-  assert.equal(canRepairMainProcessInjection(failed), false);
+test("binary repair is offered only for a running Windows CLI fallback", () => {
+  assert.equal(canRepairMainProcessInjection(failed), true);
   for (const mode of ["node_options", "inspector", "", undefined, "unknown"]) {
     assert.equal(canRepairMainProcessInjection({ ...failed, maintenance: { startupInjectionMode: mode } }), false, String(mode));
   }
-  for (const patch of [{ running: false }, { clientPlatform: "macos" }, { clientPlatform: undefined }, { restartInProgress: true }, { maintenance: undefined }]) {
+  for (const patch of [{ running: false }, { clientPlatform: "macos" }, { clientPlatform: "linux" }, { clientPlatform: undefined }, { restartInProgress: true }, { maintenance: undefined }]) {
     assert.equal(canRepairMainProcessInjection({ ...failed, ...patch }), false);
   }
 });

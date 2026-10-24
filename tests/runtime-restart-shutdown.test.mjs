@@ -60,11 +60,16 @@ test("Windows restart confirms native exit before process cleanup and config res
   const runtime = await readSource("backend/src/commands/runtime.rs");
   const scheduled = runtime.slice(
     runtime.indexOf("async fn run_scheduled_restart"),
+    runtime.indexOf("async fn stop_runtime_for_restart_locked"),
+  );
+  const stopFlow = runtime.slice(
+    runtime.indexOf("async fn stop_runtime_for_restart_locked"),
     runtime.indexOf("async fn stop_codey_runtime_locked"),
   );
-  const prepare = scheduled.search(/runtime\s*\.prepare_for_restart\(\)\s*\.await/);
-  const stop = scheduled.indexOf("stop_codey_runtime_locked(&restart_state).await");
+  assert.match(scheduled, /stop_runtime_for_restart_locked\(&restart_state\)\.await/);
+  const prepare = stopFlow.search(/runtime\s*\.prepare_for_restart\(\)\s*\.await/);
+  const stop = stopFlow.indexOf("stop_codey_runtime_locked(state).await");
   assert.ok(prepare !== -1 && stop > prepare);
-  assert.match(scheduled.slice(prepare, stop), /map_err[\s\S]*?\?/);
+  assert.match(stopFlow.slice(prepare, stop), /map_err[\s\S]*?\?/);
   assert.match(scheduled, /if let Err\(error\) = stop[\s\S]*?return;/);
 });

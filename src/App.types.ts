@@ -309,6 +309,7 @@ export type InlineResult = {
 export type Confirmation = {
   action:
     | "restart"
+    | "repair-main-process-injection"
     | "repair-codex-config"
     | "install-update"
     | "download-update"

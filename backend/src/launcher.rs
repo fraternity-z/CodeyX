@@ -2338,6 +2338,12 @@ impl CodeyRuntime {
             .context("无法确认 Codex 已正常退出，已取消重启以保护尚未保存的设置")
     }
 
+    #[cfg(windows)]
+    pub(crate) fn main_process_is_running(&self) -> Result<bool> {
+        let process_id = self.process_id.context("无法确认 Codex 主进程身份")?;
+        codey_runtime_core::windows_process_is_running(process_id)
+    }
+
     pub async fn stop(&self) -> Result<()> {
         self.stop_with_cleanup(
             stop_codex_processes(

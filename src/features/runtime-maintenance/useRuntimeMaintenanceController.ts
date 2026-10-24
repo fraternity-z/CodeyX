@@ -182,11 +182,12 @@ export function useRuntimeMaintenanceController({ active, config, onConfigChange
     });
   }
 
-  async function repairMainProcessInjection() {
-    if (!config || restartStatusError || !canRepairMainProcessInjection(status)) return;
+  const canRepairInjection = useStableEvent(() => !restartStatusError && canRepairMainProcessInjection(status));
+  const performMainProcessInjectionRepair = useStableEvent(async () => {
+    if (!config || !canRepairInjection()) return;
     await run("repair-main-process-injection", async current => {
       if (dirty) await persist(config);
-      if (!current()) return;
+      if (!current() || !canRepairInjection()) return;
       setNotice({ tone: "info", text: "正在退出 Codex 并修复主进程注入，成功后将自动重启…" });
       try {
         await withTimeout(runtimeMaintenanceRequests.repairInjection(), 10_000, "修复请求暂未确认，请稍后重新查询状态");
@@ -198,9 +199,21 @@ export function useRuntimeMaintenanceController({ active, config, onConfigChange
         setNotice({ tone: result.tone, text: result.text });
         // 退出客户端会断开内嵌页面连接；后端明确拒绝才不会开始修复。
         if (!result.unconfirmed) return;
+        setInjectionRepairRequested(true);
       }
       markRestartInProgress();
     });
+  });
+
+  function repairMainProcessInjection() {
+    const scope = session.current;
+    if (!activeRef.current || !scope || blocked || pending.current || !config
+      || restartStatusError || !canRepairMainProcessInjection(status)) return;
+    setConfirmation({ action: "repair-main-process-injection", title: "修复主进程注入？",
+      description: "将退出并重启 Codex，正在执行的本地任务会被中断。CodeyX 会先备份运行时，再开启主进程调试；修改会使 Codex 原厂签名失效，可使用备份回滚。",
+      confirmLabel: "备份并修复", run: () => {
+        if (session.current === scope) void performMainProcessInjectionRepair();
+      } });
   }
 
   const repairCodexConfig = useStableEvent(async () => {

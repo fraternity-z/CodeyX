@@ -22,6 +22,8 @@ use anyhow::Result;
 #[cfg(any(windows, target_os = "macos", test))]
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(windows, test))]
+pub(crate) mod inspector_repair;
 #[cfg(windows)]
 pub(crate) mod windows_repair;
 
@@ -723,6 +725,10 @@ fn is_node_options_repair_command(command: &str) -> bool {
 
 pub(crate) fn run_node_options_repair_if_requested() -> Result<bool> {
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    #[cfg(windows)]
+    if inspector_repair::run_restore_if_requested(&args)? {
+        return Ok(true);
+    }
     let Some(command) = args.first().and_then(|arg| arg.to_str()) else {
         return Ok(false);
     };

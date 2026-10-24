@@ -568,20 +568,7 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
         return;
     }
 
-    let stop = async {
-        #[cfg(windows)]
-        {
-            let runtime = restart_state.runtime.lock().await;
-            if let Some(runtime) = runtime.as_ref() {
-                runtime
-                    .prepare_for_restart()
-                    .await
-                    .map_err(|error| format!("{error:#}"))?;
-            }
-        }
-        stop_codey_runtime_locked(&restart_state).await
-    }
-    .await;
+    let stop = stop_runtime_for_restart_locked(&restart_state).await;
     if let Err(error) = stop {
         error_log::record_failure(
             "runtime_restart_failed",
@@ -644,6 +631,20 @@ async fn run_scheduled_restart(restart_state: Arc<AppState>, mut cancel: oneshot
     );
     eprintln!("Codey 自动重启 Codex 失败：{error}");
     restart_state.request_shutdown();
+}
+
+async fn stop_runtime_for_restart_locked(state: &Arc<AppState>) -> Result<Value, String> {
+    #[cfg(windows)]
+    {
+        let runtime = state.runtime.lock().await.clone();
+        if let Some(runtime) = runtime {
+            runtime
+                .prepare_for_restart()
+                .await
+                .map_err(|error| format!("{error:#}"))?;
+        }
+    }
+    stop_codey_runtime_locked(state).await
 }
 
 async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, String> {

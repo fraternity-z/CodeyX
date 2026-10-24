@@ -9,13 +9,14 @@ const test = base.extend({
   },
 });
 
-async function openSettings(page, command, platform = "windows") {
-  await page.goto(`/codey/tests/ui-browser.html?platform=${platform}`);
+async function openSettings(page, command, platform = "windows", injection = "node_options") {
+  await page.goto(`/codey/tests/ui-browser.html?platform=${platform}&injection=${injection}`);
   await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeVisible({ timeout: 60_000 });
   await page.evaluate(command => {
     const bridge = window.__codexSessionDeleteBridge;
-    const state = window.maintenanceBehavior = { calls: [] };
+    const state = window.maintenanceBehavior = { calls: [], saves: 0 };
     window.__codexSessionDeleteBridge = async (path, args) => {
+      if (path.endsWith("/save_codey_config")) state.saves++;
       if (!path.endsWith(`/${command}`)) return bridge(path, args);
       state.calls.push(args);
       const overrides = await new Promise(resolve => { state.complete = resolve; });
@@ -24,6 +25,56 @@ async function openSettings(page, command, platform = "windows") {
     };
   }, command);
 }
+
+for (const mode of ["inspector", "cli"]) {
+  test(`主进程修复先确认风险，取消不写入，重启后${mode === "inspector" ? "确认 Inspector 成功" : "CLI 仍提示未确认"}`, async ({ page }) => {
+    await openSettings(page, "repair_main_process_injection", "windows", "cli");
+    await page.evaluate(mode => {
+      const bridge = window.__codexSessionDeleteBridge;
+      window.__codexSessionDeleteBridge = async (path, args) => {
+        const result = await bridge(path, args);
+        return path.endsWith("/runtime_status") && window.maintenanceBehavior.finished
+          ? { ...result, restartInProgress: false, maintenance: { ...result.maintenance, startupInjectionMode: mode } }
+          : result;
+      };
+    }, mode);
+    await page.getByRole("button", { name: /^系统优化（/ }).click();
+    const repair = page.getByRole("button", { name: "修复主进程注入", exact: true }).and(page.locator("button"));
+    await expect(repair).toBeEnabled();
+    await repair.click();
+    const confirmation = page.getByRole("dialog", { name: "修复主进程注入？", exact: true });
+    await expect(confirmation).toBeVisible();
+    await expect(confirmation).toContainText("退出并重启 Codex");
+    await expect(confirmation).toContainText("先备份运行时");
+    await expect(confirmation).toContainText("原厂签名失效");
+    await expect(confirmation).toContainText("可使用备份回滚");
+    expect(await page.evaluate(() => [window.maintenanceBehavior.calls.length, window.maintenanceBehavior.saves])).toEqual([0, 0]);
+    await confirmation.getByRole("button", { name: "取消", exact: true }).click();
+    await expect(confirmation).not.toBeVisible();
+    expect(await page.evaluate(() => [window.maintenanceBehavior.calls.length, window.maintenanceBehavior.saves])).toEqual([0, 0]);
+    await repair.click();
+    await confirmation.getByRole("button", { name: "备份并修复", exact: true }).click();
+    await expect(repair).toBeDisabled();
+    await expect.poll(() => page.evaluate(() => window.maintenanceBehavior.calls.length)).toBe(1);
+    await page.evaluate(() => {
+      window.maintenanceBehavior.finished = true;
+      window.maintenanceBehavior.complete({ status: "restarting" });
+    });
+    await expect(page.getByText(mode === "inspector"
+      ? "主进程注入已修复，Codex 已自动重启"
+      : "尚未确认主进程注入修复成功，请查看运行状态或失败提示", { exact: true }).first()).toBeVisible();
+    if (mode === "cli") await expect(page.getByText("主进程注入已修复，Codex 已自动重启", { exact: true })).not.toBeVisible();
+    else await expect(repair).toBeDisabled();
+    expect(await page.evaluate(() => window.maintenanceBehavior.calls.length)).toBe(1);
+  });
+}
+
+test("非 Windows CLI 回退不提供主进程修复", async ({ page }) => {
+  await openSettings(page, "repair_main_process_injection", "macos", "cli");
+  await page.getByRole("button", { name: /^系统优化（/ }).click();
+  await expect(page.getByRole("button", { name: "修复主进程注入", exact: true }).and(page.locator("button"))).toBeDisabled();
+  expect(await page.evaluate(() => window.maintenanceBehavior.calls.length)).toBe(0);
+});
 
 test("诊断清理接线保留忙碌锁，结果替换进行提示，关闭重开不复活旧提示", async ({ page }) => {
   await openSettings(page, "clear_diagnostic_storage");

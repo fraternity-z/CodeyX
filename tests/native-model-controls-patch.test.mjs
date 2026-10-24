@@ -832,7 +832,8 @@ test("starting or restarting Codex replaces the old runtime with one managed by 
   );
 
   assert.match(restartFlow, /runtime_operation\.lock\(\)/);
-  assert.match(restartFlow, /stop_codey_runtime_locked\(&restart_state\)/);
+  assert.match(restartFlow, /stop_runtime_for_restart_locked\(&restart_state\)/);
+  assert.match(restartFlow, /stop_codey_runtime_locked\(state\)\.await/);
   assert.match(restartFlow, /launch_codey_inner_locked\(&restart_state\)/);
   assert.match(restartFlow, /runtime_generation/);
   assert.match(restartFlow, /restart_task/);
