@@ -15,6 +15,7 @@ fn main() {
         "../tsconfig.json",
         "../.gitignore",
         "icons/Codey.ico",
+        "icons/Codey.png",
         "../scripts/build-overlay.mjs",
         "../scripts/build-output.mjs",
         "../scripts/overlay-build-cache.mjs",

@@ -9,6 +9,7 @@ const inputPaths = [
   "package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml",
   "scripts/build-overlay.mjs", "scripts/build-output.mjs", "scripts/overlay-build-cache.mjs",
   "scripts/startup-splash.mjs", "backend/src/codex_startup_splash.html",
+  "backend/icons/Codey.png",
   "node_modules/.modules.yaml", "node_modules/.pnpm/lock.yaml",
 ];
 const rootConfig = /^(?:vite(?:\.[\w-]+)?\.config\.[cm]?[jt]s|(?:postcss|tailwind)\.config\.[cm]?[jt]s|tsconfig(?:\.[\w-]+)?\.json|\.env(?:\..+)?|\.browserslistrc)$/;

@@ -21,6 +21,7 @@ function fixture(t) {
     "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches/example.patch",
     "scripts/build-overlay.mjs", "scripts/build-output.mjs", "scripts/overlay-build-cache.mjs",
     "scripts/startup-splash.mjs", "backend/src/codex_startup_splash.html", "public/startup-art/gpt-claude.webp",
+    "backend/icons/Codey.png",
     "node_modules/.pnpm/lock.yaml", "node_modules/.modules.yaml", ".gitignore",
   ]) write(name);
   const outputs = new Map([
@@ -64,6 +65,7 @@ for (const name of [
   "pnpm-lock.yaml", "pnpm-workspace.yaml", "patches/example.patch",
   "scripts/build-overlay.mjs", "scripts/build-output.mjs", "scripts/overlay-build-cache.mjs",
   "scripts/startup-splash.mjs", "backend/src/codex_startup_splash.html", "public/startup-art/gpt-claude.webp",
+  "backend/icons/Codey.png",
   "node_modules/.pnpm/lock.yaml", "node_modules/.modules.yaml", ".gitignore", ".env.production.local",
   "tsconfig.build.json", "postcss.config.cjs",
 ]) {

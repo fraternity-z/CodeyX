@@ -47,9 +47,11 @@
   const railHelpLabelPattern = /帮助|help/i;
   const railProfileLabelPattern = /个人资料|账户|账号|profile|account/i;
   const bootstrapProbeSelector = `${headerSelector}, ${sidebarSelector}, ${navigationRailSelector}`;
+  // 与 generate-app-icons.py 的 C / 提示符轮廓一致，入口保留宿主的单色主题。
   const settingsIcon = `
-    <svg viewBox="0 0 350 350" aria-hidden="true" focusable="false">
-      <path d="M70 301c-16 0-24-18-13-30l73-77c8-8 8-20 0-28L65 101C50 86 57 61 78 57c9-2 18 1 25 8l91 91c18 18 18 46 0 64l-66 66c-6 6-2 15 7 15h183" fill="none" stroke="currentColor" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"></path>
+    <svg viewBox="174 176 672 672" aria-hidden="true" focusable="false">
+      <polygon points="584,252 370,252 214,408 214,616 370,772 584,772 664,692 584,612 536,660 416,660 326,570 326,454 416,364 536,364 584,412 664,332"></polygon>
+      <polygon points="680,386 806,512 680,638 616,574 678,512 616,450"></polygon>
     </svg>
   `;
   let sessionToolsLoadPromise = null;
@@ -117,7 +119,7 @@
       #${buttonId}:hover { background: rgba(127, 127, 127, .14); opacity: 1; }
       #${buttonId}:active { transform: translateY(1px); }
       #${buttonId}:focus-visible { outline: 2px solid rgba(139, 151, 255, .72); outline-offset: 2px; }
-      #${buttonId} svg { display: block; flex: 0 0 auto; width: var(--codey-icon-size); height: var(--codey-icon-size); fill: none; stroke: var(--codey-icon-color); stroke-width: 22; stroke-linecap: round; stroke-linejoin: round; }
+      #${buttonId} svg { display: block; flex: 0 0 auto; width: var(--codey-icon-size); height: var(--codey-icon-size); fill: var(--codey-icon-color); stroke: none; }
       #${buttonId} .codey-settings-label { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
       #${buttonId} .codey-runtime-badge { position: absolute; top: -2px; right: -2px; display: grid; width: 13px; height: 13px; place-items: center; border: 2px solid Canvas; border-radius: 999px; background: #ff453a; color: #fff; font: 800 9px/1 -apple-system, BlinkMacSystemFont, sans-serif; opacity: 0; transform: scale(.65); transition: opacity .15s ease, transform .15s ease; pointer-events: none; }
       #${buttonId}[data-codey-runtime-state="unavailable"] { background: rgba(255, 69, 58, .12); color: #ff453a; opacity: 1; }
