@@ -1,178 +1,47 @@
-//! Connection selection happens before any application bytes enter a tunnel.
-use super::{
-    egress::prepare_hops,
-    model::NetworkProxyConfig,
-    routing::{FailureAction, ProxyAction, ProxyPolicy, ProxyTarget},
-    secrets::SecretStore,
-    tunnel::{Destination, FailureKind, Hop, Tunnel, TunnelConnector, TunnelError},
-};
-use std::{sync::Arc, time::Duration};
-use tokio::{net::TcpStream, sync::OnceCell, time::timeout};
+//! A selected node is the only explicit exit; failures never become direct traffic.
+use super::tunnel::{Destination, Hop, Tunnel, TunnelConnector, TunnelError};
 
-pub(super) struct FixedForwarder {
+pub(super) struct Forwarder {
     connector: TunnelConnector,
     hops: Vec<Hop>,
 }
-impl FixedForwarder {
-    async fn new(hops: Vec<Hop>) -> Result<Self, String> {
-        if hops.is_empty() {
-            return Err("代理链路为空，不能启动转发".into());
+
+impl Forwarder {
+    pub(super) async fn fixed(hops: Vec<Hop>) -> Result<Self, String> {
+        if hops.len() != 1 {
+            return Err("请选择一个代理节点；多跳链路已移除".into());
         }
         Ok(Self {
             connector: TunnelConnector::for_hops(&hops).await?,
             hops,
         })
     }
-}
-
-pub(super) enum Forwarder {
-    Fixed(FixedForwarder),
-    Policy {
-        pool: Arc<NetworkProxyConfig>,
-        policy: ProxyPolicy,
-        store: Arc<dyn SecretStore + Send + Sync>,
-        targets: Vec<(ProxyTarget, OnceCell<FixedForwarder>)>,
-    },
-}
-
-impl Forwarder {
-    pub(super) async fn fixed(hops: Vec<Hop>) -> Result<Self, String> {
-        Ok(Self::Fixed(FixedForwarder::new(hops).await?))
-    }
-    pub(super) fn policy(
-        pool: NetworkProxyConfig,
-        id: &str,
-        store: Arc<dyn SecretStore + Send + Sync>,
-    ) -> Result<Self, String> {
-        pool.validate()?;
-        let policy = pool.policy(id)?.clone();
-        if !policy.enabled {
-            return Err("出口策略已禁用，连接已阻断".into());
-        }
-        let mut targets = Vec::new();
-        for action in policy.actions() {
-            if let ProxyAction::Proxy {
-                targets: choices, ..
-            } = action
-            {
-                for target in choices {
-                    if !targets.iter().any(|(existing, _)| existing == target) {
-                        targets.push((target.clone(), OnceCell::new()));
-                    }
-                }
-            }
-        }
-        Ok(Self::Policy {
-            pool: Arc::new(pool),
-            policy,
-            store,
-            targets,
-        })
-    }
 
     pub(super) async fn connect(&self, destination: Destination) -> Result<Tunnel, TunnelError> {
-        let configuration = || TunnelError {
-            hop: 0,
-            kind: FailureKind::Configuration,
-        };
-        let destination =
-            Destination::new(&destination.host, destination.port).map_err(|_| configuration())?;
-        let Self::Policy {
-            pool,
-            policy,
-            store,
-            targets,
-        } = self
-        else {
-            let Self::Fixed(fixed) = self else {
-                unreachable!()
-            };
-            return fixed.connector.connect(&fixed.hops, destination).await;
-        };
-        timeout(Duration::from_secs(30), async {
-            match policy.action(&destination) {
-                ProxyAction::Block => Err(TunnelError {
-                    hop: 0,
-                    kind: FailureKind::Blocked,
-                }),
-                ProxyAction::Direct if policy.allow_direct => direct(destination).await,
-                ProxyAction::Direct => Err(configuration()),
-                ProxyAction::Proxy {
-                    targets: choices,
-                    on_failure,
-                } => {
-                    let mut last = configuration();
-                    for target in choices {
-                        let (_, cell) = targets
-                            .iter()
-                            .find(|(choice, _)| choice == target)
-                            .ok_or_else(configuration)?;
-                        let fixed = cell
-                            .get_or_try_init(|| async {
-                                let nodes = pool
-                                    .resolve(&target.selection())?
-                                    .ok_or("出口节点配置无效")?;
-                                FixedForwarder::new(prepare_hops(nodes, store.clone()).await?).await
-                            })
-                            .await
-                            .map_err(|_: String| configuration())?;
-                        match fixed
-                            .connector
-                            .connect(&fixed.hops, destination.clone())
-                            .await
-                        {
-                            Ok(tunnel) => return Ok(tunnel),
-                            Err(error) => {
-                                // Never turn a credential/certificate/configuration error into
-                                // weaker routing; only transport failures may change exits.
-                                let retryable = matches!(
-                                    error.kind,
-                                    FailureKind::Connect
-                                        | FailureKind::Timeout
-                                        | FailureKind::Dns
-                                        | FailureKind::Io
-                                        | FailureKind::Rejected
-                                );
-                                if !retryable || *on_failure == FailureAction::Stop {
-                                    return Err(error);
-                                }
-                                last = error;
-                            }
-                        }
-                    }
-                    if *on_failure == FailureAction::Direct && policy.allow_direct {
-                        direct(destination).await
-                    } else {
-                        Err(last)
-                    }
-                }
-            }
-        })
-        .await
-        .map_err(|_| TunnelError {
-            hop: 0,
-            kind: FailureKind::Timeout,
-        })?
+        self.connector.connect(&self.hops, destination).await
     }
-}
-
-async fn direct(destination: Destination) -> Result<Tunnel, TunnelError> {
-    let socket = timeout(
-        Duration::from_secs(5),
-        TcpStream::connect((destination.host.as_str(), destination.port)),
-    )
-    .await
-    .map_err(|_| TunnelError {
-        hop: 0,
-        kind: FailureKind::Timeout,
-    })?
-    .map_err(|_| TunnelError {
-        hop: 0,
-        kind: FailureKind::Connect,
-    })?;
-    let _ = socket.set_nodelay(true);
-    Ok(Box::new(socket))
 }
 
 #[cfg(test)]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn only_single_node_forwarding_is_supported() {
+        let hop = Hop {
+            node: serde_json::from_value(serde_json::json!({
+                "id":"node", "name":"Node", "enabled":true,
+                "endpoint":{"protocol":"http", "host":"127.0.0.1", "port":1080}
+            }))
+            .unwrap(),
+            credential: None,
+        };
+        assert!(Forwarder::fixed(vec![]).await.is_err());
+        assert!(
+            Forwarder::fixed(vec![hop.clone(), hop.clone()])
+                .await
+                .is_err()
+        );
+        assert!(Forwarder::fixed(vec![hop]).await.is_ok());
+    }
+}

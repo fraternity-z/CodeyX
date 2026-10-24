@@ -181,6 +181,8 @@ pub(crate) struct NetworkProxyConfig {
     /// preserves old behavior; it is never a fallback after a proxy failure.
     #[serde(default)]
     pub upstream_by_profile: std::collections::BTreeMap<String, ProxySelection>,
+    #[serde(default)]
+    pub upstream_enabled_by_profile: std::collections::BTreeMap<String, bool>,
     /// Applied to the next managed Codex launch, independently of model routes.
     #[serde(default)]
     pub process_proxy: ProxySelection,
@@ -201,6 +203,7 @@ impl Default for NetworkProxyConfig {
             chains: Vec::new(),
             policies: Vec::new(),
             upstream_by_profile: std::collections::BTreeMap::new(),
+            upstream_enabled_by_profile: std::collections::BTreeMap::new(),
             process_proxy: ProxySelection::Legacy,
             process_capture: false,
         }
@@ -222,45 +225,14 @@ impl NetworkProxyConfig {
                 return Err("代理节点 ID 重复".into());
             }
         }
-        let mut chain_ids = HashSet::new();
-        for chain in &self.chains {
-            validate_id(&chain.id)?;
-            if !chain_ids.insert(&chain.id) {
-                return Err("代理链路 ID 重复".into());
-            }
-            if chain.name.trim().is_empty() || chain.name.chars().count() > 80 {
-                return Err("链路名称必须为 1 到 80 个字符".into());
-            }
-            if chain.node_ids.is_empty() || chain.node_ids.len() > MAX_CHAIN_HOPS {
-                return Err("代理链路需要 1 到 3 个上游节点".into());
-            }
-            let mut endpoints = HashSet::new();
-            for (index, id) in chain.node_ids.iter().enumerate() {
-                let node = self.node(id)?;
-                let url = node.endpoint.url()?;
-                let host = url
-                    .host_str()
-                    .unwrap()
-                    .trim_end_matches('.')
-                    .to_ascii_lowercase();
-                let host = parsed_ip(&host).map(|ip| ip.to_string()).unwrap_or(host);
-                if !endpoints.insert((host.clone(), node.endpoint.port)) {
-                    return Err("代理链路不能重复经过同一端点".into());
-                }
-                if index > 0
-                    && (host == "localhost"
-                        || host.ends_with(".localhost")
-                        || parsed_ip(&host).is_some_and(|ip| ip.is_loopback()))
-                {
-                    return Err("回环代理只能作为第一跳，后续节点的回环地址不代表本机".into());
-                }
-            }
-        }
-        super::routing::validate_policies(self)?;
-        if self.upstream_by_profile.len() > 256 {
+        if self.upstream_by_profile.len() > 256 || self.upstream_enabled_by_profile.len() > 256 {
             return Err("最多支持 256 条线路的上游选择".into());
         }
-        for (profile, selection) in &self.upstream_by_profile {
+        for profile in self
+            .upstream_by_profile
+            .keys()
+            .chain(self.upstream_enabled_by_profile.keys())
+        {
             if profile.is_empty()
                 || profile.len() > 256
                 || profile.trim() != profile
@@ -268,11 +240,25 @@ impl NetworkProxyConfig {
             {
                 return Err("上游代理的线路标识无效".into());
             }
-            self.validate_selection_reference(selection)?;
+        }
+        for (profile, selection) in &self.upstream_by_profile {
+            if self.upstream_enabled(profile) {
+                self.validate_selection_reference(selection)?;
+            }
+        }
+        for (profile, enabled) in &self.upstream_enabled_by_profile {
+            if *enabled
+                && matches!(
+                    self.upstream_by_profile.get(profile),
+                    None | Some(ProxySelection::Legacy)
+                )
+            {
+                return Err("开启线路代理前请选择代理池节点".into());
+            }
         }
         self.validate_selection_reference(&self.process_proxy)?;
         if self.process_capture && !self.has_process_proxy() {
-            return Err("启用流量接管前请选择代理池出口或链路".into());
+            return Err("启用流量接管前请选择代理池节点".into());
         }
         Ok(())
     }
@@ -286,14 +272,7 @@ impl NetworkProxyConfig {
             ProxySelection::Node { id } => {
                 self.node(id)?;
             }
-            ProxySelection::Chain { id } => {
-                if !self.chains.iter().any(|chain| &chain.id == id) {
-                    return Err("所选代理链路不存在，请先调整线路或启动出口引用".into());
-                }
-            }
-            ProxySelection::Policy { id } => {
-                self.policy(id)?;
-            }
+            ProxySelection::Chain { .. } | ProxySelection::Policy { .. } => {}
         }
         Ok(())
     }
@@ -302,45 +281,40 @@ impl NetworkProxyConfig {
         !matches!(self.process_proxy, ProxySelection::Legacy)
     }
 
-    pub(crate) fn policy(&self, id: &str) -> Result<&super::routing::ProxyPolicy, String> {
-        self.policies
-            .iter()
-            .find(|policy| policy.id == id)
-            .ok_or_else(|| "出口策略不存在，请先调整引用".into())
-    }
-
     pub(crate) fn validate_active_selection(
         &self,
         selection: &ProxySelection,
     ) -> Result<(), String> {
-        if let ProxySelection::Policy { id } = selection {
-            self.validate()?;
-            if !self.policy(id)?.enabled {
-                return Err("出口策略已禁用，连接已阻断".into());
-            }
-        } else {
-            self.resolve(selection)?;
-        }
+        self.resolve(selection)?;
         Ok(())
     }
 
     pub(crate) fn uses_pool(&self, profile: &str) -> bool {
-        self.upstream_by_profile
-            .get(profile)
-            .is_some_and(|selection| !matches!(selection, ProxySelection::Legacy))
+        self.upstream_enabled(profile)
+            && self
+                .upstream_by_profile
+                .get(profile)
+                .is_some_and(|selection| !matches!(selection, ProxySelection::Legacy))
     }
 
     pub(crate) fn has_upstream_bindings(&self) -> bool {
         self.upstream_by_profile
-            .values()
-            .any(|selection| !matches!(selection, ProxySelection::Legacy))
+            .keys()
+            .any(|profile| self.uses_pool(profile))
+    }
+
+    pub(crate) fn upstream_enabled(&self, profile: &str) -> bool {
+        self.upstream_enabled_by_profile
+            .get(profile)
+            .copied()
+            .unwrap_or(true)
     }
 
     pub(crate) fn node(&self, id: &str) -> Result<&ProxyNode, String> {
         self.nodes
             .iter()
             .find(|node| node.id == id)
-            .ok_or_else(|| "代理节点不存在或仍被链路引用，请先调整引用".into())
+            .ok_or_else(|| "代理节点不存在，请重新选择节点".into())
     }
 
     /// Only an explicit Legacy selection may return None. A missing/disabled node
@@ -352,10 +326,10 @@ impl NetworkProxyConfig {
         self.resolve_nodes(selection, false)
     }
 
-    /// A manual diagnostic may inspect a disabled node/chain without enabling it.
+    /// A manual diagnostic may inspect a disabled node without enabling it.
     pub(crate) fn test_nodes(&self, selection: &ProxySelection) -> Result<Vec<ProxyNode>, String> {
         self.resolve_nodes(selection, true)?
-            .ok_or_else(|| "请指定要测试的代理节点或链路".into())
+            .ok_or_else(|| "请指定要测试的代理节点".into())
     }
 
     fn resolve_nodes(
@@ -366,21 +340,12 @@ impl NetworkProxyConfig {
         self.validate()?;
         let ids = match selection {
             ProxySelection::Legacy => return Ok(None),
-            ProxySelection::Policy { .. } => {
-                return Err("出口策略需要根据目标地址选择，不能作为固定节点测试".into());
+            ProxySelection::Policy { .. } | ProxySelection::Chain { .. } => {
+                return Err(
+                    "代理策略和多跳链路已移除，请重新选择节点或关闭线路代理开关；连接已阻断".into(),
+                );
             }
             ProxySelection::Node { id } => vec![id],
-            ProxySelection::Chain { id } => {
-                let chain = self
-                    .chains
-                    .iter()
-                    .find(|chain| &chain.id == id)
-                    .ok_or("代理链路不存在")?;
-                if !allow_disabled && !chain.enabled {
-                    return Err("代理链路已禁用，连接已阻断".into());
-                }
-                chain.node_ids.iter().collect()
-            }
         };
         let nodes = ids
             .into_iter()

@@ -4,9 +4,7 @@ import { createControllerHarness, deferred, installControllerWindow } from "./he
 import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 
 const state = createModuleGraph(new URL("../src/features/network-proxy/state.ts", import.meta.url)).exports;
-const chains = createModuleGraph(new URL("../src/features/network-proxy/chains.ts", import.meta.url)).exports;
 const upstream = createModuleGraph(new URL("../src/features/network-proxy/upstream.ts", import.meta.url)).exports;
-const policies = createModuleGraph(new URL("../src/features/network-proxy/policies.ts", import.meta.url)).exports;
 const processProxy = createModuleGraph(new URL("../src/features/network-proxy/process.ts", import.meta.url)).exports;
 const node = (id = "one") => ({ id, name: id, endpoint: { protocol: "socks5", host: `${id}.example`, port: 1080, dns: "remote" },
   credentialRef: null, notes: "", enabled: false, tags: [], group: "" });
@@ -14,57 +12,8 @@ const pool = (...nodes) => ({ schemaVersion: 1, nodes, chains: [] });
 const probe = (value, elapsedMs = 20) => ({ node: value, result: { nodeId: value.id, success: true, elapsedMs,
   testedAt: "2026-10-17T00:00:00Z", exitIp: "203.0.113.5", errorCode: null, message: "fixture" } });
 
-test("出口策略默认阻断且不启用，直连需要显式授权，保留规则顺序与固定出口", () => {
-  const initial = pool({ ...node(), enabled: true });
-  const draft = { ...policies.policyDraft("work"), name: "按需出口" };
-  assert.equal(draft.enabled, false); assert.equal(draft.allowDirect, false); assert.equal(draft.defaultAction.kind, "block");
-  const rule = { ...policies.ruleDraft("rule"), host: { kind: "suffix", value: "example.com" }, ports: "80, 443",
-    action: { kind: "proxy", targets: [{ kind: "node", id: "one" }], onFailure: "stop" } };
-  const saved = policies.preparePolicySave(initial, { ...draft, rules: [rule], defaultAction: { kind: "block" } });
-  assert.deepEqual(saved.policies[0].rules[0].ports, [80, 443]);
-  assert.equal(saved.processProxy, undefined); assert.equal(saved.upstreamByProfile, undefined);
-  assert.deepEqual(saved.nodes, initial.nodes); assert.deepEqual(draft.rules, []);
-  for (const action of [{ kind: "direct" }, { kind: "proxy", targets: [{ kind: "node", id: "one" }], onFailure: "direct" }]) {
-    assert.throws(() => policies.preparePolicySave(initial, { ...draft, defaultAction: action }), /勾选/);
-    assert.equal(policies.preparePolicySave(initial, { ...draft, defaultAction: action, allowDirect: true }).policies[0].allowDirect, true);
-    assert.throws(() => policies.preparePolicySave(initial, { ...draft, rules: [{ ...rule, enabled: false, action }] }), /勾选/);
-  }
-  assert.throws(() => policies.preparePolicySave(saved, draft), /修改或删除/);
-  assert.throws(() => state.removeNodes(saved, ["one"]), /策略引用/);
-});
 
-test("出口规则校验 CIDR、端口、主机与候选引用，不静默更改用户输入", () => {
-  const initial = { ...pool(node()), chains: [{ id: "chain", name: "chain", nodeIds: ["one"], enabled: false }] };
-  const draft = { ...policies.policyDraft("work"), name: "工作" };
-  const rule = policies.ruleDraft("rule");
-  for (const value of ["10.0.0.0/8", "0.0.0.0/0", "2001:db8::/32", "::/0", "::1/128", "::ffff:192.0.2.1/128"])
-    assert.equal(policies.validatePolicyDraft(initial, { ...draft, rules: [{ ...rule, host: { kind: "cidr", value } }] }), "", value);
-  for (const value of ["10.1.0.1/8", "::1/0", "::/129", "10.0.0.0/33", "host/8", "127.01.0.1/32"])
-    assert.match(policies.validatePolicyDraft(initial, { ...draft, rules: [{ ...rule, host: { kind: "cidr", value } }] }), /网段/);
-  for (const ports of ["0", "65536", "443,", "443,443", "1e3", "1.5", "80,,443"])
-    assert.match(policies.validatePolicyDraft(initial, { ...draft, rules: [{ ...rule, host: { kind: "any" }, ports }] }), /端口/);
-  for (const value of ["*.example.com", "http://host", "user@host", "host/path", " "])
-    assert.notEqual(policies.validatePolicyDraft(initial, { ...draft, rules: [{ ...rule, host: { kind: "exact", value } }] }), "");
-  const candidate = { kind: "chain", id: "chain" };
-  const current = policies.preparePolicySave(initial, { ...draft, defaultAction: { kind: "proxy", targets: [candidate], onFailure: "stop" } });
-  assert.throws(() => upstream.removeChain(current, "chain"), /策略引用/);
-  assert.throws(() => policies.preparePolicySave(initial, { ...draft, defaultAction: { kind: "proxy", targets: [candidate, candidate], onFailure: "next" } }), /唯一/);
-  assert.throws(() => policies.preparePolicySave(initial, { ...draft, defaultAction: { kind: "proxy", targets: [{ kind: "node", id: "missing" }], onFailure: "stop" } }), /已存在/);
-});
 
-test("出口策略引用保护与禁用行为适用于启动和线路，解除引用后才可删除", () => {
-  const draft = { ...policies.policyDraft("work"), name: "策略", enabled: true };
-  const current = policies.preparePolicySave(pool(), draft);
-  const selected = { kind: "policy", id: "work" };
-  assert.deepEqual(upstream.parseSelection(upstream.selectionKey(selected)), selected);
-  assert.equal(upstream.upstreamLabel(current, selected), "策略");
-  for (const next of [{ ...current, processProxy: selected }, { ...current, upstreamByProfile: { route: selected } }])
-    assert.throws(() => policies.removePolicy(next, "work"), /出口引用/);
-  assert.equal(policies.removePolicy(current, "work").policies.length, 0);
-  const disabled = { ...current, policies: [{ ...current.policies[0], enabled: false }] };
-  assert.match(upstream.upstreamProblem(disabled, selected), /禁用.*阻断/);
-  assert.throws(() => processProxy.prepareProcessProxySave(disabled, { original: { kind: "legacy" }, selection: selected }, true), /禁用/);
-});
 
 test("代理草稿校验地址、端口、UTF-8 凭据和标签，凭据与普通配置分离", () => {
   const draft = { ...state.proxyDraft("new"), name: "固定出口", host: "2001:db8::1", authentication: "replace", username: " user ", password: " fake-secret " };
@@ -86,7 +35,7 @@ test("代理草稿校验地址、端口、UTF-8 凭据和标签，凭据与普�
   assert.equal(https.config.nodes[0].endpoint.dns, "remote");
 });
 
-test("编辑冲突与被链路引用的删除均拒绝，不覆盖其他节点", () => {
+test("编辑冲突拒绝保存，旧链路数据不再限制节点管理", () => {
   const original = { ...node(), credentialRef: "saved-reference" };
   const current = pool(original, node("two"));
   const draft = { ...state.proxyDraft(original.id, original), name: "updated" };
@@ -97,7 +46,7 @@ test("编辑冲突与被链路引用的删除均拒绝，不覆盖其他节点",
   assert.deepEqual(result.config.nodes[1], current.nodes[1]);
   assert.throws(() => state.prepareNodeSave(pool({ ...original, name: "changed elsewhere" }), draft), /修改或删除/);
   assert.throws(() => state.prepareNodeSave(pool(), draft), /修改或删除/);
-  assert.throws(() => state.removeNodes({ ...current, chains: [{ id: "chain", nodeIds: [original.id] }] }, [original.id]), /引用/);
+  assert.equal(state.removeNodes({ ...current, chains: [{ id: "chain", nodeIds: [original.id] }] }, [original.id]).chains.length, 1);
   assert.deepEqual(state.removeNodes(current, [original.id]).nodes, [current.nodes[1]]);
 });
 
@@ -131,23 +80,6 @@ function fixture(initial = pool(node()), capabilities = {}) {
   return { ...h, options, calls, adopted, snapshot, render, ready };
 }
 
-test("策略编辑与其他写入互斥，保存失败保留规则和授权草稿，旧结果不覆盖状态", async t => {
-  installControllerWindow(t);
-  const policy = { id: "work", name: "原策略", enabled: true, allowDirect: false, rules: [], defaultAction: { kind: "block" } };
-  const h = fixture({ ...pool(node()), policies: [policy] });
-  (await h.ready()).openPolicy("work"); h.render().changePolicy("name", "新策略");
-  h.render().openProcess(); h.render().openNode("one");
-  assert.equal(h.render().processDraft, null); assert.equal(h.render().draft, null);
-  const before = h.calls.length; await h.render().setEnabled(["one"], true); assert.equal(h.calls.length, before);
-  let work = h.render().savePolicy(); await h.render().savePolicy(); assert.equal(h.calls.length, before + 1);
-  h.calls.at(-1).reject(new Error("save failed")); await work; await h.flush();
-  assert.equal(h.render().policyDraft.name, "新策略"); assert.equal(h.render().policyDraft.allowDirect, false);
-  h.render().refresh(); h.render(); h.calls.at(-1).resolve(h.snapshot()); await h.flush();
-  work = h.render().savePolicy(); h.options.active = false; h.render();
-  h.calls.at(-1).resolve(h.snapshot(2, h.calls.at(-1).args.config)); await work; await h.flush();
-  assert.equal(h.render().policyDraft.name, "新策略"); assert.equal(h.options.config.settingsRevision, 1);
-  h.unmount(); assert.equal(h.writesAfterUnmount, 0);
-});
 
 test("代理池只在电脑端活动页面加载，旧读取在隐藏重开后失效", async t => {
   installControllerWindow(t);
@@ -218,72 +150,13 @@ test("测试结果不可用时替换旧成功和出口 IP，允许手动重试�
   h.unmount();
 });
 
-test("链路保存保持顺序，拒绝重复端点、回环后继、缺失引用和过期草稿", () => {
-  const local = { ...node("local"), endpoint: { ...node().endpoint, host: "127.1" } };
-  const current = pool(local, node("exit"));
-  const draft = { ...chains.chainDraft("chain"), name: "本地到出口", nodeIds: ["local", "exit"] };
-  const saved = chains.prepareChainSave(current, draft);
-  assert.deepEqual(saved.nodes, current.nodes);
-  assert.deepEqual(saved.chains[0].nodeIds, ["local", "exit"]);
-  assert.equal(saved.chains[0].enabled, false);
-  for (const nodeIds of [[], ["missing"], ["local", "local"], ["local", "exit", "local", "exit"]])
-    assert.notEqual(chains.validateChainDraft(current, { ...draft, nodeIds }), "");
-  assert.match(chains.validateChainDraft(current, { ...draft, nodeIds: ["exit", "local"] }), /回环/);
-  const duplicate = { ...node("duplicate"), endpoint: { ...node("exit").endpoint, protocol: "https", host: "EXIT.EXAMPLE." } };
-  assert.match(chains.validateChainDraft(pool(node("exit"), duplicate), { ...draft, nodeIds: ["exit", "duplicate"] }), /同一端点/);
-  assert.throws(() => chains.prepareChainSave({ ...saved, chains: [] }, { ...draft, original: saved.chains[0] }), /修改或删除/);
-  const moved = chains.moveChainNode(draft.nodeIds, 1, -1);
-  assert.deepEqual(moved, ["exit", "local"]); assert.deepEqual(draft.nodeIds, ["local", "exit"]);
-  assert.equal(chains.moveChainNode(draft.nodeIds, 0, -1), draft.nodeIds);
-  const result = { ...probe(local).result, chainId: "chain" };
-  const probes = { chain: { chain: saved.chains[0], nodes: saved.nodes, result } };
-  assert.equal(chains.currentChainProbe(saved, saved.chains[0], probes).stale, false);
-  assert.equal(chains.currentChainProbe({ ...saved, nodes: [local, { ...node("exit"), credentialRef: "rotated" }] }, saved.chains[0], probes).stale, true);
-  assert.equal(chains.currentChainProbe(saved, { ...saved.chains[0], nodeIds: moved }, probes).stale, true);
-});
 
-test("链路编辑与节点写入互斥，保存失败保留草稿，刷新后仍需手动提交", async t => {
-  installControllerWindow(t);
-  const initial = { ...pool(node("one"), node("two")), chains: [{ id: "chain", name: "双跳", enabled: false, nodeIds: ["one", "two"] }] };
-  const h = fixture(initial); (await h.ready()).openChain("chain");
-  h.render().changeChainDraft("name", "新名称"); h.render().moveHop(1, -1);
-  const calls = h.calls.length;
-  await h.render().setEnabled(["one"], true); h.render().openNode("one"); h.render().requestDelete(["one"]);
-  assert.equal(h.calls.length, calls); assert.equal(h.render().draft, null); assert.deepEqual(h.render().deleteIds, []);
-  let work = h.render().saveChainDraft(); await h.render().saveChainDraft();
-  assert.equal(h.calls.length, calls + 1); assert.deepEqual(h.calls.at(-1).args.config.chains[0].nodeIds, ["two", "one"]);
-  h.calls.at(-1).reject(new Error("版本冲突")); await work; await h.flush();
-  assert.equal(h.render().chainDraft.name, "新名称"); assert.equal(h.render().ready, false);
-  h.render().refresh(); h.render(); h.calls.at(-1).resolve(h.snapshot()); await h.flush();
-  work = h.render().saveChainDraft(); const next = h.calls.at(-1).args.config;
-  h.calls.at(-1).resolve(h.snapshot(2, next)); await work; await h.flush();
-  assert.equal(h.render().chainDraft, null); assert.equal(h.render().pool.nodes[0].enabled, false);
-  h.render().requestDeleteChain("chain"); h.render().cancelDeleteChain();
-  assert.equal(h.render().deleteChainId, null);
-  h.render().requestDeleteChain("chain"); work = h.render().confirmDeleteChain();
-  const removed = h.calls.at(-1).args.config; assert.deepEqual(removed.nodes, initial.nodes); assert.deepEqual(removed.chains, []);
-  h.calls.at(-1).resolve(h.snapshot(3, removed)); await work; h.unmount();
-});
 
-test("链路测试不改变启用状态，凭据错误清除旧出口，隐藏后丢弃迟到结果", async t => {
-  installControllerWindow(t);
-  const initial = { ...pool(node()), chains: [{ id: "chain", name: "单跳", enabled: false, nodeIds: ["one"] }] };
-  const h = fixture(initial); let work = (await h.ready()).testChain("chain");
-  assert.deepEqual(h.calls.at(-1).args, { chainId: "chain" });
-  const result = { chain: initial.chains[0], nodes: initial.nodes, result: { ...probe(node()).result, chainId: "chain" } };
-  h.calls.at(-1).resolve(result); await work; await h.flush();
-  assert.equal(h.render().chainRows[0].probe.exitIp, "203.0.113.5"); assert.equal(h.render().pool.chains[0].enabled, false);
-  work = h.render().testChain("chain"); h.calls.at(-1).reject(new Error("凭据不可用")); await work; await h.flush();
-  assert.equal(h.render().chainRows[0].probe.exitIp, null); assert.equal(h.render().chainRows[0].probe.errorCode, "resultUnavailable");
-  work = h.render().testChain("chain"); h.options.active = false; h.render();
-  h.calls.at(-1).resolve(result); await work; await h.flush();
-  assert.equal(h.render().chainRows[0].probe.exitIp, null); h.unmount();
-});
 
 test("上游固定选择保护引用，拒绝禁用节点和不支持模式，解除选择需显式保存", () => {
   const current = { ...pool({ ...node(), enabled: true }), chains: [{ id: "chain", name: "出口", enabled: true, nodeIds: ["one"] }] };
   const profiles = [{ id: "route" }];
-  const draft = { profileId: "route", original: { kind: "legacy" }, selection: { kind: "node", id: "one" } };
+  const draft = { profileId: "route", original: { kind: "legacy" }, selection: { kind: "node", id: "one" }, originalEnabled: false, enabled: true };
   const selected = upstream.prepareUpstreamSave(current, draft, profiles, true);
   assert.deepEqual(selected.upstreamByProfile.route, draft.selection);
   assert.throws(() => state.removeNodes(selected, ["one"]), /引用/);
@@ -292,21 +165,67 @@ test("上游固定选择保护引用，拒绝禁用节点和不支持模式，�
   assert.throws(() => upstream.prepareUpstreamSave(current, draft, [], true), /当前不可用/);
   assert.throws(() => upstream.prepareUpstreamSave(current, draft, [{ id: "route", pluginRouteSpec: { transport: {} } }], true), /自行联网/);
   assert.throws(() => upstream.prepareUpstreamSave(pool(node()), draft, profiles, true), /禁用/);
-  const chainSelected = upstream.prepareUpstreamSave(current, { ...draft, selection: { kind: "chain", id: "chain" } }, profiles, true);
-  assert.throws(() => upstream.removeChain(chainSelected, "chain"), /引用/);
+  assert.throws(() => upstream.prepareUpstreamSave(current, { ...draft, selection: { kind: "chain", id: "chain" } }, profiles, true), /已移除/);
   assert.match(upstream.upstreamProblem({ ...selected, nodes: [] }, draft.selection), /阻断/);
-  const cleared = upstream.prepareUpstreamSave(selected, { ...draft, original: draft.selection, selection: { kind: "legacy" } }, [], false);
-  assert.deepEqual(cleared.upstreamByProfile, {});
+  const cleared = upstream.prepareUpstreamSave(selected, { ...draft, original: draft.selection, originalEnabled: true, enabled: false }, [], false);
+  assert.deepEqual(cleared.upstreamByProfile, selected.upstreamByProfile);
+  assert.equal(cleared.upstreamEnabledByProfile.route, false);
   assert.deepEqual(selected.upstreamByProfile.route, draft.selection);
-  for (const selection of [{ kind: "legacy" }, { kind: "node", id: "a:b" }, { kind: "chain", id: "chain" }])
+  for (const selection of [{ kind: "legacy" }, { kind: "node", id: "a:b" }])
     assert.deepEqual(upstream.parseSelection(upstream.selectionKey(selection)), selection);
   assert.throws(() => upstream.parseSelection("automatic"), /无效/);
+  assert.throws(() => upstream.parseSelection("chain:chain"), /无效/);
+  assert.throws(() => upstream.parseSelection("policy:policy"), /无效/);
+});
+
+test("线路开关默认关闭，兼容已有绑定，关闭与重开保留节点和旧配置", () => {
+  const selection = { kind: "node", id: "one" };
+  const initial = { ...pool({ ...node(), enabled: true }), policies: [{ id: "old" }], upstreamByProfile: { route: selection } };
+  assert.equal(upstream.upstreamEnabled(pool(), "route"), false);
+  assert.equal(upstream.upstreamEnabled(initial, "route"), true);
+  const draft = { profileId: "route", original: selection, selection, originalEnabled: true, enabled: false };
+  const disabled = upstream.prepareUpstreamSave(initial, draft, [], false);
+  assert.equal(upstream.upstreamEnabled(disabled, "route"), false);
+  assert.deepEqual(disabled.upstreamByProfile, initial.upstreamByProfile);
+  assert.deepEqual(disabled.policies, initial.policies);
+  assert.throws(() => state.removeNodes(initial, ["one"]), /引用/);
+  const removed = state.removeNodes(disabled, ["one"]);
+  assert.deepEqual(removed.nodes, []);
+  assert.deepEqual(removed.upstreamByProfile, disabled.upstreamByProfile);
+  assert.throws(() => upstream.prepareUpstreamSave(removed, { ...draft, originalEnabled: false, enabled: true }, [{ id: "route" }], true), /缺失/);
+  assert.throws(() => state.removeNodes({ ...disabled, upstreamByProfile: { ...disabled.upstreamByProfile, other: selection } }, ["one"]), /引用/);
+  const enabled = upstream.prepareUpstreamSave(disabled, { ...draft, originalEnabled: false, enabled: true }, [{ id: "route" }], true);
+  assert.equal(upstream.upstreamEnabled(enabled, "route"), true);
+  assert.deepEqual(enabled.upstreamByProfile, initial.upstreamByProfile);
+  assert.throws(() => upstream.prepareUpstreamSave(disabled, draft, [], false), /开关.*其他操作/);
+  const oldSelection = { kind: "policy", id: "old" };
+  const old = { ...initial, upstreamByProfile: { route: oldSelection } };
+  assert.match(upstream.upstreamProblem(old, oldSelection), /已移除.*阻断/);
+  assert.equal(upstream.prepareUpstreamSave(old, { ...draft, original: oldSelection, selection: oldSelection }, [], false).upstreamEnabledByProfile.route, false);
+});
+
+test("线路开关保存失败保留草稿，刷新后显式保存，隐藏期间不回写", async t => {
+  installControllerWindow(t);
+  const h = fixture(pool({ ...node(), enabled: true }));
+  (await h.ready()).openUpstream("route", true); h.render().changeUpstream("node:one");
+  let work = h.render().saveUpstream();
+  h.calls.at(-1).reject(new Error("save failed")); await work; await h.flush();
+  assert.equal(h.render().upstreamDraft.enabled, true); assert.equal(h.render().upstreamDraft.selection.id, "one");
+  assert.equal(h.render().ready, false);
+  h.render().refresh(); h.render(); h.calls.at(-1).resolve(h.snapshot()); await h.flush();
+  work = h.render().saveUpstream(); h.calls.at(-1).resolve(h.snapshot(2, h.calls.at(-1).args.config)); await work; await h.flush();
+  h.render().openUpstream("route", false);
+  assert.equal(h.render().upstreamDraft.selection.id, "one");
+  work = h.render().saveUpstream(); h.options.active = false; h.render();
+  h.calls.at(-1).resolve(h.snapshot(3, h.calls.at(-1).args.config)); await work; await h.flush();
+  assert.equal(h.render().upstreamDraft.enabled, false); assert.equal(h.options.config.settingsRevision, 2);
+  h.unmount();
 });
 
 test("出口选择保存与其他编辑互斥，禁用节点后保留选择并显示阻断", async t => {
   installControllerWindow(t);
   const h = fixture(pool({ ...node(), enabled: true }));
-  (await h.ready()).openUpstream("route");
+  (await h.ready()).openUpstream("route", true);
   h.render().changeUpstream("node:one");
   h.render().openNode("one");
   assert.equal(h.render().draft, null);
@@ -329,62 +248,61 @@ test("导入标识与对象原型同名时，出口选择和测试结果仍按�
   for (const id of ["__proto__", "constructor", "toString"]) {
     const current = { ...pool({ ...node(id), enabled: true }), upstreamByProfile: {} };
     const selection = { kind: "node", id };
-    const draft = { profileId: id, original: { kind: "legacy" }, selection };
+    const draft = { profileId: id, original: { kind: "legacy" }, selection, originalEnabled: false, enabled: true };
     assert.deepEqual(upstream.selectedUpstream(current, id), { kind: "legacy" });
     const selected = upstream.prepareUpstreamSave(current, draft, [{ id }], true);
     const restored = JSON.parse(JSON.stringify(selected));
     assert.equal(Object.prototype.hasOwnProperty.call(restored.upstreamByProfile, id), true);
     assert.deepEqual(upstream.selectedUpstream(restored, id), selection);
     assert.equal(Object.getPrototypeOf(selected.upstreamByProfile), Object.prototype);
-    const cleared = upstream.prepareUpstreamSave(restored, { ...draft, original: selection, selection: { kind: "legacy" } }, [], false);
-    assert.deepEqual(upstream.selectedUpstream(cleared, id), { kind: "legacy" });
-    assert.equal(Object.prototype.hasOwnProperty.call(cleared.upstreamByProfile, id), false);
+    const cleared = upstream.prepareUpstreamSave(restored, { ...draft, original: selection, originalEnabled: true, enabled: false }, [], false);
+    assert.deepEqual(upstream.selectedUpstream(cleared, id), selection);
+    assert.equal(upstream.upstreamEnabled(cleared, id), false);
     assert.equal(state.currentProbe(current.nodes[0], {}), null);
     const ownProbe = { [id]: probe(current.nodes[0]) };
     assert.equal(state.currentProbe(current.nodes[0], ownProbe).stale, false);
-    const chain = { id, name: id, enabled: true, nodeIds: [id] };
-    assert.equal(chains.currentChainProbe(current, chain, {}), null);
-    const chainProbes = { [id]: { chain, nodes: current.nodes, result: { ...probe(current.nodes[0]).result, chainId: id } } };
-    assert.equal(chains.currentChainProbe(current, chain, chainProbes).stale, false);
   }
 });
 
 test("启动出口独立于线路配置，拒绝禁用或缺失出口，解除选择须显式保存", () => {
   const current = { ...pool({ ...node(), enabled: true }), chains: [{ id: "chain", name: "出口", enabled: true, nodeIds: ["one"] }], upstreamByProfile: { route: { kind: "node", id: "one" } } };
-  const draft = { original: { kind: "legacy" }, selection: { kind: "chain", id: "chain" } };
+  const draft = { original: { kind: "legacy" }, selection: { kind: "node", id: "one" }, enabled: true };
   assert.deepEqual(processProxy.selectedProcessProxy(current), draft.original);
   const next = processProxy.prepareProcessProxySave(current, draft, true);
   assert.deepEqual(next.processProxy, draft.selection);
   assert.deepEqual(next.upstreamByProfile, current.upstreamByProfile);
-  assert.throws(() => upstream.removeChain(next, "chain"), /启动出口/);
+  assert.throws(() => processProxy.prepareProcessProxySave(current, { ...draft, selection: { kind: "chain", id: "chain" } }, true), /已移除/);
   assert.throws(() => processProxy.prepareProcessProxySave(next, draft, true), /其他操作/);
   assert.throws(() => processProxy.prepareProcessProxySave(current, draft, false), /宿主/);
-  assert.throws(() => processProxy.prepareProcessProxySave({ ...current, chains: [] }, draft, true), /阻断/);
+  assert.throws(() => processProxy.prepareProcessProxySave({ ...current, nodes: [] }, draft, true), /阻断/);
   assert.throws(() => processProxy.prepareProcessProxySave(pool(node()), { ...draft, selection: { kind: "node", id: "one" } }, true), /禁用/);
   assert.throws(() => state.removeNodes({ ...current, upstreamByProfile: {}, processProxy: { kind: "node", id: "one" } }, ["one"]), /启动出口/);
-  const cleared = processProxy.prepareProcessProxySave(next, { original: draft.selection, selection: draft.original }, false);
+  assert.throws(() => processProxy.prepareProcessProxySave(current, { ...draft, selection: draft.original }, true), /请选择代理池节点/);
+  const cleared = processProxy.prepareProcessProxySave(next, { original: draft.selection, selection: draft.selection, enabled: false }, false);
   assert.equal(cleared.processProxy, undefined);
   assert.deepEqual(cleared.upstreamByProfile, current.upstreamByProfile);
 });
 
 test("流量接管必须显式启用，校验宿主、出口和过期草稿", () => {
   const current = pool({ ...node(), enabled: true });
-  const draft = { original: { kind: "legacy" }, selection: { kind: "node", id: "one" } };
+  const draft = { original: { kind: "legacy" }, selection: { kind: "node", id: "one" }, enabled: true };
   assert.equal(processProxy.prepareProcessProxySave(current, draft, true, true).processCapture, undefined);
   assert.throws(() => processProxy.prepareProcessProxySave(current, { ...draft, capture: true }, true), /Windows/);
-  assert.throws(() => processProxy.prepareProcessProxySave(current, { ...draft, selection: draft.original, capture: true }, true, true), /出口/);
+  assert.throws(() => processProxy.prepareProcessProxySave(current, { ...draft, selection: draft.original, capture: true }, true, true), /请选择代理池节点/);
   const saved = processProxy.prepareProcessProxySave(current, { ...draft, capture: true }, true, true);
   assert.equal(saved.processCapture, true);
-  assert.throws(() => processProxy.prepareProcessProxySave(saved, { original: draft.selection, selection: draft.selection }, true, true), /其他操作/);
-  const disabled = processProxy.prepareProcessProxySave(saved, { original: draft.selection, selection: draft.selection, originalCapture: true, capture: false }, true, false);
+  assert.throws(() => processProxy.prepareProcessProxySave(saved, { original: draft.selection, selection: draft.selection, enabled: true }, true, true), /其他操作/);
+  const disabled = processProxy.prepareProcessProxySave(saved, { original: draft.selection, selection: draft.selection, enabled: true, originalCapture: true, capture: false }, true, false);
   assert.equal(disabled.processCapture, undefined);
   assert.deepEqual(disabled.processProxy, draft.selection);
+  const off = processProxy.prepareProcessProxySave(saved, { ...draft, original: draft.selection, originalCapture: true, capture: true, enabled: false }, false, false);
+  assert.equal(off.processProxy, undefined); assert.equal(off.processCapture, undefined);
 });
 
 test("接管勾选不立即启动服务，保存失败和隐藏保留草稿，解除池选择会关闭接管", async t => {
   installControllerWindow(t);
   const h = fixture(pool({ ...node(), enabled: true }), { trafficCaptureSupported: true, trafficCaptureAvailable: false });
-  (await h.ready()).openProcess();
+  (await h.ready()).openProcess(true);
   h.render().changeProcess("node:one");
   h.render().changeProcessCapture(true);
   assert.equal(h.render().processDraft.capture, true);
@@ -396,15 +314,20 @@ test("接管勾选不立即启动服务，保存失败和隐藏保留草稿，�
   h.options.active = false; h.render().changeProcessCapture(false);
   assert.equal(h.render().processDraft.capture, true);
   h.options.active = true; h.render();
-  h.render().changeProcess("legacy");
+  h.render().changeProcessEnabled(false);
   assert.equal(h.render().processDraft.capture, false);
+  assert.equal(h.render().processDraft.selection.id, "one");
+  assert.equal(h.render().processDraft.enabled, false);
+  h.render().changeProcessEnabled(true);
+  assert.equal(h.render().processDraft.selection.id, "one");
+  h.render().cancelProcess(); assert.equal(h.render().processDraft, null);
   h.unmount();
 });
 
 test("启动出口保存与其他编辑互斥，失败保留草稿，禁用节点不清除选择", async t => {
   installControllerWindow(t);
   const h = fixture(pool({ ...node(), enabled: true }));
-  (await h.ready()).openProcess(); h.render().changeProcess("node:one");
+  (await h.ready()).openProcess(true); h.render().changeProcess("node:one");
   h.render().openUpstream("route"); h.render().openNode("one");
   assert.equal(h.render().upstreamDraft, null); assert.equal(h.render().draft, null);
   let work = h.render().saveProcess(); await h.render().saveProcess();

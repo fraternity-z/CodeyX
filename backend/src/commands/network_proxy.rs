@@ -36,41 +36,25 @@ pub(super) async fn invoke(
                 serde_json::from_value(args.clone()).map_err(|_| "网络代理配置格式无效")?;
             save(state, input).await
         }
-        "network_proxy_test" | "network_proxy_test_chain" => {
+        "network_proxy_test" => {
             static LIMIT: OnceLock<Semaphore> = OnceLock::new();
             let _permit = LIMIT
                 .get_or_init(|| Semaphore::new(4))
                 .try_acquire()
                 .map_err(|_| "同时测试的代理过多，请稍后重试")?;
-            let chain_test = command == "network_proxy_test_chain";
             let id = args
-                .get(if chain_test { "chainId" } else { "nodeId" })
+                .get("nodeId")
                 .and_then(Value::as_str)
-                .ok_or("缺少代理节点或链路 ID")?;
+                .ok_or("缺少代理节点 ID")?;
             let pool = state.config.read().await.network_proxy.clone();
-            let selection = if chain_test {
-                ProxySelection::Chain { id: id.into() }
-            } else {
-                ProxySelection::Node { id: id.into() }
-            };
+            let selection = ProxySelection::Node { id: id.into() };
             let nodes = pool.test_nodes(&selection)?;
-            let snapshot_nodes = nodes.clone();
             let path = state.store.path().to_path_buf();
             let mut hops =
                 prepare_hops(nodes, Arc::new(SystemSecretStore::for_config(&path))).await?;
-            if chain_test {
-                let chain = pool
-                    .chains
-                    .iter()
-                    .find(|chain| chain.id == id)
-                    .ok_or("代理链路不存在")?;
-                let result = probe::test_chain(id, hops).await?;
-                Ok(json!({ "chain": chain, "nodes": snapshot_nodes, "result": result }))
-            } else {
-                let hop = hops.pop().ok_or("代理节点不存在")?;
-                let result = probe::test_node(&hop.node, hop.credential).await?;
-                Ok(json!({ "node": hop.node, "result": result }))
-            }
+            let hop = hops.pop().ok_or("代理节点不存在")?;
+            let result = probe::test_node(&hop.node, hop.credential).await?;
+            Ok(json!({ "node": hop.node, "result": result }))
         }
         _ => Err("未知网络代理命令".into()),
     }
@@ -129,8 +113,9 @@ async fn save(state: &Arc<AppState>, input: SaveInput) -> Result<Value, String> 
         return Err("当前宿主暂不支持流量接管".into());
     }
     for (profile_id, selection) in &input.config.upstream_by_profile {
-        if matches!(selection, ProxySelection::Legacy)
-            || previous.network_proxy.upstream_by_profile.get(profile_id) == Some(selection)
+        if !input.config.uses_pool(profile_id)
+            || (previous.network_proxy.upstream_by_profile.get(profile_id) == Some(selection)
+                && previous.network_proxy.upstream_enabled(profile_id))
         {
             continue;
         }
@@ -182,7 +167,7 @@ mod tests {
     use crate::config::{CodeyConfig, ConfigStore};
 
     #[tokio::test]
-    async fn policy_direct_requires_consent_before_commit_and_bindings_survive_disable() {
+    async fn retired_policy_is_blocked_until_route_switch_is_disabled() {
         let directory = tempfile::tempdir().unwrap();
         let store = ConfigStore::new(directory.path().join("config.json"));
         let config = CodeyConfig::default();
@@ -205,10 +190,10 @@ mod tests {
             )
             .await
             .unwrap_err()
-            .contains("显式允许")
+            .contains("已移除")
         );
         assert_eq!(std::fs::read(store.path()).unwrap(), original);
-        pool["policies"][0]["allowDirect"] = json!(true);
+        pool["upstreamEnabledByProfile"] = json!({(profile.clone()):false});
         invoke(
             &state,
             "network_proxy_save",
@@ -217,7 +202,7 @@ mod tests {
         .await
         .unwrap();
         let service = state.network_proxy_egress().await;
-        assert!(service.for_profile(&profile).await.unwrap().is_some());
+        assert!(service.for_profile(&profile).await.unwrap().is_none());
         pool["policies"][0]["enabled"] = json!(false);
         invoke(
             &state,
@@ -226,18 +211,16 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(service.for_profile(&profile).await.is_err());
+        assert!(service.for_profile(&profile).await.unwrap().is_none());
         pool["policies"] = json!([]);
-        assert!(
-            invoke(
-                &state,
-                "network_proxy_save",
-                &json!({"settingsRevision":2,"config":pool})
-            )
-            .await
-            .is_err()
-        );
-        assert_eq!(store.load().unwrap().settings_revision, 2);
+        invoke(
+            &state,
+            "network_proxy_save",
+            &json!({"settingsRevision":2,"config":pool}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(store.load().unwrap().settings_revision, 3);
     }
 
     #[tokio::test]
@@ -327,6 +310,20 @@ mod tests {
             ..Default::default()
         });
         let args = json!({"settingsRevision": 0, "config": NetworkProxyConfig::default()});
+        assert!(
+            invoke(
+                &state,
+                "network_proxy_save",
+                &json!({
+                    "settingsRevision":0,
+                    "config":{"upstreamEnabledByProfile":{"route":true}}
+                })
+            )
+            .await
+            .unwrap_err()
+            .contains("请选择")
+        );
+        assert_eq!(store.load().unwrap().settings_revision, 0);
         let result = invoke(&state, "network_proxy_save", &args).await.unwrap();
         assert_eq!(result["config"]["settingsRevision"], 1);
         assert_eq!(

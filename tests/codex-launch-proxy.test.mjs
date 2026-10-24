@@ -44,12 +44,13 @@ test("codex launch proxy validator matches the launch-time constraints", async (
 });
 
 test("launch proxy input lives on the independent network proxy page", async () => {
-  const [cardSource, typesSource, mockSource, controllerSource, featureSource] = await Promise.all([
+  const [cardSource, typesSource, mockSource, controllerSource, featureSource, processSource] = await Promise.all([
     readFile(new URL("src/features/network-proxy/NetworkProxyPage.tsx", root), "utf8"),
     readFile(new URL("src/App.types.ts", root), "utf8"),
     readFile(new URL("src/dev/mockApi.ts", root), "utf8"),
     readFile(new URL("src/features/network-proxy/useNetworkProxyController.ts", root), "utf8"),
     readFile(new URL("src/FeaturePolicyCard.tsx", root), "utf8"),
+    readFile(new URL("src/features/network-proxy/ProcessProxySelection.tsx", root), "utf8"),
   ]);
 
   assert.match(typesSource, /codexLaunchProxy: string/);
@@ -59,7 +60,7 @@ test("launch proxy input lives on the independent network proxy page", async () 
   assert.match(cardSource, /changeLaunchProxy\(event\.target\.value\)/);
   assert.match(cardSource, /aria-invalid=\{Boolean\(launchProxyError\)\}/);
   assert.match(controllerSource, /validateCodexLaunchProxy\(launchProxy\)/);
-  assert.match(cardSource, /重启 Codex 后生效/);
+  assert.match(processSource, /保存后重启 Codex 生效/);
 });
 
 test("launch proxy reaches Chromium arguments, spawn environment and restart detection", async () => {

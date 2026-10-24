@@ -53,15 +53,6 @@ async fn test_at(
     .await
 }
 
-pub(crate) async fn test_chain(id: &str, hops: Vec<Hop>) -> Result<ProbeResult, String> {
-    test_hops_at(
-        &ProxySelection::Chain { id: id.into() },
-        hops,
-        EXIT_PROBE_URL,
-    )
-    .await
-}
-
 async fn test_hops_at(
     selection: &ProxySelection,
     mut hops: Vec<Hop>,
@@ -98,7 +89,6 @@ async fn test_hops_at(
         let response = client.get(target).send().await.map_err(|error| {
             if let Some(failure) = gateway.last_error() {
                 return match failure.kind {
-                    FailureKind::Blocked => ("blocked", "目标被出口规则阻断"),
                     FailureKind::Authentication => {
                         ("authenticationFailed", "代理认证失败或认证方式不受支持")
                     }
@@ -285,115 +275,5 @@ mod tests {
         server.await.unwrap();
         assert_eq!(result.error_code, Some("authenticationFailed"));
         assert!(!serde_json::to_string(&result).unwrap().contains("secret"));
-    }
-
-    #[tokio::test]
-    async fn chain_probe_preserves_order_reports_failed_hop_and_never_enables_saved_nodes() {
-        for reject_second in [false, true] {
-            let proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let first = node(proxy.local_addr().unwrap().port());
-            let mut second = node(1080);
-            second.id = "second".into();
-            second.endpoint.host = "second.invalid".into();
-            let server = tokio::spawn(async move {
-                let (mut stream, _) = proxy.accept().await.unwrap();
-                assert!(
-                    read_head(&mut stream)
-                        .await
-                        .starts_with("CONNECT second.invalid:1080 HTTP/1.1")
-                );
-                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
-                assert!(
-                    read_head(&mut stream)
-                        .await
-                        .starts_with("CONNECT target.invalid:80 HTTP/1.1")
-                );
-                if reject_second {
-                    stream
-                        .write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\n\r\n")
-                        .await
-                        .unwrap();
-                    return;
-                }
-                stream.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await.unwrap();
-                assert!(
-                    read_head(&mut stream)
-                        .await
-                        .starts_with("GET /echo HTTP/1.1")
-                );
-                let body = r#"{"ip":"2001:db8::5"}"#;
-                stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
-            });
-            let result = test_hops_at(
-                &ProxySelection::Chain { id: "chain".into() },
-                vec![
-                    Hop {
-                        node: first.clone(),
-                        credential: None,
-                    },
-                    Hop {
-                        node: second.clone(),
-                        credential: None,
-                    },
-                ],
-                "http://target.invalid/echo",
-            )
-            .await
-            .unwrap();
-            server.await.unwrap();
-            assert!(!first.enabled && !second.enabled);
-            assert_eq!(result.chain_id.as_deref(), Some("chain"));
-            assert!(result.node_id.is_none());
-            assert_eq!(result.success, !reject_second);
-            assert_eq!(
-                result.failed_hop,
-                if reject_second { Some(2) } else { None }
-            );
-            assert_eq!(
-                result.exit_ip.as_deref(),
-                if reject_second {
-                    None
-                } else {
-                    Some("2001:db8::5")
-                }
-            );
-            assert_eq!(
-                result.error_code,
-                if reject_second {
-                    Some("authenticationFailed")
-                } else {
-                    None
-                }
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn missing_later_credentials_prevent_contacting_even_the_first_hop() {
-        let first_socket = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut second = node(1080);
-        second.credential_ref = Some(uuid::Uuid::new_v4().to_string());
-        let error = test_hops_at(
-            &ProxySelection::Chain { id: "chain".into() },
-            vec![
-                Hop {
-                    node: node(first_socket.local_addr().unwrap().port()),
-                    credential: None,
-                },
-                Hop {
-                    node: second,
-                    credential: None,
-                },
-            ],
-            "http://target.invalid/",
-        )
-        .await
-        .unwrap_err();
-        assert!(error.contains("凭据不可用"));
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), first_socket.accept())
-                .await
-                .is_err()
-        );
     }
 }

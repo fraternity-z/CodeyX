@@ -110,6 +110,9 @@ impl EgressPool {
 
     pub(crate) async fn for_profile(&self, profile: &str) -> Result<Option<ProxyLease>, String> {
         self.prepare_current(|policy| {
+            if !policy.upstream_enabled(profile) {
+                return ProxySelection::Legacy;
+            }
             policy
                 .upstream_by_profile
                 .get(profile)
@@ -127,7 +130,7 @@ impl EgressPool {
     ) -> Result<ProxyLease, String> {
         self.prepare_current(|_| selection.clone())
             .await?
-            .ok_or_else(|| "Codex 启动出口未指定代理池节点或链路；连接已阻断".into())
+            .ok_or_else(|| "Codex 启动出口未指定代理池节点；连接已阻断".into())
     }
 
     async fn prepare_current(
@@ -187,24 +190,15 @@ impl EgressPool {
     ) -> Result<Option<ProxyLease>, String> {
         // Resolve on every call, before a cache hit: disabling or deleting a selected
         // node must not reuse an earlier connection policy or become direct traffic.
-        let (nodes, identity) = if let ProxySelection::Policy { id } = selection {
-            pool.validate_active_selection(selection)?;
-            (
-                None,
-                serde_json::to_vec(&(pool.policy(id)?, &pool.nodes, &pool.chains)),
-            )
-        } else {
-            let Some(nodes) = pool.resolve(selection)? else {
-                return Ok(None);
-            };
-            let identity = serde_json::to_vec(
-                &nodes
-                    .iter()
-                    .map(|node| (&node.id, &node.endpoint, &node.credential_ref))
-                    .collect::<Vec<_>>(),
-            );
-            (Some(nodes), identity)
+        let Some(nodes) = pool.resolve(selection)? else {
+            return Ok(None);
         };
+        let identity = serde_json::to_vec(
+            &nodes
+                .iter()
+                .map(|node| (&node.id, &node.endpoint, &node.credential_ref))
+                .collect::<Vec<_>>(),
+        );
         let key: [u8; 32] = Sha256::digest(identity.map_err(|_| "代理连接配置编码失败")?).into();
         let mut sessions = tokio::time::timeout(PREPARE_TIMEOUT, self.sessions.lock())
             .await
@@ -216,15 +210,8 @@ impl EgressPool {
             return Ok(Some(lease));
         }
         let gateway = tokio::time::timeout(PREPARE_TIMEOUT, async {
-            let forwarder = match (nodes, selection) {
-                (Some(nodes), _) => {
-                    Forwarder::fixed(prepare_hops(nodes, self.store.clone()).await?).await?
-                }
-                (None, ProxySelection::Policy { id }) => {
-                    Forwarder::policy(pool.clone(), id, self.store.clone())?
-                }
-                _ => return Err("出口选择无效，连接已阻断".into()),
-            };
+            let forwarder =
+                Forwarder::fixed(prepare_hops(nodes, self.store.clone()).await?).await?;
             Gateway::start_forwarder(forwarder).await
         })
         .await
@@ -354,55 +341,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn policy_changes_apply_to_new_leases_and_disabled_policies_never_become_legacy() {
+    async fn enabled_route_without_selection_never_uses_legacy_exit() {
         let service = service(Arc::new(MemorySecrets::default()), 2);
-        let target = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let mut pool: NetworkProxyConfig = serde_json::from_value(serde_json::json!({
-            "policies":[{"id":"work","name":"Work","enabled":true,"allowDirect":true,"defaultAction":{"kind":"direct"}}],
-            "upstreamByProfile":{"route":{"kind":"policy","id":"work"}}
-        })).unwrap();
-        service.configure(pool.clone());
-        let first = service.for_profile("route").await.unwrap().unwrap();
-        assert_eq!(
-            first.proxy_url(),
-            service
-                .for_profile("route")
-                .await
-                .unwrap()
-                .unwrap()
-                .proxy_url()
-        );
-        let destination =
-            Destination::new("127.0.0.1", target.local_addr().unwrap().port()).unwrap();
-        let mut stream = first.connect(destination.clone()).await.unwrap();
-        let (mut origin, _) = target.accept().await.unwrap();
-        pool.policies[0].default_action = super::super::routing::ProxyAction::Block;
-        pool.policies[0].allow_direct = false;
-        service.configure(pool.clone());
-        let blocked = service.for_profile("route").await.unwrap().unwrap();
-        assert_ne!(first.proxy_url(), blocked.proxy_url());
-        assert_eq!(
-            blocked.connect(destination).await.err().unwrap().kind,
-            super::super::tunnel::FailureKind::Blocked
-        );
-        stream.write_all(b"live").await.unwrap();
-        let mut bytes = [0; 4];
-        origin.read_exact(&mut bytes).await.unwrap();
-        assert_eq!(&bytes, b"live");
-        pool.policies[0].enabled = false;
-        service.configure(pool);
+        let mut config = NetworkProxyConfig::default();
+        config
+            .upstream_enabled_by_profile
+            .insert("route".into(), true);
+        service.configure(config);
         assert!(
             service
                 .proxy_for_profile("route", Some("http://127.0.0.1:9"), false)
                 .await
                 .err()
                 .unwrap()
-                .contains("阻断")
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), target.accept())
-                .await
-                .is_err()
+                .contains("请选择")
         );
     }
 
@@ -435,6 +387,29 @@ mod tests {
             .unwrap();
         assert!(prepared.uses_pool());
         assert_ne!(prepared.as_deref(), Some(manual));
+        policy
+            .upstream_enabled_by_profile
+            .insert("route".into(), false);
+        service.configure(policy.clone());
+        let disabled = service
+            .proxy_for_profile("route", Some(manual), true)
+            .await
+            .unwrap();
+        assert!(!disabled.uses_pool());
+        assert_eq!(disabled.as_deref(), Some(manual));
+        assert!(
+            service
+                .proxy_for_profile("route", None, false)
+                .await
+                .unwrap()
+                .as_deref()
+                .is_none()
+        );
+        assert!(policy.upstream_by_profile.contains_key("route"));
+        policy
+            .upstream_enabled_by_profile
+            .insert("route".into(), true);
+        service.configure(policy.clone());
         assert!(
             service
                 .proxy_for_profile("route", Some(manual), true)
@@ -450,6 +425,7 @@ mod tests {
                 .is_err()
         );
         policy.upstream_by_profile.clear();
+        policy.upstream_enabled_by_profile.clear();
         service.configure(policy);
         assert_eq!(
             service

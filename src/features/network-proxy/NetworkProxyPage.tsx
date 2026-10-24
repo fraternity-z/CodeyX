@@ -1,13 +1,11 @@
 import { IconNetwork, IconX } from "@tabler/icons-react";
 import type { Config, ConfigSaveResult } from "../../App.types";
-import { Badge, Input } from "../../components/ui";
+import { Input } from "../../components/ui";
 import { SettingsPageHeader } from "../../SettingsPageHeader";
 import { useNetworkProxyController } from "./useNetworkProxyController";
 import { ProxyPool } from "./ProxyPool";
-import { ProxyChains } from "./ProxyChains";
 import { UpstreamSelection } from "./UpstreamSelection";
 import { ProcessProxySelection } from "./ProcessProxySelection";
-import { ProxyPolicies } from "./ProxyPolicies";
 import "./network-proxy.css";
 
 type Props = {
@@ -26,13 +24,7 @@ export function NetworkProxyPage(props: Props) {
       <SettingsPageHeader id="network-proxy-title" title="网络代理" icon={<IconNetwork size={15} />}
         description="管理 Codex 的网络接入和出口，保留其他应用的网络设置。" />
       <section className="secondary-section launch-proxy-section" aria-labelledby="launch-proxy-title">
-        <div className="feature-policy-heading">
-          <div className="flex items-center gap-2">
-            <h3 id="launch-proxy-title" className="settings-section-heading">Codex 启动代理</h3>
-            <Badge variant="secondary">{controller.pool.processCapture ? "下次启动接管" : "兼容接入"}</Badge>
-          </div>
-          <p>为客户端与支持代理设置的子进程选择出口；保存后，重启 Codex 后生效。</p>
-        </div>
+        {controller.remote && <h3 id="launch-proxy-title" className="settings-section-heading">Codex 启动代理</h3>}
         <ProcessProxySelection controller={controller} />
         <div className={`feature-card launch-proxy-card ${launchProxy.trim() ? "active" : ""}`}>
           <div className="feature-card-body">
@@ -59,8 +51,6 @@ export function NetworkProxyPage(props: Props) {
         </p>
       </section>
       <ProxyPool controller={controller} />
-      <ProxyChains controller={controller} />
-      <ProxyPolicies controller={controller} />
       <UpstreamSelection controller={controller} />
     </section>
   );

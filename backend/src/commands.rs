@@ -1119,10 +1119,9 @@ async fn resolve_session_name_cached(
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
         "config_backup" => backup::invoke(state, &args).await,
-        "network_proxy_get"
-        | "network_proxy_save"
-        | "network_proxy_test"
-        | "network_proxy_test_chain" => network_proxy::invoke(state, command, &args).await,
+        "network_proxy_get" | "network_proxy_save" | "network_proxy_test" => {
+            network_proxy::invoke(state, command, &args).await
+        }
         "remote_control_status"
         | "start_remote_control"
         | "stop_remote_control"

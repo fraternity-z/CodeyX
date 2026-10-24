@@ -57,7 +57,6 @@ pub(crate) struct Hop {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum FailureKind {
-    Blocked,
     Configuration,
     Connect,
     Timeout,
@@ -78,7 +77,6 @@ pub(crate) struct TunnelError {
 impl fmt::Display for TunnelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let reason = match self.kind {
-            FailureKind::Blocked => "目标被出口规则阻断",
             FailureKind::Configuration => "节点配置或凭据不可用",
             FailureKind::Connect => "无法连接代理节点",
             FailureKind::Timeout => "连接或握手超时",

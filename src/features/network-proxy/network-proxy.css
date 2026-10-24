@@ -24,14 +24,6 @@
 .proxy-probe { display: flex; flex-wrap: wrap; gap: 4px 12px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--codey-border); font-size: 12px; overflow-wrap: anywhere; }
 .proxy-probe time { color: var(--codey-muted); }
 .proxy-empty { margin: 0; padding: 24px 12px; text-align: center; font-size: 12px; color: var(--codey-muted); }
-.proxy-chain-hops { display: grid; gap: 10px; list-style: none; padding: 0; margin: 0; }
-.proxy-chain-hops li { display: flex; align-items: flex-end; gap: 8px; flex-wrap: wrap; }
-.proxy-chain-hops label { flex: 1; min-width: 180px; }
-.proxy-chain-path { margin: 10px 0 0; font-size: 12px; line-height: 1.8; overflow-wrap: anywhere; }
-.proxy-policy-rules { display: grid; gap: 12px; list-style: none; margin: 0; padding: 0; min-width: 0; }
-.proxy-policy-rules > li { border: 1px solid var(--codey-border); border-radius: 8px; padding: 12px; min-width: 0; }
-.proxy-action-editor { display: grid; gap: 12px; min-width: 0; }
-.proxy-action-editor select { width: 100%; }
 @container proxy-pool (max-width: 480px) {
   .proxy-editor-grid { grid-template-columns: minmax(0, 1fr); }
   .proxy-filters { grid-template-columns: 1fr 1fr; }

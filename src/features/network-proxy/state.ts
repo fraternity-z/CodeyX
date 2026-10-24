@@ -1,5 +1,5 @@
 import type { CredentialUpdate, NetworkProxyConfig, PoolFilter, ProbeSnapshot, ProxyDraft, ProxyNode } from "./types";
-import { policyReferences } from "./policies";
+import { upstreamEnabled } from "./upstream";
 
 export const EMPTY_POOL: NetworkProxyConfig = { schemaVersion: 1, nodes: [], chains: [] };
 export const INITIAL_FILTER: PoolFilter = { query: "", enabled: "all", sort: "saved" };
@@ -55,10 +55,8 @@ export function prepareNodeSave(pool: NetworkProxyConfig, draft: ProxyDraft): { 
 }
 
 export function removeNodes(pool: NetworkProxyConfig, ids: string[]): NetworkProxyConfig {
-  if (policyReferences(pool, "node", ids)) throw new Error("所选节点仍被出口策略引用，请先调整规则");
   if (pool.processProxy?.kind === "node" && ids.includes(pool.processProxy.id)) throw new Error("所选节点仍被 Codex 启动出口引用，请先调整启动选择");
-  if (pool.chains.some(chain => chain.nodeIds.some(id => ids.includes(id)))) throw new Error("所选节点仍被代理链路引用，请先调整链路");
-  if (Object.values(pool.upstreamByProfile ?? {}).some(selection => selection.kind === "node" && ids.includes(selection.id))) throw new Error("所选节点仍被线路出口引用，请先调整上游选择");
+  if (Object.entries(pool.upstreamByProfile ?? {}).some(([profileId, selection]) => upstreamEnabled(pool, profileId) && selection.kind === "node" && ids.includes(selection.id))) throw new Error("所选节点仍被线路出口引用，请先关闭线路代理或选择其他节点");
   return { ...pool, nodes: pool.nodes.filter(node => !ids.includes(node.id)) };
 }
 

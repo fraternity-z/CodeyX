@@ -10,7 +10,6 @@ export const CODEY_API_COMMANDS = [
   "network_proxy_get",
   "network_proxy_save",
   "network_proxy_test",
-  "network_proxy_test_chain",
   "sync_current_provider",
   "set_route_enabled",
   "reorder_route_models",

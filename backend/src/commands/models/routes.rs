@@ -158,6 +158,9 @@ pub async fn delete_route(
     let config = config_after_route_deletion(&previous, route_id)?;
     let config = save_config_to_store(state, config).await?;
     *state.config.write().await = config.clone();
+    if let Some(egress) = state.network_proxy_egress.get() {
+        egress.configure(config.network_proxy.clone());
+    }
     let model_state = current_model_state_async(&config).await?;
     drop(_config_write_guard);
     let hot_reload = hot_reload_runtime_models(state).await;
@@ -206,6 +209,11 @@ pub(crate) fn config_after_route_deletion(
         .model_reasoning_efforts_by_provider
         .remove(&removed_provider_id);
     config.profiles.retain(|profile| profile.id != route_id);
+    config.network_proxy.upstream_by_profile.remove(route_id);
+    config
+        .network_proxy
+        .upstream_enabled_by_profile
+        .remove(route_id);
     config
         .selected_models_by_provider
         .remove(&removed_provider_id);
@@ -663,6 +671,49 @@ pub(crate) fn config_with_provider_model_sync(
 mod tests {
     use super::{official_models_account_id, official_models_base_url, official_models_endpoint};
     use crate::config::{AUTH_MODE_OFFICIAL_ACCOUNT, ProviderProfile, official_profile_id};
+
+    #[test]
+    fn deleting_route_clears_only_its_proxy_selection_and_switch() {
+        let mut config = crate::config::CodeyConfig {
+            profiles: ["first", "second"]
+                .map(|id| {
+                    let mut profile = ProviderProfile::new(id);
+                    profile.id = id.into();
+                    profile.base_url = "https://fixture.invalid/v1".into();
+                    profile.api_key = "fixture-key".into();
+                    profile
+                })
+                .into(),
+            ..Default::default()
+        };
+        for id in ["first", "second"] {
+            config.network_proxy.upstream_by_profile.insert(
+                id.into(),
+                crate::network_proxy::model::ProxySelection::Legacy,
+            );
+            config
+                .network_proxy
+                .upstream_enabled_by_profile
+                .insert(id.into(), false);
+        }
+        let next = super::config_after_route_deletion(&config, "first").unwrap();
+        assert!(!next.network_proxy.upstream_by_profile.contains_key("first"));
+        assert!(
+            !next
+                .network_proxy
+                .upstream_enabled_by_profile
+                .contains_key("first")
+        );
+        assert!(
+            next.network_proxy
+                .upstream_by_profile
+                .contains_key("second")
+        );
+        assert_eq!(
+            next.network_proxy.upstream_enabled_by_profile.get("second"),
+            Some(&false)
+        );
+    }
 
     #[test]
     fn official_models_account_id_uses_the_field_then_the_profile_id() {

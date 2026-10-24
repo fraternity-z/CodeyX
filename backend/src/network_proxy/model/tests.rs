@@ -1,5 +1,60 @@
 use super::*;
 
+#[test]
+fn retired_selections_round_trip_but_never_execute() {
+    let config: NetworkProxyConfig = serde_json::from_value(serde_json::json!({
+        "chains":[{"id":"old","name":"Old","enabled":true,"nodeIds":["removed"]}],
+        "policies":[{"id":"old","name":"Old","enabled":true,"defaultAction":{"kind":"direct"}}],
+        "upstreamByProfile":{"route":{"kind":"chain","id":"old"}}
+    }))
+    .unwrap();
+    config.validate().unwrap();
+    for selection in [
+        ProxySelection::Chain { id: "old".into() },
+        ProxySelection::Policy { id: "old".into() },
+    ] {
+        assert!(config.resolve(&selection).unwrap_err().contains("已移除"));
+        assert!(
+            config
+                .test_nodes(&selection)
+                .unwrap_err()
+                .contains("已移除")
+        );
+    }
+    let restored: NetworkProxyConfig =
+        serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
+    assert_eq!(restored, config);
+}
+
+#[test]
+fn route_switch_preserves_selection_and_disables_its_validation_and_pool_requirement() {
+    let mut config = NetworkProxyConfig::default();
+    config
+        .upstream_enabled_by_profile
+        .insert("route".into(), true);
+    assert!(config.validate().unwrap_err().contains("请选择"));
+    config.upstream_enabled_by_profile.clear();
+    config.upstream_by_profile.insert(
+        "route".into(),
+        ProxySelection::Node {
+            id: "missing".into(),
+        },
+    );
+    assert!(config.uses_pool("route"));
+    assert!(config.validate().is_err());
+    config
+        .upstream_enabled_by_profile
+        .insert("route".into(), false);
+    assert!(!config.uses_pool("route"));
+    assert!(!config.has_upstream_bindings());
+    config.validate().unwrap();
+    assert!(config.upstream_by_profile.contains_key("route"));
+    config
+        .upstream_enabled_by_profile
+        .insert("route".into(), true);
+    assert!(config.validate().is_err());
+}
+
 pub(crate) fn node(id: &str) -> ProxyNode {
     ProxyNode {
         id: id.into(),
@@ -88,86 +143,6 @@ fn missing_disabled_or_deleted_nodes_never_resolve_to_direct() {
 }
 
 #[test]
-fn chains_preserve_order_and_reject_loops_and_dangling_references() {
-    let mut config = NetworkProxyConfig {
-        nodes: vec![node("first"), node("second")],
-        chains: vec![ProxyChain {
-            id: "chain".into(),
-            name: "chain".into(),
-            enabled: true,
-            node_ids: vec!["second".into(), "first".into()],
-        }],
-        ..Default::default()
-    };
-    let selection = ProxySelection::Chain { id: "chain".into() };
-    let plan = config.resolve(&selection).unwrap().unwrap();
-    assert_eq!(
-        plan.iter().map(|node| node.id.as_str()).collect::<Vec<_>>(),
-        ["second", "first"]
-    );
-    config.nodes.reverse(); // UI order must not change a selected path.
-    assert_eq!(config.resolve(&selection).unwrap().unwrap(), plan);
-    config.chains[0].node_ids.push("second".into());
-    assert!(config.validate().is_err());
-    config.chains[0].node_ids = vec!["first".into(), "missing".into()];
-    assert!(config.validate().is_err());
-    config.chains[0].node_ids = vec!["first".into()];
-    config.chains[0].enabled = false;
-    assert!(config.resolve(&selection).is_err());
-}
-
-#[test]
-fn later_loopback_hops_are_rejected() {
-    let mut config = NetworkProxyConfig {
-        nodes: vec![node("first"), node("second")],
-        chains: vec![ProxyChain {
-            id: "chain".into(),
-            name: "chain".into(),
-            enabled: true,
-            node_ids: vec!["first".into(), "second".into()],
-        }],
-        ..Default::default()
-    };
-    for host in [
-        "127.0.0.1",
-        "::1",
-        "localhost",
-        "LOCALHOST.",
-        "proxy.localhost",
-        "127.1",
-        "0x7f000001",
-        "[::ffff:127.0.0.1]",
-    ] {
-        config.nodes[1].endpoint.host = host.into();
-        assert!(config.validate().is_err());
-    }
-    config.chains[0].node_ids.reverse();
-    assert!(config.validate().is_ok());
-}
-
-#[test]
-fn chain_endpoint_identity_is_independent_of_protocol_dns_and_host_spelling() {
-    let mut first = node("first");
-    first.endpoint.host = "Proxy.Example.".into();
-    let mut second = node("second");
-    second.endpoint.host = "proxy.example".into();
-    second.endpoint.protocol = ProxyProtocol::Https;
-    let mut config = NetworkProxyConfig {
-        nodes: vec![first, second],
-        chains: vec![ProxyChain {
-            id: "chain".into(),
-            name: "chain".into(),
-            enabled: true,
-            node_ids: vec!["first".into(), "second".into()],
-        }],
-        ..Default::default()
-    };
-    assert!(config.validate().unwrap_err().contains("同一端点"));
-    config.nodes[1].endpoint.port = 443;
-    assert!(config.validate().is_ok());
-}
-
-#[test]
 fn pool_rejects_duplicate_ids_unknown_versions_and_invalid_metadata() {
     let mut config = NetworkProxyConfig {
         nodes: vec![node("first"), node("first")],
@@ -237,40 +212,4 @@ fn traffic_capture_is_opt_in_and_requires_an_explicit_pool_exit() {
     let restored: NetworkProxyConfig =
         serde_json::from_value(serde_json::to_value(&config).unwrap()).unwrap();
     assert_eq!(restored, config);
-}
-
-#[test]
-fn manual_test_can_inspect_disabled_chain_but_never_relaxes_runtime_selection() {
-    let mut config = NetworkProxyConfig {
-        nodes: vec![node("first"), node("second")],
-        chains: vec![ProxyChain {
-            id: "chain".into(),
-            name: "chain".into(),
-            enabled: false,
-            node_ids: vec!["second".into(), "first".into()],
-        }],
-        ..Default::default()
-    };
-    config.nodes[0].enabled = false;
-    let selection = ProxySelection::Chain { id: "chain".into() };
-    let tested = config.test_nodes(&selection).unwrap();
-    assert_eq!(
-        tested
-            .iter()
-            .map(|node| node.id.as_str())
-            .collect::<Vec<_>>(),
-        ["second", "first"]
-    );
-    assert!(!tested[1].enabled);
-    assert!(config.resolve(&selection).is_err());
-    assert!(config.test_nodes(&ProxySelection::Legacy).is_err());
-    assert!(
-        config
-            .test_nodes(&ProxySelection::Chain {
-                id: "missing".into()
-            })
-            .is_err()
-    );
-    config.chains[0].node_ids.push("second".into());
-    assert!(config.test_nodes(&selection).is_err());
 }

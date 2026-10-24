@@ -1,4 +1,4 @@
-import { Badge, Button } from "../../components/ui";
+import { Badge, Button, Switch } from "../../components/ui";
 import { ProxySelectionField } from "./ProxySelectionField";
 import type { useNetworkProxyController } from "./useNetworkProxyController";
 
@@ -6,43 +6,39 @@ type Controller = ReturnType<typeof useNetworkProxyController>;
 
 export function UpstreamSelection({ controller: c }: { controller: Controller }) {
   if (c.remote) return null;
-  const draft = c.upstreamDraft;
   return <section className="proxy-pool" aria-labelledby="proxy-upstream-title">
-    <div className="proxy-pool-heading"><div>
-      <h3 id="proxy-upstream-title" className="settings-section-heading">线路上游出口</h3>
-      <p className="proxy-help">为每条线路指定节点、链路或出口策略，覆盖该线路原有的手动上游设置。</p>
-    </div></div>
-    <p className="proxy-help">对话、图片、模型目录和 Codey 维护的账号请求使用同一选择。固定选择遇到故障即停止；策略选择按显式配置处理故障。保存后影响后续请求，正在传输的响应继续使用原出口；使用代理池时采用 HTTP/SSE。</p>
-    <p className="proxy-help">这里只设置线路出口。Codex 其他进程流量仍由上方启动代理控制；外部浏览器登录沿用浏览器的网络设置。固定选择不保证服务商永远分配相同 IP，可通过节点或链路测试核对。</p>
-    {!c.routerEnabled && <p className="proxy-help" role="note">当前未启用本地路由，暂不能新增代理池出口选择。</p>}
-    {draft && <form className="proxy-editor" aria-label="线路出口编辑" onSubmit={event => { event.preventDefault(); void c.saveUpstream(); }}>
-      <h4>选择出口 · {c.upstreamRows.find(row => row.id === draft.profileId)?.label}</h4>
-      <fieldset disabled={c.draftDisabled} className="proxy-editor-grid"><ProxySelectionField label="线路出口"
-        legacyLabel="沿用线路设置（不使用代理池）" selection={draft.selection} pool={c.pool} onChange={c.changeUpstream} /></fieldset>
-      {draft.selection.kind === "legacy" && draft.original.kind !== "legacy" && <p className="proxy-help" role="note">解除代理池选择后，将恢复原有手动上游或网络环境；未配置手动上游时可能直连。</p>}
-      {c.upstreamDraftError && <p className="proxy-help" role="alert">{c.upstreamDraftError}</p>}
-      <div className="proxy-actions"><Button size="xs" type="submit" disabled={c.disabled || Boolean(c.upstreamDraftError)} loading={c.busy === "save-upstream"}>保存出口选择</Button>
-        <Button size="xs" variant="light" disabled={c.busy !== null} onClick={c.cancelUpstream}>取消出口编辑</Button></div>
-    </form>}
-    <ul className="proxy-node-list" aria-label="线路出口列表">{c.upstreamRows.map(row => <li key={row.id} className="proxy-node">
-      <div className="proxy-node-details"><div className="proxy-actions"><strong>{row.label}</strong><Badge variant="secondary">{row.selection.kind === "legacy" ? "原有设置" : row.selection.kind === "policy" ? "按规则选择" : "固定选择"}</Badge></div>
-        <p className="proxy-chain-path">{row.selectedLabel}</p>
-        {!row.profile && <p className="proxy-help">线路当前不可用，出口选择仍保留，恢复该线路后继续生效。</p>}
-        {row.problem && <p className="text-danger text-xs">{row.problem}</p>}
-        {row.probe && <div className="proxy-probe" role="status">
-          <span>{row.probe.stale ? "出口配置已变化，请重新测试" : row.probe.success ? "出口检测成功" : "出口检测未成功"} · {row.probe.elapsedMs} ms</span>
-          {row.probe.exitIp && <span>观测出口：{row.probe.exitIp}</span>}
-          <span>{row.probe.message}</span><time dateTime={row.probe.testedAt}>{new Date(row.probe.testedAt).toLocaleString()}</time>
-        </div>}
-        {row.selection.kind === "legacy" && row.profile?.upstreamProxy?.trim() && <p className="proxy-help">已配置手动上游；可在线路设置中编辑。</p>}
-      </div>
-      <div className="proxy-actions"><Button size="xs" variant="light" disabled={c.disabled || c.editing} onClick={() => c.openUpstream(row.id)}>选择出口 {row.label}</Button>
-        {(row.selection.kind === "node" || row.selection.kind === "chain") && <Button size="xs" variant="light" disabled={c.disabled}
-          loading={c.busy === `${row.selection.kind === "node" ? "test" : "test-chain"}:${row.selection.id}`} onClick={() => {
-          if (row.selection.kind === "node") void c.testNode(row.selection.id);
-          else if (row.selection.kind === "chain") void c.testChain(row.selection.id);
-        }}>测试所选出口</Button>}</div>
-    </li>)}</ul>
-    {!c.upstreamRows.length && <p className="proxy-empty">添加线路后，可在这里指定它的上游出口。</p>}
+    <div><h3 id="proxy-upstream-title" className="settings-section-heading">线路代理</h3>
+      <p className="proxy-help">开启后选择代理池节点；关闭时沿用线路原有代理或软件默认网络，所选节点会保留。</p>
+      <p className="proxy-help">对话、图片、模型目录和账号请求共用所选节点；节点不可用时停止连接。保存只影响后续请求，外部浏览器沿用自己的网络设置。</p></div>
+    {!c.routerEnabled && <p className="proxy-help" role="note">请先启用本地路由，再开启线路代理。</p>}
+    <ul className="proxy-node-list" aria-label="线路出口列表">{c.upstreamRows.map(row => {
+      const draft = c.upstreamDraft?.profileId === row.id ? c.upstreamDraft : null;
+      const enabled = draft?.enabled ?? row.enabled;
+      return <li key={row.id} className="proxy-node">
+        <div className="proxy-pool-heading"><strong>{row.label}</strong>
+          <Switch size="sm" label="使用代理池" aria-label={`使用代理池 ${row.label}`} checked={enabled}
+            disabled={draft ? c.draftDisabled : c.disabled || c.editing}
+            onCheckedChange={value => draft ? c.changeUpstreamEnabled(value) : c.openUpstream(row.id, value)} /></div>
+        {draft ? <form className="proxy-editor" aria-label="线路出口编辑" onSubmit={event => { event.preventDefault(); void c.saveUpstream(); }}>
+          {enabled ? <fieldset disabled={c.draftDisabled} className="proxy-editor-grid"><ProxySelectionField label="线路代理节点"
+            selection={draft.selection} pool={c.pool} onChange={c.changeUpstream} /></fieldset>
+            : <p className="proxy-help">保存后沿用线路原有代理或软件默认网络。</p>}
+          {c.upstreamDraftError && <p className="proxy-help" role="alert">{c.upstreamDraftError}</p>}
+          <div className="proxy-actions"><Button size="xs" type="submit" disabled={c.disabled || Boolean(c.upstreamDraftError)} loading={c.busy === "save-upstream"}>保存线路代理</Button>
+            <Button size="xs" variant="light" disabled={c.busy !== null} onClick={c.cancelUpstream}>取消线路编辑</Button></div>
+        </form> : <>
+          <div className="proxy-actions"><Badge variant="secondary">{row.enabled ? "已启用" : "默认设置"}</Badge>
+            {row.enabled && <><span>{row.selectedLabel}</span><Button size="xs" variant="light" disabled={c.disabled || c.editing} onClick={() => c.openUpstream(row.id)}>选择节点 {row.label}</Button></>}
+          </div>
+          {row.problem && <p className="text-danger text-xs" role="alert">{row.problem}</p>}
+          {row.enabled && row.selection.kind === "node" && <div className="proxy-actions"><Button size="xs" variant="light" disabled={c.disabled}
+            loading={c.busy === `test:${row.selection.id}`} onClick={() => { if (row.selection.kind === "node") void c.testNode(row.selection.id); }}>测试所选出口</Button></div>}
+          {row.probe && <div className="proxy-probe" role="status"><span>{row.probe.stale ? "出口配置已变化，请重新测试" : row.probe.success ? "出口检测成功" : "出口检测未成功"} · {row.probe.elapsedMs} ms</span>
+            {row.probe.exitIp && <span>观测出口：{row.probe.exitIp}</span>}<span>{row.probe.message}</span></div>}
+        </>}
+        {!row.profile && <p className="proxy-help">线路当前不可用，代理设置仍保留。</p>}
+      </li>;
+    })}</ul>
+    {!c.upstreamRows.length && <p className="proxy-empty">添加线路后，可在这里选择代理。</p>}
   </section>;
 }
