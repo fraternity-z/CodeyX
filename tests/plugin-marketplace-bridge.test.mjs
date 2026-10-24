@@ -106,6 +106,27 @@ test("read and mutation commands patch results while only mutations trigger a re
   assert.equal(localCalls.length, 4);
 });
 
+test("local plugins are merged only into plugin lists, not metadata arrays", () => {
+  const { window } = setup();
+  window.__codeyLocalPlugins = [{ id: "local@codey", name: "local", marketplaceName: "codey" }];
+  const patched = window.__codeyPatchPluginResponse({
+    marketplaces: [{
+      name: "openai-curated",
+      plugins: [{ id: "remote", name: "remote", interface: { capabilities: ["Read"], screenshots: [] } }],
+    }],
+    categories: ["tools"],
+  });
+  assert.equal(patched.marketplaces.length, 1);
+  const [plugin, local] = patched.marketplaces[0].plugins;
+  assert.equal(JSON.stringify(plugin.interface.capabilities), '["Read"]');
+  assert.equal(plugin.interface.screenshots.length, 0);
+  assert.equal(JSON.stringify(patched.categories), '["tools"]');
+  assert.equal(local.id, "local@codey");
+  const flat = window.__codeyPatchPluginResponse([{ id: "remote", name: "remote", hidden: true }]);
+  assert.equal(flat.some((entry) => entry.id === "local@codey"), true);
+  assert.equal(window.__codeyPatchPluginResponse({ plugins: [] }).plugins.length, 1);
+});
+
 test("late bridge retries and reinjection preserve narrow request matching", async () => {
   const { window, timers, electronBridge, nativePromise, calls, sandbox } = setup({ lateBridge: true });
   assert.equal(timers.size, 1);

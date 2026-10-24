@@ -18,20 +18,24 @@ export function rememberOfficialAccounts(result: OfficialAccountsResult) {
   };
 }
 
-export function listOfficialAccounts(options?: { force?: boolean }) {
+export function listOfficialAccounts(options?: { force?: boolean }): Promise<OfficialAccountsResult> {
   const force = options?.force === true;
+  if (!force && cache.promise) return cache.promise;
   if (!force && cache.result && cache.expiresAt && Date.now() < cache.expiresAt) {
     return Promise.resolve(cache.result);
   }
-  if (!force && cache.promise) return cache.promise;
 
-  const promise = invoke<OfficialAccountsResult>("list_official_accounts").then(
+  const promise: Promise<OfficialAccountsResult> = invoke<OfficialAccountsResult>("list_official_accounts").then(
     (result) => {
-      // 新读取或账号变更已经接管缓存时，迟到结果只返回给原调用方。
-      if (cache.promise === promise) rememberOfficialAccounts(result);
+      // 强制刷新或账号变更会替换缓存；旧读取的消费者也应取得最新结果。
+      if (cache.promise !== promise) return cache.promise ?? cache.result ?? result;
+      cache = { result: cache.result, expiresAt: cache.expiresAt };
+      rememberOfficialAccounts(result);
       return result;
     },
     (error) => {
+      const latest = cache.promise ?? cache.result;
+      if (cache.promise !== promise && latest) return latest;
       if (cache.promise === promise) {
         cache = cache.result
           ? { result: cache.result, expiresAt: cache.expiresAt }

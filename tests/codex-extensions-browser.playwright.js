@@ -120,9 +120,9 @@ async (page, { baseURL = new URL(page.url()).origin } = {}) => {
   await page.waitForFunction(() => window.extensionsBehavior.sharing["migration-fixture"].enabled === false);
 
   await region.getByRole("searchbox", { name: "搜索 MCP", exact: true }).fill("migration-fixture");
-  await page.evaluate(() => { window.extensionsBehavior.defer = "set_mcp_enabled"; });
+  await page.evaluate(() => { window.extensionsBehavior.defer = "set_mcp_enabled"; window.extensionsBehavior.release = null; });
   const toggle = region.getByRole("switch", { name: "禁用 migration-fixture", exact: true });
-  await toggle.focus(); await toggle.press("Space");
+  await toggle.locator("xpath=ancestor::label").click();
   await page.waitForFunction(() => typeof window.extensionsBehavior.release === "function");
   await page.getByRole("button", { name: "基础功能", exact: true }).click();
   await page.getByRole("button", { name: "MCP 管理", exact: true }).click();

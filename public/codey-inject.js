@@ -1630,6 +1630,7 @@
   };
 
   const openOfficialSessionDelete = async (row) => {
+    if (disposed) return false;
     try {
       const menuItem = findMenuItemById(await sidebarRowMenuItems(row), sessionDeleteMenuItemId);
       if (disposed) return false;
@@ -1721,7 +1722,7 @@
         if (button.disabled) return;
         button.disabled = true;
         try {
-          await openOfficialSessionDelete(thread);
+          await window.__codeySessionToolsInstall?.openOfficialSessionDelete?.(thread);
         } finally {
           button.disabled = false;
         }
@@ -2039,6 +2040,7 @@
   };
   window.__codeySessionToolsInstall = {
     dispose: disposeInstall,
+    openOfficialSessionDelete,
     tooltip: {
       show: scheduleSidebarActionTooltip,
       hide(button) {

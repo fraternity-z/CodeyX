@@ -8042,11 +8042,11 @@ async fn native_responses_stream_error_preserves_status_and_safe_details() {
     let logs = tempfile::tempdir().unwrap();
     let upstream = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
     let upstream_address = upstream.local_addr().unwrap();
-    let original = format!(
-        "  {{\n  \"error\":{{\"message\":\"image exceeds the provider limit for sk-upstream\",\"type\":\"invalid_request_error\",\"code\":\"image_too_large\"}},\n  \"detail\":\"{}\"\n}}\n",
-        "供应商诊断 ".repeat(100)
-    );
-    let expected = original.replace("sk-upstream", "***");
+    let original = json!({
+        "error":{"type":"invalid_request_error","code":"image_too_large"},
+        "detail":[{"msg":"image exceeds the provider limit for sk-upstream", "input":"private-input", "ctx":{"error":"private-context"}}]
+    }).to_string();
+    let expected = "image exceeds the provider limit for ***（类型：invalid_request_error；代码：image_too_large）";
     let upstream_task = tokio::spawn(async move {
         let (mut stream, _) = upstream.accept().await.unwrap();
         let request = read_http_request(&mut stream).await.unwrap();
@@ -8124,7 +8124,21 @@ async fn native_responses_stream_error_preserves_status_and_safe_details() {
     assert_eq!(page.total, 1);
     assert_eq!(
         page.items[0].upstream_error_summary.as_deref(),
-        Some(expected.as_str())
+        Some(expected)
+    );
+    assert!(
+        !page.items[0]
+            .upstream_error_summary
+            .as_deref()
+            .unwrap()
+            .contains("private-input")
+    );
+    assert!(
+        !page.items[0]
+            .upstream_error_summary
+            .as_deref()
+            .unwrap()
+            .contains("private-context")
     );
     assert_eq!(page.items[0].status_code, Some(429));
     assert_eq!(page.items[0].upstream_status_code, Some(429));
@@ -9509,7 +9523,7 @@ async fn adapted_stream_failures_keep_redacted_diagnostics_in_request_logs() {
             let sse = match case {
                 "provider_error" => format!(
                     "data: {}\n\n",
-                    json!({"error":{"message":format!("Bearer sk-upstream {}", "错误".repeat(3000))}})
+                    json!({"error":{"message":format!("Bearer sk-upstream {}", "错误".repeat(3000)),"input":"private-stream-input","ctx":{"error":"private-stream-context"}}})
                 ),
                 "anthropic_json" => "data: {invalid JSON}\n\n".to_string(),
                 _ => {
@@ -9594,6 +9608,8 @@ async fn adapted_stream_failures_keep_redacted_diagnostics_in_request_logs() {
         );
         let summary = item.upstream_error_summary.as_deref().expect(case);
         assert!(!summary.contains("sk-upstream"));
+        assert!(!summary.contains("private-stream-input"));
+        assert!(!summary.contains("private-stream-context"));
         assert!(summary.chars().count() <= 4097);
         match case {
             "provider_error" => {

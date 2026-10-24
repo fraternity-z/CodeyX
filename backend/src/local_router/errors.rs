@@ -57,7 +57,7 @@ pub(crate) struct UpstreamStreamFailure(pub(crate) Value);
 
 impl std::fmt::Display for UpstreamStreamFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "上游流返回错误：{}", self.0)
+        formatter.write_str("上游流返回错误")
     }
 }
 
@@ -183,26 +183,94 @@ pub(crate) fn observe_upstream_stream_error(
     route: &RouteTarget,
 ) {
     // 在发送失败终态前记录，避免请求日志先完成后遗漏底层原因。
-    if let Some(probe) = probe
-        && let Some(summary) = sanitize_upstream_error_text(&format!("{error:#}"), route, 4096)
-    {
-        probe.mark_upstream_error_summary(&summary);
+    if let Some(probe) = probe {
+        let text = if let Some(upstream) = error.downcast_ref::<UpstreamStreamFailure>() {
+            let summary = upstream_error_summary(&upstream.0, route);
+            format!(
+                "{error:#}：{}",
+                upstream_error_detail(&summary)
+                    .as_deref()
+                    .unwrap_or("上游未提供具体错误信息")
+            )
+        } else {
+            format!("{error:#}")
+        };
+        if let Some(detail) = sanitize_upstream_error_text(&text, route, 4096) {
+            probe.mark_upstream_error_summary(&detail);
+        }
     }
 }
 
+fn upstream_error_message_text(value: &Value, route: &RouteTarget) -> Option<String> {
+    if let Some(message) = value.as_str() {
+        return sanitize_upstream_error_text(message, route, 512);
+    }
+    let mut message = String::new();
+    // 验证错误可能附带原始输入和上下文，仅提取 msg，并沿用脱敏和总长度限制。
+    for detail in value.as_array()? {
+        let Some(part) = detail
+            .get("msg")
+            .and_then(Value::as_str)
+            .and_then(|part| sanitize_upstream_error_text(part, route, 512))
+        else {
+            continue;
+        };
+        if !message.is_empty() {
+            message.push('；');
+        }
+        message.push_str(&part);
+        if message.chars().count() > 512 {
+            break;
+        }
+    }
+    sanitize_upstream_error_text(&message, route, 512)
+}
+
+fn upstream_message_rejects_image_input(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+    message.split([';', '；']).any(|part| {
+        let part = part.trim().trim_end_matches(['.', '!', '。']);
+        let part = part.strip_prefix("value error, ").unwrap_or(part);
+        // 只匹配完整的能力错误，避免把格式、尺寸和数量限制误判为模型不支持图片。
+        matches!(
+            part,
+            "image inputs are not supported for this model"
+                | "image inputs are not supported by this model"
+                | "image input is not supported for this model"
+                | "image input is not supported by this model"
+                | "this model does not support image inputs"
+                | "this model does not support image input"
+                | "this model does not support images"
+        )
+    })
+}
+
 pub(crate) fn upstream_error_summary(value: &Value, route: &RouteTarget) -> UpstreamErrorSummary {
-    let message = first_string_at(
-        value,
-        &[
-            "/response/error/message",
-            "/error/error/message",
-            "/error/message",
-            "/message",
-            "/detail",
-            "/error",
-        ],
-    )
-    .and_then(|message| sanitize_upstream_error_text(message, route, 512));
+    let message = [
+        "/response/error/message",
+        "/error/error/message",
+        "/error/message",
+        "/message",
+        "/detail",
+        "/error",
+    ]
+    .iter()
+    .find_map(|pointer| {
+        value
+            .pointer(pointer)
+            .and_then(|value| upstream_error_message_text(value, route))
+    })
+    .and_then(|message| {
+        if upstream_message_rejects_image_input(&message) {
+            sanitize_upstream_error_text(
+                &format!("当前模型不支持图片输入，请切换到支持图片的模型后重试；会话历史中的图片或截图也可能导致此错误。上游原因：{message}"),
+                route,
+                512,
+            )
+        } else {
+            Some(message)
+        }
+    });
     let error_type = first_string_at(
         value,
         &["/response/error/type", "/error/error/type", "/error/type"],
@@ -238,8 +306,7 @@ fn safe_upstream_error_identifier(value: &str) -> Option<String> {
 }
 
 fn upstream_error_log_detail(summary: &UpstreamErrorSummary) -> String {
-    // General diagnostic logs retain classification only. Request logs also
-    // retain the bounded upstream error body after route credential redaction.
+    // General diagnostic logs retain classification only.
     format!(
         "type={}; code={}",
         summary.error_type.as_deref().unwrap_or("unknown"),
@@ -438,12 +505,7 @@ where
         .unwrap_or_default();
     let detail = upstream_error_detail(&summary);
     if let Some(probe) = probe.as_ref() {
-        let mut original =
-            redact_upstream_error_text(&String::from_utf8_lossy(body), &resolved.route);
-        if body.len() == MAX_UPSTREAM_ERROR_BYTES {
-            original.push_str("\n[上游错误正文达到读取上限，内容可能不完整]");
-        }
-        probe.mark_upstream_error_summary(&original);
+        probe.mark_upstream_error_summary(detail.as_deref().unwrap_or("上游未提供具体错误信息"));
     }
     let mut message = format!(
         "Codey 线路「{}」请求模型 {} 时，上游返回 HTTP {status}",
@@ -559,4 +621,68 @@ pub(crate) fn annotate_upstream_websocket_failure(
         object.insert("message".to_string(), Value::String(message));
     }
     Some(upstream_error_log_detail(&summary))
+}
+
+#[cfg(test)]
+mod validation_error_tests {
+    use super::super::tests::router_config;
+    use super::*;
+
+    #[test]
+    fn validation_details_only_expose_bounded_redacted_messages() {
+        let (config, provider_id, _) = router_config("https://relay.example/v1".into());
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = &snapshot.routes[&provider_id];
+        let summary = upstream_error_summary(
+            &json!({"detail":[
+                {"msg":"invalid sk-upstream", "input":"private-input", "ctx":{"error":"private-context"}},
+                {"msg":true}, {"input":"hidden"}, {"msg":"second"}
+            ]}),
+            route,
+        );
+        assert_eq!(summary.message.as_deref(), Some("invalid ***；second"));
+        let failure = UpstreamStreamFailure(
+            json!({"detail":[{"msg":"safe", "input":"private-input", "ctx":{"error":"private-context"}}]}),
+        );
+        assert_eq!(failure.to_string(), "上游流返回错误");
+        let summary = upstream_error_summary(
+            &json!({"detail":[{"msg":"汉".repeat(600)},{"msg":"tail"}]}),
+            route,
+        );
+        let message = summary.message.unwrap();
+        assert_eq!(message.chars().count(), 513);
+        assert!(message.ends_with('…'));
+        assert_eq!(
+            upstream_error_summary(&json!({"detail":[{},null]}), route).message,
+            None
+        );
+    }
+
+    #[test]
+    fn image_capability_hint_is_specific_and_keeps_message_precedence() {
+        let (config, provider_id, _) = router_config("https://relay.example/v1".into());
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = &snapshot.routes[&provider_id];
+        for message in [
+            "Image inputs are not supported for this model.",
+            "Value error, this model does not support images!",
+        ] {
+            let summary = upstream_error_summary(&json!({"detail":[{"msg":message}]}), route);
+            assert!(summary.message.unwrap().contains("当前模型不支持图片输入"));
+        }
+        for message in [
+            "image inputs are not supported for this model size",
+            "image is too large",
+            "unsupported image format",
+            "too many images",
+        ] {
+            let summary = upstream_error_summary(&json!({"detail":[{"msg":message}]}), route);
+            assert_eq!(summary.message.as_deref(), Some(message));
+        }
+        let summary = upstream_error_summary(
+            &json!({"error":{"message":"primary"},"detail":[{"msg":"secondary"}]}),
+            route,
+        );
+        assert_eq!(summary.message.as_deref(), Some("primary"));
+    }
 }

@@ -12,6 +12,21 @@ fn response(status: &str, headers: &str, body: &str) -> String {
     )
 }
 
+fn sse_response(body: &[u8], chunk_size: usize) -> Response {
+    // In-memory chunks avoid TCP coalescing hiding split-line regressions.
+    let chunks = body
+        .chunks(chunk_size)
+        .map(|chunk| Ok::<_, std::io::Error>(chunk.to_vec()))
+        .collect::<Vec<_>>();
+    tokio_tungstenite::tungstenite::http::Response::builder()
+        .header("content-type", "text/event-stream")
+        .body(reqwest::Body::wrap_stream(futures_util::stream::iter(
+            chunks,
+        )))
+        .unwrap()
+        .into()
+}
+
 async fn server(responses: Vec<String>) -> (String, JoinHandle<Vec<String>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
@@ -137,6 +152,82 @@ async fn sse_supports_comments_crlf_notifications_and_multiline_data() {
     let outcome = test_mcp(json!({"url":url}), None).await;
     assert_eq!(outcome["ok"], true, "{outcome}");
     assert_eq!(server.await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn sse_accepts_long_utf8_lines_and_crlf_across_chunks() {
+    let expected = json!({"text":"汉字🚀".repeat(4096)});
+    let body = format!("data: {{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{expected}}}\n\n");
+    assert_eq!(
+        http_response(sse_response(body.as_bytes(), 7), 1)
+            .await
+            .unwrap(),
+        expected
+    );
+    let body = concat!(
+        ": heartbeat\r\n\r\n",
+        "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\r\n\r\n",
+        "event: message\r\n",
+        "data: {\"jsonrpc\":\"2.0\",\r\n",
+        "data: \"id\":1,\"result\":{\"text\":\"分块🚀\"}}\r\n\r\n",
+    );
+    for chunk_size in [1, 2, 3, 7, body.len()] {
+        assert_eq!(
+            http_response(sse_response(body.as_bytes(), chunk_size), 1)
+                .await
+                .unwrap(),
+            json!({"text":"分块🚀"})
+        );
+    }
+}
+
+#[tokio::test]
+async fn sse_chunking_preserves_eof_and_rpc_id_validation() {
+    for ending in ["", "\n", "\r\n", "\r\n\r"] {
+        let body = format!("data: {{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{}}}}{ending}");
+        assert_eq!(
+            http_response(sse_response(body.as_bytes(), 7), 1)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "SSE 流在返回匹配的响应前结束"
+        );
+    }
+    let body = b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{}}\n\n";
+    assert_eq!(
+        http_response(sse_response(body, 1), 1)
+            .await
+            .unwrap_err()
+            .to_string(),
+        "服务返回了不匹配的 JSON-RPC 响应标识"
+    );
+}
+
+#[tokio::test]
+async fn sse_chunking_preserves_message_and_body_limits() {
+    let event = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{}}\n\n";
+    let note = "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\"}\n\n";
+    for notifications in [MAX_MESSAGES - 1, MAX_MESSAGES] {
+        let body = format!("{}{event}", note.repeat(notifications));
+        let outcome = http_response(sse_response(body.as_bytes(), 31), 1).await;
+        if notifications < MAX_MESSAGES {
+            assert_eq!(outcome.unwrap(), json!({}));
+        } else {
+            assert_eq!(outcome.unwrap_err().to_string(), "SSE 消息数量超过检查上限");
+        }
+    }
+    for total in [MAX_BODY, MAX_BODY + 1] {
+        let body = format!(":{}\n{event}", "x".repeat(total - event.len() - 2));
+        let outcome = http_response(sse_response(body.as_bytes(), 257), 1).await;
+        if total == MAX_BODY {
+            assert_eq!(outcome.unwrap(), json!({}));
+        } else {
+            assert_eq!(
+                outcome.unwrap_err().to_string(),
+                "HTTP 响应超过 1 MiB 检查上限"
+            );
+        }
+    }
 }
 
 #[tokio::test]

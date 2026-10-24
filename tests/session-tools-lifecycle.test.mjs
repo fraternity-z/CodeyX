@@ -248,6 +248,57 @@ test("retained action buttons use the current tooltip installation after reload"
   assert.equal(runtime.document.getElementById("codey-runtime-toast").textContent, "operation finished");
 });
 
+test("retained delete button opens native confirmation once per click after repeated reloads", async () => {
+  const runtime = fixture();
+  const { row } = thread(runtime.document, "thread-1");
+  row.appendChild(new FakeElement("button", { "aria-label": "归档任务" }));
+  let confirmations = 0;
+  row.__reactFiber$test = { memoizedProps: { getItems: async () => [
+    { id: "delete-thread", onSelect: () => { confirmations += 1; } },
+  ] } };
+  runtime.load();
+  runtime.window.__codeyInstallSessionDeleteButtons(row);
+  const button = row.querySelector("[data-codey-session-delete]");
+  for (let index = 0; index < 3; index += 1) {
+    const oldInstall = runtime.window.__codeySessionToolsInstall;
+    oldInstall.dispose();
+    assert.equal(await oldInstall.openOfficialSessionDelete(row), false);
+    runtime.load();
+    runtime.window.__codeyInstallSessionDeleteButtons(row);
+    assert.equal(row.querySelectorAll("[data-codey-session-delete]").length, 1);
+    assert.equal(row.querySelector("[data-codey-session-delete]"), button);
+    const click = () => button.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {} });
+    click();
+    click();
+    await settle();
+    assert.equal(confirmations, index + 1);
+    assert.equal(button.disabled, false);
+  }
+  assert.equal(runtime.calls.length, 0, "only the native confirmation is opened");
+});
+
+test("delete action skips disabled native entries and recovers after a native failure", async () => {
+  const runtime = fixture();
+  const { row } = thread(runtime.document, "thread-1");
+  row.appendChild(new FakeElement("button", { "aria-label": "归档任务" }));
+  let calls = 0;
+  const entry = { id: "delete-thread", disabled: true, onSelect() { calls += 1; throw new Error("native failure"); } };
+  row.__reactFiber$test = { memoizedProps: { getItems: async () => [entry] } };
+  runtime.load();
+  runtime.window.__codeyInstallSessionDeleteButtons(row);
+  const button = row.querySelector("[data-codey-session-delete]");
+  const click = () => button.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {}, stopImmediatePropagation() {} });
+  click();
+  await settle();
+  assert.equal(calls, 0);
+  entry.disabled = false;
+  click();
+  await settle();
+  assert.equal(calls, 1);
+  assert.equal(button.disabled, false);
+  assert.equal(runtime.document.getElementById("codey-runtime-toast").textContent, "无法打开 Codex 永久删除确认，请重试");
+});
+
 test("a listener registration failure releases the listeners already installed", () => {
   const runtime = fixture();
   const register = runtime.document.addEventListener.bind(runtime.document);
