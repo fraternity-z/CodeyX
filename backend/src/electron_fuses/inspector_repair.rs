@@ -357,6 +357,7 @@ pub(crate) fn apply_inspector_repair(plan: &InspectorRepairPlan) -> Result<Inspe
     })
 }
 
+#[cfg(windows)]
 pub(crate) fn restore_inspector(app_dir: &Path) -> Result<InspectorRepairOutcome> {
     restore(&prepare_inspector_repair(app_dir)?)
 }
