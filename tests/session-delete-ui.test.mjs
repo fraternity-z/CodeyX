@@ -61,6 +61,7 @@ function attachRowFiber(row, { menuItems, outerMenuItems }) {
 }
 
 function loadInjection({
+  wrappedArchive = true,
   bridge,
   menuItems,
   outerMenuItems,
@@ -110,8 +111,12 @@ function loadInjection({
   body.appendChild(project);
   body.appendChild(tasksSection);
   thread.appendChild(actionBar);
-  actionBar.appendChild(archiveTooltip);
-  archiveTooltip.appendChild(archiveButton);
+  if (wrappedArchive) {
+    actionBar.appendChild(archiveTooltip);
+    archiveTooltip.appendChild(archiveButton);
+  } else {
+    actionBar.appendChild(archiveButton);
+  }
   project.appendChild(projectActionButton);
   tasksSection.appendChild(tasksTitleRow);
   tasksTitleRow.append(tasksTitleLabel, tasksActionBar);
@@ -232,6 +237,7 @@ function loadInjection({
   });
   return {
     actionBar,
+    archiveButton,
     archiveTooltip,
     bridgeCalls,
     dispatched,
@@ -245,6 +251,16 @@ function loadInjection({
 }
 
 const deleteMenuItem = (onSelect) => ({ id: "delete-thread", onSelect });
+
+test("keeps sidebar actions inside the native action bar when archive has no tooltip wrapper", () => {
+  const runtime = loadInjection({ wrappedArchive: false });
+  const exportButton = runtime.thread.querySelector("[data-codey-session-export]");
+  const deleteButton = runtime.thread.querySelector("[data-codey-session-delete]");
+
+  assert.deepEqual(runtime.actionBar.children, [exportButton, runtime.archiveButton, deleteButton]);
+  assert.deepEqual(runtime.thread.children, [runtime.actionBar]);
+  assert.equal(runtime.actionBar.getAttribute("data-codey-session-action-row"), "true");
+});
 
 test("injects the sidebar delete icon and opens the official permanent delete entry", async () => {
   const calls = [];

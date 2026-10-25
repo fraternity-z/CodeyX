@@ -1687,7 +1687,8 @@
 
   const archivePlacementTarget = (thread, archiveControl) => {
     const wrapper = archiveControl.parentElement;
-    return wrapper instanceof HTMLElement && wrapper !== thread
+    // Only skip the tooltip span; newer Codex puts the button directly in the action bar.
+    return wrapper instanceof HTMLElement && wrapper !== thread && wrapper.tagName === "SPAN"
       ? wrapper
       : archiveControl;
   };
