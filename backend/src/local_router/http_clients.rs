@@ -19,16 +19,16 @@ pub(super) struct HttpClientLease {
 }
 
 pub(crate) struct RouterUpstreamClient {
-    pub(super) prepared: crate::network_proxy::egress::PreparedClient,
+    pub(super) client: reqwest::Client,
     pub(super) generation: u64,
     pub(super) system_proxy_applies: bool,
 }
 
 impl std::ops::Deref for RouterUpstreamClient {
-    type Target = crate::network_proxy::egress::PreparedClient;
+    type Target = reqwest::Client;
 
     fn deref(&self) -> &Self::Target {
-        &self.prepared
+        &self.client
     }
 }
 

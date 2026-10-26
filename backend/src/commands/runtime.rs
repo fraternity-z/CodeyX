@@ -193,6 +193,12 @@ pub(super) async fn runtime_status_with_options(
     );
     if let Some(object) = status.as_object_mut() {
         object.insert("codexAppVersion".into(), Value::String(codex_app_version));
+        if let Some(warning) = runtime
+            .as_ref()
+            .and_then(|runtime| runtime.startup_warning.clone())
+        {
+            object.insert("startupWarning".into(), Value::String(warning));
+        }
         if let Some(error) = startup_error {
             object.insert("startupError".into(), Value::String(error));
         }
@@ -301,10 +307,7 @@ fn ensure_runtime_can_start(state: &AppState) -> Result<(), String> {
         return Err("Codey 正在退出，无法启动 Codex".to_string());
     }
     if state.config_load_error.is_some() {
-        return Err(
-            "现有配置无法读取，不能确认网络代理设置，Codex 未启动；请恢复配置并重新打开 Codey"
-                .to_string(),
-        );
+        return Err("现有配置无法读取，Codex 未启动；请恢复配置并重新打开 Codey".to_string());
     }
     // 平台限制原来要等 Codex 被停掉、本地路由起来之后才发现。这里直接拒绝，
     // 避免为一次必然失败的启动改写用户的 config.toml。
@@ -424,7 +427,6 @@ async fn launch_codey_inner_attempt(state: &Arc<AppState>) -> anyhow::Result<Val
         &state.trace_log_write_protection_active,
         state.crashpad_pending_stats.clone(),
         Arc::clone(&state.account_usage_cache),
-        state.network_proxy_egress().await,
     )
     .await
     {
@@ -442,6 +444,7 @@ async fn launch_codey_inner_attempt(state: &Arc<AppState>) -> anyhow::Result<Val
             |error| format!("Codey 已进入退出流程，停止刚启动的 Codex 失败：{error}"),
         )));
     }
+    let startup_warning = runtime.startup_warning.clone();
     *state.runtime.lock().await = Some(Arc::new(runtime));
     let runtime_generation = state.runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
     super::sync_wechat_claw_service(state).await;
@@ -454,7 +457,7 @@ async fn launch_codey_inner_attempt(state: &Arc<AppState>) -> anyhow::Result<Val
         codex_exit,
         runtime_generation,
     ));
-    Ok(json!({"status":"running"}))
+    Ok(json!({"status":"running", "warning": startup_warning}))
 }
 
 pub(super) async fn launch_codey_inner(state: &Arc<AppState>) -> anyhow::Result<Value> {
@@ -724,14 +727,14 @@ mod tests {
     use crate::config::{CodeyConfig, ProviderProfile};
 
     #[test]
-    fn network_proxy_blocks_start_when_configuration_cannot_be_read() {
+    fn unreadable_configuration_still_blocks_start_without_leaking_source() {
         let state = AppState {
             config: tokio::sync::RwLock::new(CodeyConfig::default()),
             config_load_error: Some("fixture-private-config-source".into()),
             ..AppState::default()
         };
         let error = super::ensure_runtime_can_start(&state).unwrap_err();
-        assert!(error.contains("不能确认网络代理设置"));
+        assert!(error.contains("现有配置无法读取"));
         assert!(error.contains("未启动"));
         assert!(!error.contains("fixture-private-config-source"));
     }

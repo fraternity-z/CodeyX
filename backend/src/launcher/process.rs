@@ -142,6 +142,7 @@ pub(super) fn spawn_codex_exit_watcher(
 pub(super) struct SpawnedCodex {
     pub(super) child: Option<Child>,
     pub(super) process_id: Option<u32>,
+    pub(super) launch_environment_applied: bool,
     #[cfg(windows)]
     pub(super) startup_process: Option<WindowsStartupProcess>,
     #[cfg(unix)]
@@ -247,9 +248,6 @@ pub(super) async fn spawn_codex(
         disable_pet: disable_codex_pet,
         subagent_gate_active,
         misc_model,
-        proxy_auth: options
-            .launch_proxy
-            .and_then(crate::launch_proxy::CodexLaunchProxy::authentication),
     };
     #[cfg(not(any(windows, target_os = "macos")))]
     let _ = (
@@ -307,7 +305,6 @@ pub(super) async fn spawn_codex(
             let use_require = require_patch.is_some();
             let use_inspector =
                 !use_require && inspect_fuse.inspector_possible() && !retry_without_inspector;
-            require_proxy_authentication_entry(&patch_options, use_require || use_inspector)?;
 
             let (wrapper, wrapper_preparation_error) = match prepare_cli_wrapper(
                 app_dir,
@@ -357,10 +354,7 @@ pub(super) async fn spawn_codex(
                     &runtime_arguments,
                     runtime_config_overrides,
                     subagent_gate_active,
-                    WindowsLaunchProxyContext {
-                        environment: launch_proxy_environment.as_deref(),
-                        capture: options.launch_proxy.and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
-                    },
+                    launch_proxy_environment.as_deref(),
                     format!(
                         "启动尝试 {attempt}/2：NODE_OPTIONS 注入不可用（{}），主进程 Inspector 不可用（{}），且 CLI 兼容入口不可用：{error:#}",
                         fuses.node_options.as_str(),
@@ -390,10 +384,7 @@ pub(super) async fn spawn_codex(
                 debug_port,
                 &launch_arguments,
                 &launch_environment,
-                wrapper_environment_required || options.launch_proxy.is_some(),
-                options
-                    .launch_proxy
-                    .and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
+                wrapper_environment_required,
             )
             .await;
             let (mut spawned, wrapper_environment_applied) = match launch {
@@ -459,11 +450,7 @@ pub(super) async fn spawn_codex(
                 .then_some(require_patch)
                 .flatten()
                 .map(|prepared| prepared.marker_path);
-            if inspector_port.is_none()
-                && wrapper_handshake.is_none()
-                && require_marker.is_none()
-                && patch_options.proxy_auth.is_none()
-            {
+            if inspector_port.is_none() && wrapper_handshake.is_none() && require_marker.is_none() {
                 // The process is already running without any compatibility
                 // entry. It carries no constraints (see above), so keep it
                 // instead of stopping and relaunching the same configuration.
@@ -584,7 +571,6 @@ pub(super) async fn spawn_codex(
                         }
                         continue;
                     }
-                    require_proxy_authentication_entry(&patch_options, false)?;
                     if !runtime_config_overrides.is_empty() {
                         return Err(recovery::recoverable(format!(
                             "Codex 启动兼容方案未能确认 app-server 运行时覆盖；Codey 集成未启用：{startup_error}"
@@ -600,10 +586,7 @@ pub(super) async fn spawn_codex(
                         debug_port,
                         &runtime_arguments,
                         launch_proxy_environment.as_deref().unwrap_or(&[]),
-                        options.launch_proxy.is_some(),
-                        options
-                            .launch_proxy
-                            .and_then(crate::launch_proxy::CodexLaunchProxy::capture_scope),
+                        false,
                     )
                     .await
                     {
@@ -647,7 +630,6 @@ pub(super) async fn spawn_codex(
         .await;
         let use_require = require_patch.is_some();
         let use_inspector = !use_require && inspect_fuse.inspector_possible();
-        require_proxy_authentication_entry(&patch_options, use_require || use_inspector)?;
         // Only request a breakpoint when the runtime explicitly allows it.
         // Never combine Inspector and NODE_OPTIONS: both wrap Module._load.
         let pass_inspect_brk = use_inspector;
@@ -1685,12 +1667,6 @@ fn combined_startup_error(
     .into()
 }
 
-#[cfg(windows)]
-struct WindowsLaunchProxyContext<'a> {
-    environment: Option<&'a [(String, String)]>,
-    capture: Option<codey_traffic_service::client::ProcessScope>,
-}
-
 /// Launches Codex with no compatibility entry at all. Only allowed when the
 /// launch carries no runtime constraints; otherwise the caller must stop.
 #[cfg(windows)]
@@ -1700,7 +1676,7 @@ async fn launch_windows_codex_without_compatibility(
     runtime_arguments: &[String],
     runtime_config_overrides: &[String],
     subagent_gate_active: bool,
-    launch_proxy: WindowsLaunchProxyContext<'_>,
+    launch_proxy_environment: Option<&[(String, String)]>,
     startup_error: String,
 ) -> Result<SpawnedCodex> {
     if !runtime_config_overrides.is_empty() {
@@ -1717,9 +1693,8 @@ async fn launch_windows_codex_without_compatibility(
         app_dir,
         debug_port,
         runtime_arguments,
-        launch_proxy.environment.unwrap_or(&[]),
-        launch_proxy.environment.is_some(),
-        launch_proxy.capture,
+        launch_proxy_environment.unwrap_or(&[]),
+        false,
     )
     .await
     .with_context(|| format!("Codex 启动设置未能应用，且启动失败：{startup_error}"))?;
@@ -2022,17 +1997,6 @@ async fn install_startup_patch_with_cli_fallback(
         spawned,
         require_marker,
     } = context;
-    // The CLI wrapper cannot answer Chromium proxy challenges. With a selected
-    // pool exit we must wait for the main-process hook itself to be confirmed.
-    let wrapper_handshake = if patch_options.proxy_auth.is_some() {
-        None
-    } else {
-        wrapper_handshake
-    };
-    require_proxy_authentication_entry(
-        &patch_options,
-        inspector_port.is_some() || require_marker.is_some(),
-    )?;
     let exited = startup_process_exited(spawned);
     let compatibility = wait_for_startup_compatibility(
         inspector_port,
@@ -2048,17 +2012,6 @@ async fn install_startup_patch_with_cli_fallback(
         exited = exited => Err(exited.into()),
         result = compatibility => result,
     }
-}
-
-#[cfg(any(windows, target_os = "macos"))]
-fn require_proxy_authentication_entry(
-    options: &crate::codex_startup_patch::PatchOptions,
-    available: bool,
-) -> Result<()> {
-    if options.proxy_auth.is_some() && !available {
-        anyhow::bail!("Codex 主进程认证入口不可用，代理池启动已停止；请修复客户端兼容入口后重试");
-    }
-    Ok(())
 }
 
 #[cfg(any(windows, target_os = "macos"))]
@@ -2512,6 +2465,7 @@ fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Resu
     Ok(SpawnedCodex {
         child: Some(child),
         process_id,
+        launch_environment_applied: true,
         #[cfg(unix)]
         process_group_id: process_id,
         #[cfg(target_os = "macos")]
@@ -2652,34 +2606,7 @@ mod cli_wrapper_tests {
             disable_pet: false,
             subagent_gate_active: true,
             misc_model: None,
-            proxy_auth: None,
         }
-    }
-
-    #[cfg(any(windows, target_os = "macos"))]
-    #[tokio::test]
-    async fn process_proxy_requires_a_main_process_authentication_entry() {
-        let mut options = test_patch_options();
-        assert!(require_proxy_authentication_entry(&options, false).is_ok());
-        options.proxy_auth = Some(crate::network_proxy::process_gateway::ProcessProxyAuth {
-            host: "127.0.0.1".into(),
-            port: 49152,
-            username: "codeyx".into(),
-            password: "fixture-private-value".into(),
-            realm: "fixture".into(),
-        });
-        assert!(require_proxy_authentication_entry(&options, true).is_ok());
-        let error = install_startup_patch_with_cli_fallback(
-            None,
-            options,
-            &[],
-            None,
-            test_context(tokio::time::Instant::now() + Duration::from_secs(1)),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("认证入口不可用"));
-        assert!(!error.to_string().contains("fixture-private-value"));
     }
 
     #[tokio::test(start_paused = true)]
@@ -3351,6 +3278,7 @@ mod cli_wrapper_tests {
         let mut spawned = SpawnedCodex {
             child: Some(child),
             process_id,
+            launch_environment_applied: true,
             #[cfg(windows)]
             startup_process: None,
             #[cfg(unix)]

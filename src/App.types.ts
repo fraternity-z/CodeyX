@@ -115,7 +115,7 @@ export type Config = {
   slimCodexPet: boolean;
   gpuLaunchMode: "off" | "disableGpu" | "disableGpuRasterization";
   codexLaunchProxy: string;
-  networkProxy?: import("./features/network-proxy").NetworkProxyConfig;
+  networkProxy?: unknown;
   fastContextTools: boolean;
   subagentOptimization: boolean;
   subagentModel: string;
@@ -262,6 +262,7 @@ export type RuntimeStatus = {
   activeProfileName?: string;
   officialAccountAvailable?: boolean;
   startupError?: string;
+  startupWarning?: string | null;
   codexAppPath?: string;
   maintenance?: Maintenance;
   injectionScripts?: InjectionScriptStatus[];

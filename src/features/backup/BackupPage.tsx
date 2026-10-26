@@ -14,7 +14,7 @@ export function BackupPage({ container, ...options }: BackupOptions & { containe
     {remote ? <p role="status" className="text-sm text-muted">备份与恢复仅可在电脑端操作。</p> : <div className="flex flex-col gap-5">
       <div className="rounded-xl border border-warning/30 bg-warning/10 p-4 text-xs leading-relaxed space-y-2">
         <p className="m-0">JSON 含线路 API Key、请求头和通知凭据，未加密，请仅存放在可信位置。</p>
-        <p className="m-0">备份包括线路、模型和功能配置。恢复时保留本机账号与插件线路、代理池、安装路径及脚本路径；账号凭据、插件文件、MCP / Skill、会话和日志需单独备份。WebDAV 连接设置独立保存，不随备份导出。</p>
+        <p className="m-0">备份包括线路、模型和功能配置。恢复时保留本机账号与插件线路、安装路径及脚本路径；账号凭据、插件文件、MCP / Skill、会话和日志需单独备份。WebDAV 连接设置独立保存，不随备份导出。</p>
       </div>
       {options.dirty && <p role="status" className="m-0 text-sm text-warning">有未保存的配置更改，请先保存或放弃后再备份与恢复。</p>}
       {c.error && <p role="alert" className="m-0 text-sm text-danger break-words">{c.error}</p>}
@@ -56,7 +56,7 @@ export function BackupPage({ container, ...options }: BackupOptions & { containe
     </div>}
     {options.active && c.preview && <Dialog open onOpenChange={open => { if (!open) c.cancelRestore(); }}>
       <DialogContent container={container}>
-        <DialogHeader><DialogTitle>恢复这份配置备份？</DialogTitle><DialogDescription>将覆盖当前可恢复的配置。恢复前自动保留一份本地备份；本机账号、插件线路、代理池及路径保持不变。</DialogDescription></DialogHeader>
+        <DialogHeader><DialogTitle>恢复这份配置备份？</DialogTitle><DialogDescription>将覆盖当前可恢复的配置。恢复前自动保留一份本地备份；本机账号、插件线路及路径保持不变。</DialogDescription></DialogHeader>
         <dl className="text-sm space-y-2 break-words"><dt>来源</dt><dd>{c.preview.source}</dd><dt>备份时间</dt><dd>{new Date(c.preview.createdAt).toLocaleString()}</dd><dt>配置内容</dt><dd>{c.preview.routeCount} 条普通线路 · {c.preview.channelCount} 个通知渠道</dd></dl>
         <DialogFooter><Button variant="outline" disabled={!!c.busy} onClick={c.cancelRestore}>取消</Button><Button variant="destructive" disabled={c.blocked || options.dirty} onClick={() => void c.restore()}>确认恢复</Button></DialogFooter>
       </DialogContent>

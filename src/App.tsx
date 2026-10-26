@@ -703,7 +703,7 @@ export function App({
           ),
           remote: (active) => <RemoteControlPanel active={active} />,
           network: (active) => <NetworkProxyPage active={active && (!embedded || modalVisible)}
-            config={config} isBusy={isBusy} onConfigChange={handleConfigChange} onSaved={applySavedConfig} />,
+            config={config} isBusy={isBusy} onConfigChange={handleConfigChange} />,
           sessions: (active) => <SessionsPage active={active} isBusy={isBusy} onRestart={handleRestartCodex} container={popupContainer} />,
           backup: (active) => <BackupPage active={active && (!embedded || modalVisible)} isBusy={isBusy}
             dirty={dirty} setBusy={setBusy} onSaved={applySavedConfig} onReload={load} container={popupContainer} />,

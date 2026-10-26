@@ -84,7 +84,6 @@ pub struct PatchOptions {
     pub subagent_gate_active: bool,
     /// 杂事模型在 Codex 模型目录里的 id。`None` 表示保持 Codex 原生行为。
     pub misc_model: Option<String>,
-    pub(crate) proxy_auth: Option<crate::network_proxy::process_gateway::ProcessProxyAuth>,
 }
 
 pub fn inspector_argument(port: u16) -> String {
@@ -159,10 +158,6 @@ fn patch_expression_with_runtime_overrides_and_validation(
         .replace(
             "\"__CODEY_MISC_MODEL_ID__\"",
             &serde_json::to_string(&options.misc_model).expect("misc model should serialize"),
-        )
-        .replace(
-            "\"__CODEY_PROCESS_PROXY_AUTH__\"",
-            &serde_json::to_string(&options.proxy_auth).expect("local proxy auth should serialize"),
         )
         .replace(
             "\"__CODEY_STARTUP_SPLASH__\"",
@@ -2289,7 +2284,6 @@ mod tests {
             disable_pet: true,
             subagent_gate_active: true,
             misc_model: None,
-            proxy_auth: None,
         });
 
         assert!(expression.contains("const disablePet = true"));
@@ -2352,7 +2346,6 @@ mod tests {
                 disable_pet: false,
                 subagent_gate_active: true,
                 misc_model: None,
-                proxy_auth: None,
             },
             &overrides,
         );
@@ -2369,7 +2362,6 @@ mod tests {
             disable_pet: false,
             subagent_gate_active: true,
             misc_model: None,
-            proxy_auth: None,
         });
         assert!(!unset.contains("__CODEY_MISC_MODEL_ID__"));
         assert!(unset.contains("const rawMiscModelId = null"));
@@ -2379,7 +2371,6 @@ mod tests {
             disable_pet: false,
             subagent_gate_active: true,
             misc_model: Some("relay/housekeeping".to_string()),
-            proxy_auth: None,
         });
         assert!(selected.contains("const rawMiscModelId = \"relay/housekeeping\""));
         assert!(selected.contains("globalThis, \"__CODEY_MISC_MODEL__\""));
@@ -2520,7 +2511,6 @@ mod tests {
             disable_pet: true,
             subagent_gate_active: true,
             misc_model: None,
-            proxy_auth: None,
         });
         install_over_websocket(&format!("ws://{address}"), &expression, false)
             .await
@@ -2663,7 +2653,6 @@ mod tests {
             disable_pet: true,
             subagent_gate_active: true,
             misc_model: None,
-            proxy_auth: None,
         });
         let result = install_over_websocket(&format!("ws://{address}"), &expression, true).await;
         server.await.unwrap();
@@ -2747,7 +2736,6 @@ mod tests {
             disable_pet: true,
             subagent_gate_active: true,
             misc_model: None,
-            proxy_auth: None,
         });
         let error = tokio::time::timeout(
             std::time::Duration::from_millis(500),
@@ -2999,7 +2987,6 @@ mod tests {
                 disable_pet: false,
                 subagent_gate_active: true,
                 misc_model: None,
-                proxy_auth: None,
             },
             &["analytics.enabled=false".to_string()],
         )
@@ -3051,7 +3038,6 @@ mod tests {
             disable_pet: false,
             subagent_gate_active: false,
             misc_model: None,
-            proxy_auth: None,
         };
         let failure = prepare_startup_require_with_path(temp.path(), options.clone(), &[], |_| {
             Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())

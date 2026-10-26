@@ -94,13 +94,6 @@ fn validate(config: &CodeyConfig) -> Result<(), String> {
         .conversation_git
         .validate()
         .map_err(|_| "备份中的 Git 配置无效")?;
-    config
-        .validate_network_proxy()
-        .map_err(|_| "备份中的代理配置无效")?;
-    if !config.codex_launch_proxy.trim().is_empty() {
-        crate::config::validate_codex_launch_proxy(&config.codex_launch_proxy)
-            .map_err(|_| "备份中的启动代理无效")?;
-    }
     for policies in config.model_context_by_provider.values() {
         for policy in policies.values() {
             policy

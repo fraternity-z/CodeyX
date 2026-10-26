@@ -611,13 +611,12 @@ pub(super) async fn refresh_official_account_tokens(
     // 线路已下线，没必要再碰远端）。SIWC 刷新失败只标记直连槽位，对话会
     // 在线路重算后自动回落到 Codex 平面。
     if !record.invalid() && record.siwc.is_some() {
-        let proxy = super::official_account_usage_proxy(state, account_id).await?;
         match refresh_siwc_if_stale_with_proxy(
             &state.http_client,
             &store,
             account_id,
             Some(&state.official_proxied_clients),
-            proxy.uses_pool().then(|| proxy.as_deref()).flatten(),
+            None,
         )
         .await
         {
@@ -814,7 +813,7 @@ pub(super) async fn drop_derived_official_routes(state: &Arc<AppState>) -> Resul
 async fn official_account_client(
     state: &Arc<AppState>,
     account_id: &str,
-) -> Result<crate::network_proxy::egress::PreparedClient, String> {
+) -> Result<reqwest::Client, String> {
     let proxy = super::official_account_usage_proxy(state, account_id).await?;
     let client = crate::official_accounts::official_http_client(
         &state.http_client,
@@ -822,7 +821,7 @@ async fn official_account_client(
         proxy.as_deref(),
     )
     .map_err(|_| "无法创建官方账号代理客户端".to_string())?;
-    Ok(proxy.bind(client))
+    Ok(client)
 }
 
 async fn revoke_account_siwc(

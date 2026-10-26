@@ -167,33 +167,6 @@
   }
   const Module = process.getBuiltinModule("module");
   const originalLoad = Module._load;
-  // This credential only opens Codey's temporary loopback gateway. Never
-  // expose it on globalThis, in diagnostics, or to an origin authentication prompt.
-  const rawProcessProxyAuth = "__CODEY_PROCESS_PROXY_AUTH__";
-  const processProxyAuth = rawProcessProxyAuth && typeof rawProcessProxyAuth === "object"
-    ? rawProcessProxyAuth : null;
-  if (processProxyAuth) {
-    const { host, port, username, password, realm } = processProxyAuth;
-    if (host !== "127.0.0.1" || !Number.isInteger(port) || port < 1 || port > 65535 ||
-        username !== "codeyx" || !/^[a-f0-9]{32}$/.test(password) || !/^codeyx-[a-f0-9]{32}$/.test(realm)) {
-      throw new Error("Codey local proxy authentication is invalid");
-    }
-    let app;
-    try {
-      const parent = typeof module === "object" ? module : undefined;
-      app = Reflect.apply(originalLoad, Module, ["electron", parent, false])?.app;
-      if (typeof app?.prependListener !== "function") throw new Error();
-      app.prependListener("login", (event, _contents, details, authInfo, callback) => {
-        if (authInfo?.isProxy !== true || authInfo.host !== host || authInfo.port !== port ||
-            authInfo.scheme?.toLowerCase() !== "basic" || authInfo.realm !== realm) return;
-        event.preventDefault();
-        if (details?.firstAuthAttempt === false) callback();
-        else callback(username, password);
-      });
-    } catch {
-      throw new Error("Codey local proxy authentication could not be installed");
-    }
-  }
   const readCodexAppVersion = () => {
     try {
       const parent = typeof module === "object" ? module : undefined;

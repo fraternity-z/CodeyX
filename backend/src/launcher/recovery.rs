@@ -136,7 +136,6 @@ async fn launch_native(app_dir: &Path, home: &Path) -> Result<()> {
             "",
             required.then_some(environment.as_slice()),
             required,
-            None,
         )
         .await?;
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -274,24 +273,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn network_proxy_configuration_blocks_native_recovery_before_launch() {
+    async fn applied_launch_proxy_blocks_native_recovery_before_launch() {
         let directory = tempfile::tempdir().unwrap();
-        let mut config = CodeyConfig::default();
-        assert!(!config.requires_proxy_aware_launch());
-        config.codex_launch_proxy = "http://127.0.0.1:1080".into();
-        assert!(config.requires_proxy_aware_launch());
-        config.codex_launch_proxy.clear();
-        config.profiles[0].upstream_proxy = "socks5h://proxy.invalid:1080".into();
-        assert!(config.requires_proxy_aware_launch());
-        config.profiles[0].upstream_proxy.clear();
-        config.network_proxy.process_proxy =
-            crate::network_proxy::model::ProxySelection::Node { id: "exit".into() };
-        assert!(config.requires_proxy_aware_launch());
+        let (proxy, warning) =
+            crate::launch_proxy::CodexLaunchProxy::resolve_for_start("http://127.0.0.1:1080");
+        assert!(proxy.is_some());
+        assert!(warning.is_none());
         let error = after_integration_failure(
             directory.path(),
             Path::new("nonexistent-codex"),
             false,
-            !config.requires_proxy_aware_launch(),
+            proxy.is_none(),
             recoverable("fixture startup failure"),
         )
         .await;

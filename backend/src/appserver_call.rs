@@ -96,7 +96,7 @@ enum Reply {
 
 async fn invoke(route: &Route, method: &str, params: &Value) -> Result<Reply, String> {
     let mut guard = SHARED.lock().await;
-    let launch = crate::launch_proxy::shared_app_server_launch()?;
+    let launch = crate::launch_proxy::shared_app_server_launch();
     let key = route_key(route);
     let reusable = guard.as_mut().is_some_and(|client| {
         client.route_key == key && client.launch_generation == launch.generation && !client.exited()
@@ -135,22 +135,7 @@ impl SharedClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
             .kill_on_drop(true);
-        #[cfg(windows)]
-        let capture = launch.capture;
-        #[cfg(windows)]
-        if capture.is_some() {
-            command.creation_flags(
-                windows::Win32::System::Threading::CREATE_SUSPENDED.0
-                    | windows::Win32::System::Threading::CREATE_NO_WINDOW.0,
-            );
-        }
         let mut child = command.spawn().map_err(|_| "app-server 启动失败")?;
-        #[cfg(windows)]
-        if let Some(scope) = &capture {
-            crate::network_proxy::process_capture::bind_and_resume(scope, &mut child)
-                .await
-                .map_err(|_| "app-server 未能绑定到流量接管会话，已停止启动")?;
-        }
         let stdin = child.stdin.take().ok_or("app-server 缺少输入")?;
         let stdout = child.stdout.take().ok_or("app-server 缺少输出")?;
         let mut client = Self {

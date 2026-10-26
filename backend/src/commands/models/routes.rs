@@ -158,9 +158,6 @@ pub async fn delete_route(
     let config = config_after_route_deletion(&previous, route_id)?;
     let config = save_config_to_store(state, config).await?;
     *state.config.write().await = config.clone();
-    if let Some(egress) = state.network_proxy_egress.get() {
-        egress.configure(config.network_proxy.clone());
-    }
     let model_state = current_model_state_async(&config).await?;
     drop(_config_write_guard);
     let hot_reload = hot_reload_runtime_models(state).await;
@@ -209,11 +206,6 @@ pub(crate) fn config_after_route_deletion(
         .model_reasoning_efforts_by_provider
         .remove(&removed_provider_id);
     config.profiles.retain(|profile| profile.id != route_id);
-    config.network_proxy.upstream_by_profile.remove(route_id);
-    config
-        .network_proxy
-        .upstream_enabled_by_profile
-        .remove(route_id);
     config
         .selected_models_by_provider
         .remove(&removed_provider_id);
@@ -673,7 +665,7 @@ mod tests {
     use crate::config::{AUTH_MODE_OFFICIAL_ACCOUNT, ProviderProfile, official_profile_id};
 
     #[test]
-    fn deleting_route_clears_only_its_proxy_selection_and_switch() {
+    fn deleting_route_preserves_retired_proxy_settings() {
         let mut config = crate::config::CodeyConfig {
             profiles: ["first", "second"]
                 .map(|id| {
@@ -686,33 +678,12 @@ mod tests {
                 .into(),
             ..Default::default()
         };
-        for id in ["first", "second"] {
-            config.network_proxy.upstream_by_profile.insert(
-                id.into(),
-                crate::network_proxy::model::ProxySelection::Legacy,
-            );
-            config
-                .network_proxy
-                .upstream_enabled_by_profile
-                .insert(id.into(), false);
-        }
+        config.network_proxy = Some(serde_json::json!({
+            "upstreamByProfile": {"first": {"kind":"node", "id":"retired"}},
+            "unknownLegacyField": true,
+        }));
         let next = super::config_after_route_deletion(&config, "first").unwrap();
-        assert!(!next.network_proxy.upstream_by_profile.contains_key("first"));
-        assert!(
-            !next
-                .network_proxy
-                .upstream_enabled_by_profile
-                .contains_key("first")
-        );
-        assert!(
-            next.network_proxy
-                .upstream_by_profile
-                .contains_key("second")
-        );
-        assert_eq!(
-            next.network_proxy.upstream_enabled_by_profile.get("second"),
-            Some(&false)
-        );
+        assert_eq!(next.network_proxy, config.network_proxy);
     }
 
     #[test]

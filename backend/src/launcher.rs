@@ -274,6 +274,7 @@ impl RuntimeSubagentConfig {
 
 pub struct CodeyRuntime {
     pub codex_app_path: PathBuf,
+    pub startup_warning: Option<String>,
     pub maintenance: MaintenanceStatus,
     pub applied_config: CodeyConfig,
     applied_model_config: RwLock<AppliedModelConfig>,
@@ -296,7 +297,6 @@ pub struct CodeyRuntime {
     crashpad_guard_shutdown: Mutex<Option<oneshot::Sender<()>>>,
     crashpad_guard_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     local_router: Option<LocalRouter>,
-    process_proxy: Option<crate::network_proxy::process_gateway::ProcessGateway>,
 }
 
 fn validate_router_provider(home: &std::path::Path) -> Result<()> {
@@ -1869,7 +1869,11 @@ async fn spawn_and_inject_runtime(
             .await);
         }
     };
-    crate::launch_proxy::set_active(launch_proxy.cloned());
+    crate::launch_proxy::set_active(
+        launch_proxy
+            .filter(|_| spawned.launch_environment_applied)
+            .cloned(),
+    );
     let codex_spawn_ms = spawn_inject_started.elapsed().as_millis() as u64;
     let maintenance = MaintenanceStatus {
         session_status: storage.session_maintenance.status,
@@ -2112,42 +2116,17 @@ impl CodeyRuntime {
         trace_log_write_protection_active: &AtomicBool,
         crashpad_pending_stats: CrashpadPendingStatsHandle,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
-        egress: Arc<crate::network_proxy::egress::EgressPool>,
     ) -> Result<(Self, oneshot::Receiver<()>)> {
-        config
-            .validate_network_proxy()
-            .map_err(anyhow::Error::msg)?;
         if !crate::codex_config::runtime_router_platform_supported() {
             return Err(anyhow::anyhow!(
                 crate::codex_config::unsupported_runtime_platform_message()
             ));
         }
-        let process_proxy = if config.network_proxy.has_process_proxy() {
-            Some(
-                crate::network_proxy::process_gateway::ProcessGateway::start(
-                    egress.clone(),
-                    config.network_proxy.process_proxy.clone(),
-                )
-                .await
-                .map_err(anyhow::Error::msg)?,
-            )
-        } else {
-            None
-        };
-        if config.network_proxy.process_capture {
-            #[cfg(windows)]
-            process_proxy
-                .as_ref()
-                .context("流量接管缺少代理池出口")?
-                .enable_capture()
-                .await?;
-            #[cfg(not(windows))]
-            anyhow::bail!("当前平台尚不支持流量接管，请明确关闭接管后再启动");
+        let (launch_proxy, startup_warning) =
+            crate::launch_proxy::CodexLaunchProxy::resolve_for_start(&config.codex_launch_proxy);
+        if let Some(warning) = &startup_warning {
+            crate::launch_proxy::record_startup_warning(warning);
         }
-        let launch_proxy = match &process_proxy {
-            Some(gateway) => Some(crate::launch_proxy::CodexLaunchProxy::from_gateway(gateway)),
-            None => crate::launch_proxy::CodexLaunchProxy::resolve(&config.codex_launch_proxy)?,
-        };
         let home = codex_home();
         repair_startup_reserved_providers(home).await;
         trace_log_write_protection_active.store(false, Ordering::Release);
@@ -2182,7 +2161,7 @@ impl CodeyRuntime {
         .await?;
         stage_timings.mark("storageAndCatalogMs");
         let local_router = if config.local_router_enabled {
-            Some(LocalRouter::start_with_egress(config, account_usage_cache, egress).await?)
+            Some(LocalRouter::start_with_usage(config, account_usage_cache).await?)
         } else {
             None
         };
@@ -2228,7 +2207,7 @@ impl CodeyRuntime {
                     home,
                     &storage.app_dir,
                     config.local_router_enabled,
-                    !config.requires_proxy_aware_launch(),
+                    launch_proxy.is_none(),
                     recovery::recoverable(error),
                 )
                 .await);
@@ -2263,13 +2242,23 @@ impl CodeyRuntime {
                     home,
                     &recovery_app_dir,
                     config.local_router_enabled,
-                    !config.requires_proxy_aware_launch(),
+                    launch_proxy.is_none(),
                     error,
                 )
                 .await);
             }
         };
         stage_timings.mark("spawnAndInjectMs");
+        let startup_warning = startup_warning.or_else(|| {
+            let warning = crate::launch_proxy::application_warning(
+                launch_proxy.is_some(),
+                spawned.launch_environment_applied,
+            );
+            if let Some(warning) = &warning {
+                crate::launch_proxy::record_startup_warning(warning);
+            }
+            warning
+        });
         stage_timings.report();
         #[cfg(target_os = "macos")]
         let inspector_argument = spawned.inspector_argument.clone();
@@ -2324,7 +2313,7 @@ impl CodeyRuntime {
                 crashpad_guard_shutdown: Mutex::new(Some(crashpad_guard_shutdown)),
                 crashpad_guard_task: Mutex::new(Some(crashpad_guard_task)),
                 local_router,
-                process_proxy,
+                startup_warning,
             },
             codex_exit,
         ))
@@ -2421,9 +2410,6 @@ impl CodeyRuntime {
         .await;
         if let Some(child) = self.child.lock().await.take() {
             reap_child_after_cleanup(child, "reap_child_during_runtime_stop").await;
-        }
-        if let Some(gateway) = &self.process_proxy {
-            gateway.stop().await;
         }
         config_restore.await.context("恢复 Codex 配置失败")?;
         let local_router_stop = match self.local_router.as_ref() {
@@ -2652,9 +2638,6 @@ mod subagent_model_tests;
 
 #[cfg(test)]
 mod model_delivery_test_support;
-
-#[cfg(test)]
-mod process_proxy_tests;
 
 #[cfg(all(test, unix))]
 mod tests;

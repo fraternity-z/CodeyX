@@ -32,7 +32,6 @@ mod model_catalog;
 mod model_id;
 mod model_list;
 mod native_update_ui;
-mod network_proxy;
 mod notifications;
 mod official_accounts;
 mod pending_approval;

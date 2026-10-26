@@ -248,28 +248,13 @@ impl RouterServer {
                             .as_ref()
                             .map(|auth| auth.path.clone())
                             .unwrap_or_else(|| self.official_auth_path.clone());
-                        match self
-                            .egress
-                            .proxy_for_profile(
-                                &route.profile_id,
-                                route.upstream_proxy.as_deref(),
-                                route.plugin_transport.is_some(),
-                            )
-                            .await
-                        {
-                            Ok(proxy) => {
-                                crate::account_usage::query_shared_snapshot_at(
-                                    &self.account_usage_cache,
-                                    &auth_path,
-                                    args.force_refresh.unwrap_or(false),
-                                    proxy.as_deref(),
-                                )
-                                .await
-                            }
-                            Err(message) => {
-                                json!({"status":"error", "reason":"proxy_unavailable", "message":message})
-                            }
-                        }
+                        crate::account_usage::query_shared_snapshot_at(
+                            &self.account_usage_cache,
+                            &auth_path,
+                            args.force_refresh.unwrap_or(false),
+                            route.upstream_proxy.as_deref(),
+                        )
+                        .await
                     }
                 };
                 write_json_response(&mut stream, 200, &value).await?;
@@ -874,8 +859,6 @@ impl RouterServer {
         request: &HttpRequest,
         route: &RouteTarget,
     ) -> std::result::Result<(HeaderMap, RouterUpstreamClient), (u16, &'static str, String)> {
-        // Pin one egress lease before auth refresh or any plugin network work.
-        // The caller retains it through the whole response, including SSE.
         let client = self
             .upstream_client(route)
             .await
@@ -931,11 +914,7 @@ impl RouterServer {
                     &self.siwc_auth_cache,
                     &auth_client.client,
                     &self.http_clients.proxied,
-                    client
-                        .proxy
-                        .uses_pool()
-                        .then(|| client.proxy.as_deref())
-                        .flatten(),
+                    None,
                 )
                 .await
                 .map_err(|error| {
@@ -2209,7 +2188,6 @@ impl RouterServer {
             // Grok 回包要改工具名和整数参数，不能走原样透传的上游 WebSocket。
             // 历史仍由下面的 HTTP 回退展开。
             if !compacting
-                && !upstream_client.proxy.uses_pool()
                 && !upstream_client.system_proxy_applies
                 && !lifecycle.is_active()
                 && !native_upstream_needs_xai_compat(upstream_url, &resolved.upstream_model)

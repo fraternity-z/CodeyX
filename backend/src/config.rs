@@ -910,9 +910,9 @@ pub struct CodeyConfig {
     /// environment variables for the app-server processes it spawns.
     #[serde(default)]
     pub codex_launch_proxy: String,
-    /// Proxy pool metadata; credentials live in the system credential store.
-    #[serde(default)]
-    pub network_proxy: crate::network_proxy::NetworkProxyConfig,
+    /// Preserve retired proxy-pool settings without applying them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network_proxy: Option<serde_json::Value>,
     /// Publishes Codey's embedded FastCtx file tools to Codex for the next
     /// runtime. Disabled by default so existing tool behavior is unchanged.
     #[serde(default)]
@@ -1070,7 +1070,7 @@ impl Default for CodeyConfig {
             slim_codex_pet: true,
             gpu_launch_mode: GpuLaunchMode::Off,
             codex_launch_proxy: String::new(),
-            network_proxy: crate::network_proxy::NetworkProxyConfig::default(),
+            network_proxy: None,
             fast_context_tools: false,
             subagent_optimization: false,
             subagent_model: default_subagent_model(),
@@ -1093,37 +1093,6 @@ fn default_stream_max_retries() -> u32 {
 }
 
 impl CodeyConfig {
-    pub(crate) fn requires_proxy_aware_launch(&self) -> bool {
-        !self.codex_launch_proxy.trim().is_empty()
-            || self.network_proxy.has_process_proxy()
-            || self.network_proxy.has_upstream_bindings()
-            || self
-                .profiles
-                .iter()
-                .any(|profile| profile.enabled && !profile.upstream_proxy.trim().is_empty())
-    }
-
-    pub(crate) fn validate_network_proxy(&self) -> Result<(), String> {
-        self.network_proxy.validate()?;
-        if !self.local_router_enabled && self.network_proxy.has_upstream_bindings() {
-            return Err(
-                "线路正在使用代理池出口，请先解除出口选择再关闭本地路由；原生模式暂不支持该出口"
-                    .into(),
-            );
-        }
-        for profile in &self.profiles {
-            if self.network_proxy.uses_pool(&profile.id)
-                && profile
-                    .plugin_route_spec
-                    .as_ref()
-                    .is_some_and(|spec| spec.transport.is_some())
-            {
-                return Err("插件自建传输暂不支持代理池出口，请先解除该线路的出口选择".into());
-            }
-        }
-        Ok(())
-    }
-
     pub fn normalize(mut self) -> Self {
         self.github_releases_url = default_github_releases_url();
         self.stream_max_retries = self.stream_max_retries.min(100);
@@ -1761,8 +1730,7 @@ impl CodeyConfig {
     pub(crate) fn route_supports_websockets_this_launch(&self, profile: &ProviderProfile) -> bool {
         self.route_supports_websockets_this_launch_with_proxy(
             profile,
-            self.network_proxy.uses_pool(&profile.id)
-                || local_router::outbound_proxy_applies_to_route(profile),
+            local_router::outbound_proxy_applies_to_route(profile),
         )
     }
 
@@ -3047,9 +3015,6 @@ impl ConfigStore {
     }
 
     pub(crate) fn persist(&self, config: CodeyConfig) -> Result<CodeyConfig> {
-        config
-            .validate_network_proxy()
-            .map_err(anyhow::Error::msg)?;
         let config = config.normalize();
         let bytes = serde_json::to_vec_pretty(&config)?;
         self.rotate_backups_best_effort(&bytes);
@@ -3173,6 +3138,33 @@ fn parse_config_contents(contents: &str, path: &Path) -> Result<CodeyConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn retired_proxy_pool_settings_are_preserved_without_validation_or_runtime_effects() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = ConfigStore::new(directory.path().join("config.json"));
+        for legacy in [
+            serde_json::json!({"schemaVersion":999,"nodes":"invalid","processCapture":true}),
+            serde_json::json!(["unknown legacy shape"]),
+            serde_json::json!("retired"),
+        ] {
+            let config: CodeyConfig = serde_json::from_value(serde_json::json!({
+                "networkProxy": legacy,
+            }))
+            .unwrap();
+            assert!(config.codex_launch_proxy.is_empty());
+            let stored = store.persist(config).unwrap();
+            assert_eq!(stored.network_proxy.as_ref(), Some(&legacy));
+            assert_eq!(store.load().unwrap().network_proxy.as_ref(), Some(&legacy));
+        }
+        let default = CodeyConfig::default();
+        assert!(
+            serde_json::to_value(default)
+                .unwrap()
+                .get("networkProxy")
+                .is_none()
+        );
+    }
 
     fn named_config(name: &str) -> CodeyConfig {
         let mut config = CodeyConfig::default();

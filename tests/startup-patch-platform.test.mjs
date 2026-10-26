@@ -19,7 +19,7 @@ test("Windows startup compatibility failure cleans the process before compatible
   assert.ok(compatibleRestart > cleanupCall);
   assert.match(
     windowsSpawn.slice(compatibleRestart, compatibleRestart + 500),
-    /&runtime_arguments,\s*launch_proxy_environment\.as_deref\(\)\.unwrap_or\(&\[\]\),\s*options\.launch_proxy\.is_some\(\)/,
+    /&runtime_arguments,\s*launch_proxy_environment\.as_deref\(\)\.unwrap_or\(&\[\]\),\s*false/,
   );
   const singleInstanceCleanup = windowsSpawn.indexOf("if single_instance_exit {", cleanupCall);
   assert.ok(singleInstanceCleanup > cleanupCall && singleInstanceCleanup < compatibleRestart);
@@ -125,9 +125,9 @@ test("Windows skips the Inspector when the Electron fuse is off and retries with
   assert.ok(overrideGuard >= 0 && overrideGuard < subagentGuard && subagentGuard < degradedLaunch);
   assert.match(
     noEntryLaunch.slice(degradedLaunch, degradedLaunch + 400),
-    /runtime_arguments,\s*launch_proxy\.environment\.unwrap_or\(&\[\]\),\s*launch_proxy\.environment\.is_some\(\),\s*launch_proxy\.capture/,
+    /runtime_arguments,\s*launch_proxy_environment\.unwrap_or\(&\[\]\),\s*false/,
   );
-  assert.match(windowsSpawn.slice(noEntry, launch), /WindowsLaunchProxyContext \{\s*environment: launch_proxy_environment\.as_deref\(\),\s*capture: options\.launch_proxy\.and_then\(crate::launch_proxy::CodexLaunchProxy::capture_scope\)/);
+  assert.match(windowsSpawn.slice(noEntry, launch), /subagent_gate_active,\s*launch_proxy_environment\.as_deref\(\),/);
   assert.match(noEntryLaunch, /performance_status = "degraded"/);
 });
 
@@ -201,18 +201,17 @@ test("Store environment uses supervised native activation with scoped cleanup", 
   const prepare = source.indexOf("session.journal.arm(&package_full_name)?");
   const enable = source.indexOf("enable_windows_packaged_environment(", prepare);
   assert.ok(prepare >= 0 && enable > prepare);
-  const setup = launcherPlatform.indexOf("WindowsPackageDebugSession::start_with_capture(");
+  const setup = launcherPlatform.indexOf("WindowsPackageDebugSession::start(");
   const supervision = launcherPlatform.indexOf("tokio::spawn(async move", setup);
   const activation = launcherPlatform.indexOf("codey_runtime_core::launcher::activate_packaged_app(", supervision);
   const verification = launcherPlatform.indexOf("let package_check", activation);
-  const resumed = launcherPlatform.indexOf("wait_for_resume_with_binding(feedback.as_deref(), process_id,", verification);
+  const resumed = launcherPlatform.indexOf("wait_for_resume(feedback.as_deref(), process_id)", verification);
   const spawned = launcherPlatform.indexOf("SpawnedCodex {", verification);
   const cleanup = launcherPlatform.indexOf("package_debug_session.finish()", verification);
   assert.ok(setup >= 0 && supervision > setup && activation > supervision && verification > activation && resumed > verification && spawned > resumed && cleanup > spawned);
   assert.match(source, /if self\.activation_pending/);
-  assert.match(launcherPlatform, /watch_resume_with_binding\(feedback\.clone\(\),/);
-  assert.match(launcherPlatform, /wait_for_resume_with_binding\([\s\S]*?process_capture::bind_suspended_pid\(scope, pid\)[\s\S]*?\.await\?/);
-  assert.match(launcherPlatform, /watch_resume_with_binding\([\s\S]*?bind_capture_target\(&binding_app_dir, pid, scope\)/);
+  assert.match(launcherPlatform, /wait_for_resume_failure\(feedback\.clone\(\)\)/);
+  assert.doesNotMatch(launcherPlatform, /process_capture|bind_capture_target/);
   assert.match(launcherPlatform, /cancel_resume_feedback\(feedback\.as_deref\(\)\)/);
   assert.match(supervisor, /timeout\(self\.timeout, &mut activation\)/);
   assert.match(supervisor, /timeout\(self\.settle_timeout, &mut activation\)/);

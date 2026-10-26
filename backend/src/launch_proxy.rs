@@ -8,17 +8,16 @@
 
 use std::sync::RwLock;
 
-/// 保存时经 `config::validate_codex_launch_proxy` 校验；手工编辑出的无效
-/// 值在启动解析处仍会失败，不会带着半个代理配置拉起 Codex。
+const STARTUP_WARNING: &str =
+    "Codex 启动代理未能完整应用，本次将沿用原有网络环境继续启动；请检查代理设置";
+
+/// 无法应用的地址只影响本次附加代理，不阻止 Codex 启动。
 #[derive(Clone)]
 pub(crate) struct CodexLaunchProxy {
     /// 用户填写的原始代理地址，写入代理环境变量。
     url: String,
     /// Chromium `--proxy-server=` 的值；socks5h 已转写为 socks5。
     chromium_server: String,
-    auth: Option<crate::network_proxy::process_gateway::ProcessProxyAuth>,
-    #[cfg(windows)]
-    capture: Option<codey_traffic_service::client::ProcessScope>,
 }
 
 impl std::fmt::Debug for CodexLaunchProxy {
@@ -26,7 +25,6 @@ impl std::fmt::Debug for CodexLaunchProxy {
         formatter
             .debug_struct("CodexLaunchProxy")
             .field("chromium_server", &self.chromium_server)
-            .field("authenticated", &self.auth.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -61,39 +59,14 @@ impl CodexLaunchProxy {
         Ok(Some(Self {
             url: value.to_string(),
             chromium_server: format!("{scheme}://{host}:{port}"),
-            auth: None,
-            #[cfg(windows)]
-            capture: None,
         }))
     }
 
-    pub(crate) fn from_gateway(
-        gateway: &crate::network_proxy::process_gateway::ProcessGateway,
-    ) -> Self {
-        Self {
-            url: gateway.proxy_url(),
-            chromium_server: gateway.server_url(),
-            auth: Some(gateway.auth()),
-            #[cfg(windows)]
-            capture: gateway.capture_scope(),
+    pub(crate) fn resolve_for_start(value: &str) -> (Option<Self>, Option<String>) {
+        match Self::resolve(value) {
+            Ok(proxy) => (proxy, None),
+            Err(_) => (None, Some(STARTUP_WARNING.to_string())),
         }
-    }
-
-    #[cfg(windows)]
-    pub(crate) fn capture_scope(&self) -> Option<codey_traffic_service::client::ProcessScope> {
-        self.capture.clone()
-    }
-
-    #[cfg(any(windows, target_os = "macos", test))]
-    pub(crate) fn authentication(
-        &self,
-    ) -> Option<crate::network_proxy::process_gateway::ProcessProxyAuth> {
-        self.auth.clone()
-    }
-
-    fn no_proxy(&self, existing: Option<&str>) -> String {
-        // A machine-wide wildcard must not silently bypass an explicit pool exit.
-        merge_loopback_no_proxy(if self.auth.is_some() { None } else { existing })
     }
 
     /// 追加给 Codex 客户端的 Chromium 启动参数。
@@ -113,7 +86,7 @@ impl CodexLaunchProxy {
         // Windows 环境变量名不分大小写，只写一份规范键。
         environment.push((
             "NO_PROXY".to_string(),
-            self.no_proxy(
+            merge_loopback_no_proxy(
                 std::env::var("NO_PROXY")
                     .ok()
                     .or_else(|| std::env::var("no_proxy").ok())
@@ -128,10 +101,13 @@ impl CodexLaunchProxy {
                 ("http_proxy".to_string(), self.url.clone()),
                 ("https_proxy".to_string(), self.url.clone()),
                 ("all_proxy".to_string(), self.url.clone()),
-                ("NO_PROXY".to_string(), self.no_proxy(uppercase.as_deref())),
+                (
+                    "NO_PROXY".to_string(),
+                    merge_loopback_no_proxy(uppercase.as_deref()),
+                ),
                 (
                     "no_proxy".to_string(),
-                    self.no_proxy(lowercase.as_deref().or(uppercase.as_deref())),
+                    merge_loopback_no_proxy(lowercase.as_deref().or(uppercase.as_deref())),
                 ),
             ]);
         }
@@ -153,50 +129,62 @@ pub(crate) fn set_active(proxy: Option<CodexLaunchProxy>) {
 pub(crate) struct SharedAppServerLaunch {
     pub environment: Vec<(String, String)>,
     pub generation: u64,
-    #[cfg(windows)]
-    pub capture: Option<codey_traffic_service::client::ProcessScope>,
 }
 
-pub(crate) fn shared_app_server_launch() -> Result<SharedAppServerLaunch, String> {
+pub(crate) fn shared_app_server_launch() -> SharedAppServerLaunch {
     let (generation, active) = ACTIVE
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone();
     let environment = resolve_shared_environment(active.as_ref(), || {
-        let (config, recovered) = crate::config::ConfigStore::default().load_with_recovery()?;
-        if recovered || config.network_proxy.has_process_proxy() {
-            anyhow::bail!("managed proxy must be started first");
-        }
+        let (config, _) = crate::config::ConfigStore::default().load_with_recovery()?;
         Ok(config.codex_launch_proxy)
-    })?;
-    Ok(SharedAppServerLaunch {
+    });
+    SharedAppServerLaunch {
         environment,
         generation,
-        #[cfg(windows)]
-        capture: active
-            .as_ref()
-            .and_then(Option::as_ref)
-            .and_then(CodexLaunchProxy::capture_scope),
-    })
+    }
 }
 
 fn resolve_shared_environment(
     active: Option<&Option<CodexLaunchProxy>>,
     saved: impl FnOnce() -> anyhow::Result<String>,
-) -> Result<Vec<(String, String)>, String> {
+) -> Vec<(String, String)> {
     if let Some(proxy) = active {
-        return Ok(proxy
+        return proxy
             .as_ref()
             .map(CodexLaunchProxy::environment)
-            .unwrap_or_default());
+            .unwrap_or_default();
     }
-    let saved = saved().map_err(|_| {
-        "无法读取或准备 Codex 启动代理，app-server 未启动；请先通过 Codey 启动 Codex，或恢复配置后重试".to_string()
-    })?;
-    let proxy = CodexLaunchProxy::resolve(&saved).map_err(|_| {
-        "Codex 启动代理配置无效，app-server 未启动；请修正网络代理设置后重试".to_string()
-    })?;
-    Ok(proxy.map(|proxy| proxy.environment()).unwrap_or_default())
+    let (proxy, warning) = match saved() {
+        Ok(saved) => CodexLaunchProxy::resolve_for_start(&saved),
+        Err(_) => (
+            None,
+            Some("无法读取 Codex 启动代理，app-server 将沿用原有网络环境继续启动".to_string()),
+        ),
+    };
+    if let Some(warning) = warning {
+        record_startup_warning(&warning);
+    }
+    proxy.map(|proxy| proxy.environment()).unwrap_or_default()
+}
+
+pub(crate) fn record_startup_warning(warning: &str) {
+    crate::error_log::record_failure_with_metadata(
+        "launch_proxy_unavailable",
+        "prepare_launch_proxy",
+        warning,
+        crate::error_log::FailureMetadata {
+            stage: Some("startup.launch_proxy".to_string()),
+            recoverable: Some(true),
+        },
+        serde_json::json!({"fallback": "existing_network_environment"}),
+    );
+    eprintln!("{warning}");
+}
+
+pub(crate) fn application_warning(configured: bool, environment_applied: bool) -> Option<String> {
+    (configured && !environment_applied).then(|| STARTUP_WARNING.to_string())
 }
 
 /// 保留已有绕过规则并追加回环地址。本地路由、CDP 和 CLI 握手终结在
@@ -310,52 +298,45 @@ mod tests {
     }
 
     #[test]
-    fn private_pool_entry_redacts_debug_and_does_not_inherit_global_bypass() {
-        let auth = crate::network_proxy::process_gateway::ProcessProxyAuth {
-            host: "127.0.0.1".into(),
-            port: 49152,
-            username: "codeyx".into(),
-            password: "fixture-local-secret".into(),
-            realm: "fixture-realm".into(),
-        };
-        let proxy = CodexLaunchProxy {
-            url: "http://codeyx:fixture-local-secret@127.0.0.1:49152".into(),
-            chromium_server: "http://127.0.0.1:49152".into(),
-            auth: Some(auth),
-            #[cfg(windows)]
-            capture: None,
-        };
-        assert!(!format!("{proxy:?}").contains("fixture-local-secret"));
-        assert_eq!(
-            proxy.chromium_argument(),
-            "--proxy-server=http://127.0.0.1:49152"
-        );
-        assert_eq!(
-            proxy.no_proxy(Some("*,external.example")),
-            "127.0.0.1,localhost,::1"
-        );
-        assert!(
-            proxy
-                .environment()
-                .iter()
-                .any(|(name, value)| name == "HTTPS_PROXY" && value == &proxy.url)
-        );
-        assert_eq!(
-            proxy.authentication().unwrap().password,
-            "fixture-local-secret"
-        );
+    fn startup_ignores_invalid_proxy_without_leaking_source() {
+        for value in [
+            "invalid",
+            "http://user:fixture-private-source@proxy.example:8080",
+        ] {
+            let (proxy, warning) = CodexLaunchProxy::resolve_for_start(value);
+            assert!(proxy.is_none());
+            let warning = warning.unwrap();
+            assert!(warning.contains("继续启动"));
+            assert!(!warning.contains(value));
+            assert!(!warning.contains("fixture-private-source"));
+        }
+        for value in ["", "  "] {
+            let (proxy, warning) = CodexLaunchProxy::resolve_for_start(value);
+            assert!(proxy.is_none());
+            assert!(warning.is_none());
+        }
+        // No connection to the reserved documentation address is attempted.
+        let (proxy, warning) = CodexLaunchProxy::resolve_for_start("http://192.0.2.1:1");
+        assert!(proxy.is_some());
+        assert!(warning.is_none());
+    }
+
+    #[test]
+    fn missing_optional_proxy_environment_warns_without_claiming_it_was_applied() {
+        assert!(application_warning(false, false).is_none());
+        assert!(application_warning(false, true).is_none());
+        assert!(application_warning(true, true).is_none());
+        let warning = application_warning(true, false).unwrap();
+        assert!(warning.contains("继续启动"));
+        assert!(warning.contains("未能完整应用"));
     }
 
     #[test]
     fn shared_app_server_environment_follows_active_then_saved_proxy() {
         let saved = || Ok("http://127.0.0.1:7890".to_string());
-        assert!(
-            resolve_shared_environment(None, || Ok(String::new()))
-                .unwrap()
-                .is_empty()
-        );
+        assert!(resolve_shared_environment(None, || Ok(String::new())).is_empty());
         // 尚未启动（例如共享实例先于 Codex 启动创建）回读已保存配置。
-        let environment = resolve_shared_environment(None, saved).unwrap();
+        let environment = resolve_shared_environment(None, saved);
         assert!(
             environment
                 .iter()
@@ -365,8 +346,7 @@ mod tests {
         let active = CodexLaunchProxy::resolve("socks5://127.0.0.1:1080").unwrap();
         let environment = resolve_shared_environment(Some(&active), || {
             panic!("active proxy must not reload saved settings")
-        })
-        .unwrap();
+        });
         assert!(
             environment
                 .iter()
@@ -377,28 +357,21 @@ mod tests {
             resolve_shared_environment(Some(&None), || {
                 panic!("applied empty proxy must not reload saved settings")
             })
-            .unwrap()
             .is_empty()
         );
     }
 
     #[test]
-    fn shared_app_server_rejects_unreadable_or_invalid_proxy_without_leaking_source() {
-        let error =
+    fn shared_app_server_continues_when_proxy_is_unreadable_or_invalid() {
+        assert!(
             resolve_shared_environment(None, || Err(anyhow::anyhow!("fixture-private-source")))
-                .unwrap_err();
-        assert!(error.contains("无法读取"));
-        assert!(error.contains("未启动"));
-        assert!(!error.contains("fixture-private-source"));
+                .is_empty()
+        );
         for value in [
             "invalid",
             "http://user:fixture-private-source@proxy.example:8080",
         ] {
-            let error = resolve_shared_environment(None, || Ok(value.into())).unwrap_err();
-            assert!(error.contains("配置无效"));
-            assert!(error.contains("未启动"));
-            assert!(!error.contains(value));
-            assert!(!error.contains("fixture-private-source"));
+            assert!(resolve_shared_environment(None, || Ok(value.into())).is_empty());
         }
     }
 }

@@ -2281,7 +2281,7 @@ impl SiwcLoginSessions {
 /// client_id，带 `id_token_hint` 跳过账号选择页；否则用
 /// `dynamic_agent_client` 注册新客户端，回调里收签发的 client_id。
 pub(crate) async fn start_siwc_login(
-    client: crate::network_proxy::egress::PreparedClient,
+    client: reqwest::Client,
     account: &OfficialAccountRecord,
     host_id: &str,
 ) -> Result<SiwcLoginSession> {
@@ -2327,7 +2327,7 @@ pub(crate) async fn start_siwc_login(
             LOGIN_TIMEOUT,
             run_siwc_callback_server(
                 listener,
-                (*client).clone(),
+                client,
                 state,
                 nonce,
                 pkce.verifier,
@@ -2335,7 +2335,6 @@ pub(crate) async fn start_siwc_login(
             ),
         )
         .await;
-        drop(client); // The gateway must stay alive while the callback exchanges tokens.
         let next = match outcome {
             Ok(Ok(credential)) => SiwcLoginPhase::Completed(Box::new(credential)),
             Ok(Err(error)) => SiwcLoginPhase::Failed(format!("{error:#}")),

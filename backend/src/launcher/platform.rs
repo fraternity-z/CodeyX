@@ -295,19 +295,16 @@ pub(super) async fn spawn_windows_codex(
     extra_args: &[String],
     environment: &[(String, String)],
     require_launch_environment: bool,
-    capture: Option<codey_traffic_service::client::ProcessScope>,
 ) -> Result<(SpawnedCodex, bool)> {
     anyhow::ensure!(
         !require_launch_environment || !environment.is_empty(),
         "Codex 启动环境未能应用，已停止启动"
     );
-    let needs_packaged_environment = capture.is_some()
-        || windows_packaged_launch_needs_environment(
-            environment,
-            std::env::var_os("CODEX_HOME").as_deref(),
-        );
+    let needs_packaged_environment = windows_packaged_launch_needs_environment(
+        environment,
+        std::env::var_os("CODEX_HOME").as_deref(),
+    );
     let environment_required = require_launch_environment
-        || capture.is_some()
         || requires_codex_home_environment(std::env::var_os("CODEX_HOME").as_deref());
     let environment =
         windows_codex_launch_environment(environment, crate::codex_config::codex_home())?;
@@ -325,7 +322,6 @@ pub(super) async fn spawn_windows_codex(
             &arguments,
             needs_packaged_environment.then_some(environment.as_slice()),
             environment_required,
-            capture,
         )
         .await;
     }
@@ -340,24 +336,16 @@ pub(super) async fn spawn_windows_codex(
     // A stale WSL_DISTRO_NAME inherited by the native Windows app makes
     // current Codex builds synchronously probe wsl.exe during startup.
     child_command.env_remove("WSL_DISTRO_NAME");
-    let flags = codey_runtime_core::windows_create_no_window()
-        | if capture.is_some() {
-            windows::Win32::System::Threading::CREATE_SUSPENDED.0
-        } else {
-            0
-        };
-    child_command.creation_flags(flags);
-    let mut child = child_command
+    child_command.creation_flags(codey_runtime_core::windows_create_no_window());
+    let child = child_command
         .spawn()
         .with_context(|| format!("启动 Codex 失败：{executable}"))?;
-    if let Some(scope) = &capture {
-        crate::network_proxy::process_capture::bind_and_resume(scope, &mut child).await?;
-    }
     let process_id = child.id();
     Ok((
         SpawnedCodex {
             child: Some(child),
             process_id,
+            launch_environment_applied: true,
             startup_process: None,
             performance_status: String::new(),
             performance_detail: String::new(),
@@ -374,12 +362,11 @@ pub(super) async fn activate_windows_codex(
     arguments: &str,
     environment: Option<&[(String, String)]>,
     environment_required: bool,
-    capture: Option<codey_traffic_service::client::ProcessScope>,
 ) -> Result<(SpawnedCodex, bool)> {
     use super::windows_activation::ActivationSupervisor;
     use super::windows_packaged::{
-        WindowsPackageDebugSession, bind_capture_target, cancel_resume_feedback,
-        wait_for_resume_with_binding, watch_resume_with_binding,
+        WindowsPackageDebugSession, cancel_resume_feedback, wait_for_resume,
+        wait_for_resume_failure,
     };
     use std::sync::{
         Arc,
@@ -387,11 +374,7 @@ pub(super) async fn activate_windows_codex(
     };
 
     let (mut package_debug_session, environment_applied) = if let Some(environment) = environment {
-        match WindowsPackageDebugSession::start_with_capture(
-            app_dir,
-            environment,
-            capture.is_some(),
-        ) {
+        match WindowsPackageDebugSession::start(app_dir, environment) {
             Ok(session) => (session, true),
             Err(error) if windows_can_fallback_to_activation(environment_required, &error) => {
                 let _ = codey_runtime_core::diagnostic_log::append_diagnostic_log(
@@ -416,8 +399,6 @@ pub(super) async fn activate_windows_codex(
     let (reply, response) = tokio::sync::oneshot::channel();
     // Cleanup ownership survives the caller's timeout or cancellation.
     tokio::spawn(async move {
-        let binding_scope = capture.clone();
-        let binding_app_dir = app_dir.clone();
         let activation = async {
             let existing_process_ids = codey_runtime_core::windows_enumerate_processes()
                 .context("检测 Windows Store 激活前的已有进程失败")?
@@ -481,17 +462,12 @@ pub(super) async fn activate_windows_codex(
             // ActivateApplication can return before Windows runs our debugger.
             // Keep its state file and package settings until the helper has
             // actually resumed this process, within the supervised timeout.
-            wait_for_resume_with_binding(feedback.as_deref(), process_id, |pid| {
-                let scope = capture
-                    .as_ref()
-                    .context("本次启动未建立流量接管会话，拒绝恢复 Codex")?;
-                crate::network_proxy::process_capture::bind_suspended_pid(scope, pid)
-            })
-            .await?;
+            wait_for_resume(feedback.as_deref(), process_id).await?;
             Ok((
                 SpawnedCodex {
                     child: None,
                     process_id: Some(process_id),
+                    launch_environment_applied: environment_applied,
                     startup_process: Some(startup_process),
                     performance_status: String::new(),
                     performance_detail: String::new(),
@@ -523,12 +499,7 @@ pub(super) async fn activate_windows_codex(
         })
         .run(
             activation,
-            // ActivateApplication can wait for the debugger to resume the app.
-            // Bind concurrently, without waiting for activation to return a PID.
-            watch_resume_with_binding(feedback.clone(), move |pid| {
-                let scope = binding_scope.as_ref().context("本次启动没有流量接管会话")?;
-                bind_capture_target(&binding_app_dir, pid, scope)
-            }),
+            wait_for_resume_failure(feedback.clone()),
             stop,
             || package_debug_session.finish(),
             reply,

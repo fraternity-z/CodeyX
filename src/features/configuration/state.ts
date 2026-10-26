@@ -11,7 +11,10 @@ export function configLoadNotice(result: ConfigLoadResult, status: RuntimeStatus
   const startupError = status?.startupError || result.startupError;
   const errors = [startupError && `自动启动失败：${startupError}`, result.configLoadError].filter(Boolean);
   if (errors.length > 0) return { tone: "error", text: errors.join("；") };
-  if (status?.configApply && status.configApply.settingsRevision >= result.config.settingsRevision) return configApplyNotice(status.configApply);
+  const application = status?.configApply && status.configApply.settingsRevision >= result.config.settingsRevision ? status.configApply : null;
+  if (application?.phase === "failed" || application?.applyError) return configApplyNotice(application);
+  if (status?.startupWarning) return { tone: "info", text: status.startupWarning };
+  if (application) return configApplyNotice(application);
   if (status?.restartRequired) return { tone: "info", text: "已保存的配置需重启 Codex 后生效" };
   if (status && !status.running) return { tone: "info", text: "CodeyX 运行时已就绪" };
   return null;

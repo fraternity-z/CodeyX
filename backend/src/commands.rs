@@ -19,7 +19,6 @@ mod diagnostics;
 mod extensions;
 mod models;
 mod native_plugins;
-mod network_proxy;
 mod official_accounts;
 mod plugins;
 mod prompt_optimization;
@@ -139,7 +138,6 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Official token refresh clients keyed by account proxy URL.
     official_proxied_clients: BlockingMutex<HashMap<String, reqwest::Client>>,
-    network_proxy_egress: std::sync::OnceLock<Arc<crate::network_proxy::egress::EgressPool>>,
     #[cfg(test)]
     pub webhook_http_client_override: Option<reqwest::Client>,
     /// Built on first use: the login/sync client is only needed for WeChat
@@ -280,7 +278,6 @@ impl Default for AppState {
                 .build()
                 .expect("shared Codey HTTP client should be constructible"),
             official_proxied_clients: BlockingMutex::new(HashMap::new()),
-            network_proxy_egress: std::sync::OnceLock::new(),
             #[cfg(test)]
             webhook_http_client_override: None,
             wechat_claw_login_http_client: std::sync::OnceLock::new(),
@@ -361,41 +358,12 @@ fn bridge_string_array(payload: &Value, name: &str, limit: usize) -> Vec<String>
 }
 
 impl AppState {
-    pub(crate) async fn network_proxy_egress(
-        &self,
-    ) -> Arc<crate::network_proxy::egress::EgressPool> {
-        // Hold the config read lock through initialization, so a save cannot
-        // publish its policy before an older initial policy is installed.
-        let config = self.config.read().await;
-        self.network_proxy_egress
-            .get_or_init(|| {
-                let mut egress = crate::network_proxy::egress::EgressPool::for_config(
-                    self.store.path(),
-                    config.network_proxy.clone(),
-                );
-                if self.config_load_error.is_some() {
-                    egress.require_configuration_recovery();
-                }
-                Arc::new(egress)
-            })
-            .clone()
-    }
-
     pub(crate) async fn proxy_for_profile(
         &self,
         profile: &crate::config::ProviderProfile,
-    ) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
-        self.network_proxy_egress()
-            .await
-            .proxy_for_profile(
-                &profile.id,
-                Some(&profile.upstream_proxy),
-                profile
-                    .plugin_route_spec
-                    .as_ref()
-                    .is_some_and(|spec| spec.transport.is_some()),
-            )
-            .await
+    ) -> Result<Option<String>, String> {
+        let proxy = profile.upstream_proxy.trim();
+        Ok((!proxy.is_empty()).then(|| proxy.to_string()))
     }
 
     /// Codey's own store of ChatGPT accounts, kept next to the config file.
@@ -1119,9 +1087,6 @@ async fn resolve_session_name_cached(
 pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Value {
     let result = match command {
         "config_backup" => backup::invoke(state, &args).await,
-        "network_proxy_get" | "network_proxy_save" | "network_proxy_test" => {
-            network_proxy::invoke(state, command, &args).await
-        }
         "remote_control_status"
         | "start_remote_control"
         | "stop_remote_control"
@@ -1714,7 +1679,6 @@ async fn save_codey_config_locked(
     if local_router_enabled_present {
         config.local_router_enabled = config_input.local_router_enabled;
     }
-    config.validate_network_proxy()?;
     if route_request_log_present {
         config.route_request_log = config_input.route_request_log;
     }
@@ -1746,9 +1710,6 @@ async fn save_codey_config_locked(
     config.slim_codex_pet = config_input.slim_codex_pet;
     config.gpu_launch_mode = config_input.gpu_launch_mode;
     let codex_launch_proxy = config_input.codex_launch_proxy.trim();
-    if !codex_launch_proxy.is_empty() {
-        crate::config::validate_codex_launch_proxy(codex_launch_proxy)?;
-    }
     config.codex_launch_proxy = codex_launch_proxy.to_string();
     let fast_context_tools_status = current_fast_context_tools_status();
     config.fast_context_tools = embedded_fast_context_tools_enabled(
@@ -2897,12 +2858,11 @@ async fn mark_official_account_invalid(
     false
 }
 
-/// Resolve even a temporarily absent account route by its stable profile ID.
-/// A stored pool binding must never disappear because its token became invalid.
+/// Resolve the manual proxy of the account's current route.
 async fn official_account_usage_proxy(
     state: &Arc<AppState>,
     account_id: &str,
-) -> Result<crate::network_proxy::egress::PreparedProxy, String> {
+) -> Result<Option<String>, String> {
     let profile = state
         .config
         .read()
@@ -2915,13 +2875,7 @@ async fn official_account_usage_proxy(
         .cloned();
     match profile {
         Some(profile) => state.proxy_for_profile(&profile).await,
-        None => {
-            state
-                .network_proxy_egress()
-                .await
-                .proxy_for_profile(&crate::config::official_profile_id(account_id), None, false)
-                .await
-        }
+        None => Ok(None),
     }
 }
 
@@ -2970,8 +2924,6 @@ pub(super) fn config_requires_restart_with_route_status(
         || applied.slim_codex_pet != current.slim_codex_pet
         || applied.gpu_launch_mode != current.gpu_launch_mode
         || applied.codex_launch_proxy != current.codex_launch_proxy
-        || applied.network_proxy.process_proxy != current.network_proxy.process_proxy
-        || applied.network_proxy.process_capture != current.network_proxy.process_capture
         || applied.fast_context_tools != current.fast_context_tools
         || applied.conversation_git.enabled != current.conversation_git.enabled
         || applied.subagent_optimization != current.subagent_optimization

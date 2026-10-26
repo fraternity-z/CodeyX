@@ -186,44 +186,17 @@ impl LocalRouter {
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
     ) -> Result<Self> {
-        Self::start_with_logger_and_usage(
-            config,
-            request_log,
-            Arc::default(),
-            Arc::new(crate::network_proxy::egress::EgressPool::for_config(
-                &crate::config::default_config_path(),
-                config.network_proxy.clone(),
-            )),
-        )
-        .await
+        Self::start_with_logger_and_usage(config, request_log, Arc::default()).await
     }
 
-    #[cfg(test)]
     pub(crate) async fn start_with_usage(
         config: &CodeyConfig,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
-    ) -> Result<Self> {
-        Self::start_with_egress(
-            config,
-            account_usage_cache,
-            Arc::new(crate::network_proxy::egress::EgressPool::for_config(
-                &crate::config::default_config_path(),
-                config.network_proxy.clone(),
-            )),
-        )
-        .await
-    }
-
-    pub(crate) async fn start_with_egress(
-        config: &CodeyConfig,
-        account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
-        egress: Arc<crate::network_proxy::egress::EgressPool>,
     ) -> Result<Self> {
         Self::start_with_logger_and_usage(
             config,
             Arc::new(RouteRequestLogController::new()),
             account_usage_cache,
-            egress,
         )
         .await
     }
@@ -232,7 +205,6 @@ impl LocalRouter {
         config: &CodeyConfig,
         request_log: Arc<RouteRequestLogController>,
         account_usage_cache: Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
-        egress: Arc<crate::network_proxy::egress::EgressPool>,
     ) -> Result<Self> {
         let listener = bind_router_listener().await?;
         let port = listener
@@ -276,7 +248,6 @@ impl LocalRouter {
             native_history_cache: Arc::new(Mutex::new(NativeHistoryCache::default())),
             idle_downstreams: Arc::new(Mutex::new(IdleDownstreamRegistry::default())),
             http_clients: Arc::default(),
-            egress,
             official_auth_path,
             account_usage_cache,
             official_auth_cache: Arc::new(Mutex::new(
@@ -644,7 +615,6 @@ pub(crate) struct RouterServer {
     pub(crate) native_history_cache: Arc<Mutex<NativeHistoryCache>>,
     pub(crate) idle_downstreams: Arc<Mutex<IdleDownstreamRegistry>>,
     pub(super) http_clients: Arc<UpstreamHttpClients>,
-    pub(crate) egress: Arc<crate::network_proxy::egress::EgressPool>,
     pub(crate) official_auth_path: PathBuf,
     pub(crate) account_usage_cache:
         Arc<tokio::sync::Mutex<crate::account_usage::AccountUsageCaches>>,
@@ -662,22 +632,14 @@ impl RouterServer {
         &self,
         route: &RouteTarget,
     ) -> std::result::Result<RouterUpstreamClient, String> {
-        let prepared = self
-            .egress
-            .proxy_for_profile(
-                &route.profile_id,
-                route.upstream_proxy.as_deref(),
-                route.plugin_transport.is_some(),
-            )
-            .await?;
         let url = route.upstream_url.as_deref().map_err(Clone::clone)?;
         let lease = self
             .http_clients
-            .client(url, prepared.as_deref())
+            .client(url, route.upstream_proxy.as_deref())
             .await
             .map_err(|message| format!("线路「{}」{message}", route.route_name))?;
         Ok(RouterUpstreamClient {
-            prepared: prepared.bind(lease.client),
+            client: lease.client,
             generation: lease.generation,
             system_proxy_applies: lease.system_proxy_applies,
         })
@@ -839,7 +801,6 @@ impl RouterSnapshot {
                 &profile.upstream_protocol,
             );
             let mut target = RouteTarget {
-                profile_id: profile.id.clone(),
                 provider_id: provider_id.to_string(),
                 route_name: profile.name.trim().to_string(),
                 upstream_url: prepare_upstream_url(protocol, &base_url),
@@ -1184,7 +1145,6 @@ impl RouterSnapshot {
 
 #[derive(Clone, Debug)]
 pub(crate) struct RouteTarget {
-    pub(crate) profile_id: String,
     pub(crate) provider_id: String,
     pub(crate) route_name: String,
     pub(crate) upstream_url: std::result::Result<String, String>,
