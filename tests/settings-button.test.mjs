@@ -112,6 +112,12 @@ class FakeElement extends FakeElementCore {
 
 }
 
+const accountUsageParts = (usage) => ({
+  summary: usage.children.find((child) => child.className === "codey-usage-summary") || null,
+  details: usage.children.find((child) => child.id === "codey-account-usage-details") || null,
+  announcer: usage.children.find((child) => child.className === "codey-usage-announcer") || null,
+});
+
 test("mounts above the native help entry in the navigation rail footer", () => {
   const header = new FakeElement("header", { right: 1200 });
   header.appendChild(new FakeElement("button", { right: 1192, width: 28 }));
@@ -682,16 +688,22 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.ok(usage);
   assert.ok(settingsButton);
   assert.ok(injectedStyle);
-  assert.match(injectedStyle.textContent, /#codey-account-usage \{[^}]*background: transparent;/);
-  assert.doesNotMatch(injectedStyle.textContent, /#codey-account-usage \{[^}]*background:[^;}]*Canvas/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-meter \{ display: block;[^}]*height: 2px;[^}]*max-height: 2px;/);
-  assert.match(injectedStyle.textContent, /data-tone="healthy"[^}]*background: #34c759;/);
-  assert.match(injectedStyle.textContent, /data-tone="normal"[^}]*background: #0a84ff;/);
-  assert.match(injectedStyle.textContent, /data-tone="warning"[^}]*background: #ffcc00;/);
-  assert.match(injectedStyle.textContent, /data-tone="critical"[^}]*background: #ff453a;/);
-  assert.match(injectedStyle.textContent, /#codey-account-usage:hover \.codey-usage-details/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-details \{[^}]*background: rgb\(34 34 34 \/ \.97\);/);
-  assert.match(injectedStyle.textContent, /\.codey-usage-plan-tag \{[^}]*border:[^}]*background: color-mix\(in srgb, #0a84ff 13%, transparent\);/);
+  const css = injectedStyle.textContent;
+  assert.match(css, /#codey-account-usage::before \{[^}]*background: color-mix\(in srgb, var\(--codey-usage-surface\) \d+%, transparent\);/);
+  assert.match(css, /#codey-account-usage::before \{[^}]*z-index: -1;[^}]*inset: -20px 0 0;[^}]*backdrop-filter: blur\(16px\) saturate\(1\.4\);[^}]*mask-image: linear-gradient\(to bottom, transparent, #000 20px\);[^}]*pointer-events: none;/);
+  assert.match(css, /#codey-account-usage \{[^}]*isolation: isolate;/);
+  assert.doesNotMatch(css, /#codey-account-usage \{[^}]*(background|backdrop-filter|box-shadow):/);
+  assert.doesNotMatch(css, /#codey-account-usage \.codey-usage-summary \{[^}]*(border-radius|box-shadow|background)/);
+  assert.doesNotMatch(css, /#codey-account-usage \{[^}]*background:[^;}]*Canvas/);
+  assert.match(css, /#codey-account-usage \{[^}]*--codey-usage-ink: var\(--color-text, CanvasText\);/);
+  assert.match(css, /\.codey-usage-segment \{[^}]*grid-template-columns: subgrid;/);
+  assert.match(css, /\[data-tone="warning"\] \.codey-usage-fill \{ background: var\(--codey-usage-warning\); \}/);
+  assert.match(css, /\[data-tone="critical"\] \.codey-usage-fill \{ background: var\(--codey-usage-danger\); \}/);
+  assert.match(css, /#codey-account-usage:hover \.codey-usage-details, #codey-account-usage:focus-visible \.codey-usage-details \{[^}]*visibility: visible;/);
+  assert.match(css, /\.codey-usage-details \{[^}]*background: var\(--codey-usage-surface\);[^}]*pointer-events: none;/);
+  assert.match(css, /\[data-dismissed="true"\] \.codey-usage-details \{[^}]*visibility: hidden;/);
+  assert.match(css, /\[data-state="stale"\] \.codey-usage-stale-note \{ display: block; \}/);
+  assert.match(css, /prefers-reduced-motion: reduce[\s\S]*#codey-account-usage \*/);
   assert.equal(usage.parentElement, sidebarFooterHost);
   assert.equal(usage.nextElementSibling, nativeProfileFooter);
   assert.deepEqual(sidebarFooterHost.children, [usage, nativeProfileFooter]);
@@ -699,35 +711,68 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.equal(sessionTitle.parentElement, visibleHeader);
   assert.equal(visibleHeader.children[0], sessionTitle);
   assert.equal(visibleHeader.getAttribute("data-codey-usage-host"), null);
-  assert.match(usage.innerHTML, /class="codey-usage-list"/);
-  assert.match(usage.innerHTML, /周额度[\s\S]*?60%[\s\S]*?5 小时[\s\S]*?85%/);
-  assert.match(usage.innerHTML, /data-window="weekly" data-tone="normal"/);
-  assert.match(usage.innerHTML, /data-window="five-hour" data-tone="healthy"/);
-  assert.match(usage.innerHTML, /今天 \d{2}:\d{2} 重置/);
-  assert.match(usage.innerHTML, /明天 \d{2}:\d{2} 重置/);
-  const summaryHtml = usage.innerHTML.split('class="codey-usage-details"')[0];
-  assert.match(summaryHtml, /class="codey-usage-plan-tag">Pro 20x<\/span>[\s\S]*?周额度[\s\S]*?60%/);
-  assert.doesNotMatch(summaryHtml, /余额|42/);
-  assert.match(usage.innerHTML, /class="codey-usage-details" role="tooltip"/);
-  assert.match(usage.innerHTML, /5 小时额度[\s\S]*?剩余 85%[\s\S]*?已用 15%/);
-  assert.match(usage.innerHTML, /周额度[\s\S]*?剩余 60%[\s\S]*?已用 40%/);
-  assert.match(usage.innerHTML, /Credits 余额[\s\S]*?42/);
-  assert.match(usage.innerHTML, /更新于 \d{2}:\d{2}/);
+  const { summary, details, announcer } = accountUsageParts(usage);
+  assert.ok(summary);
+  assert.ok(details);
+  assert.ok(announcer);
+  assert.deepEqual(usage.children, [summary, details, announcer]);
+  assert.equal(usage.getAttribute("role"), "group");
+  assert.equal(usage.getAttribute("aria-live"), null);
+  assert.equal(details.getAttribute("role"), "tooltip");
+  assert.equal(announcer.getAttribute("role"), "status");
+  assert.equal(announcer.getAttribute("aria-live"), "polite");
+  // 这一组数据的消耗节奏取决于测试运行时刻，结论只能是充足或偏快。
+  assert.match(summary.innerHTML, /class="codey-usage-overview" data-tone="(?:ok|warning)">\s*<span class="codey-usage-status">(?:额度充足|消耗偏快)<\/span>\s*<span class="codey-usage-plan">Pro 20x<\/span>/);
+  assert.match(summary.innerHTML, /5 小时[\s\S]*?85%[\s\S]*?(?:后重置|即将重置)[\s\S]*?每周[\s\S]*?60%[\s\S]*?(?:后重置|即将重置)/);
+  assert.match(summary.innerHTML, /data-window="five-hour" data-tone="ok"/);
+  assert.match(summary.innerHTML, /data-window="weekly" data-tone="ok"/);
+  assert.doesNotMatch(summary.innerHTML, /Credits|余额/);
+  assert.match(announcer.textContent, /^(?:额度充足|消耗偏快)；5 小时额度剩余 85%；每周额度剩余 60%$/);
+  assert.match(details.innerHTML, /class="codey-usage-plan">Pro 20x<\/span>/);
+  assert.match(details.innerHTML, /5 小时额度[\s\S]*?剩余[\s\S]*?85%[\s\S]*?今天 23:45 重置/);
+  assert.match(details.innerHTML, /每周额度[\s\S]*?剩余[\s\S]*?60%[\s\S]*?明天 23:45 重置/);
+  assert.match(details.innerHTML, /Credits 余额[\s\S]*?42/);
+  assert.match(details.innerHTML, /更新于 \d{2}:\d{2}/);
+  assert.equal(usage.dataset.state, "ready");
   assert.equal(usage.dataset.windowCount, "2");
   assert.equal(usage.dataset.plan, undefined);
   assert.equal(usage.getAttribute("tabindex"), "0");
   assert.equal(usage.getAttribute("aria-describedby"), "codey-account-usage-details");
-  assert.match(usage.getAttribute("aria-label"), /周额度剩余 60%/);
-  assert.match(usage.getAttribute("aria-label"), /5 小时额度剩余 85%/);
+  assert.match(usage.getAttribute("aria-label"), /5 小时额度剩余 85%[\s\S]*每周额度剩余 60%/);
+
+  usage.dispatchEvent({ type: "keydown", key: "Escape" });
+  assert.equal(usage.dataset.dismissed, "true");
+  usage.dispatchEvent({ type: "pointerleave" });
+  assert.equal(usage.dataset.dismissed, undefined);
+
+  // 只有更新时间变化时摘要和播报都不能重写，避免多余重排与重复朗读。
+  const announcement = announcer.textContent;
+  let summaryMarkup = summary.innerHTML;
+  let summaryWrites = 0;
+  Object.defineProperty(summary, "innerHTML", {
+    configurable: true,
+    get: () => summaryMarkup,
+    set: (value) => {
+      summaryWrites += 1;
+      summaryMarkup = value;
+    },
+  });
+  accountUsageResult = { ...accountUsageResult, fetchedAt: accountUsageResult.fetchedAt + 120 };
+  await window.__codeyRefreshAccountUsage();
+  assert.equal(summaryWrites, 0);
+  assert.equal(accountUsageParts(usage).summary, summary);
+  assert.equal(announcer.textContent, announcement);
 
   accountUsageResult = {
     ...accountUsageResult,
-    primary: { ...accountUsageResult.primary, usedPercent: 65 },
-    secondary: { ...accountUsageResult.secondary, usedPercent: 85 },
+    primary: { ...accountUsageResult.primary, usedPercent: 75 },
+    secondary: { ...accountUsageResult.secondary, usedPercent: 92 },
   };
   await window.__codeyRefreshAccountUsage();
-  assert.match(usage.innerHTML, /data-window="weekly" data-tone="critical"[\s\S]*?15%/);
-  assert.match(usage.innerHTML, /data-window="five-hour" data-tone="warning"[\s\S]*?35%/);
+  assert.equal(summaryWrites, 1);
+  assert.match(summary.innerHTML, /data-tone="critical">\s*<span class="codey-usage-status">额度紧张<\/span>/);
+  assert.match(summary.innerHTML, /data-window="five-hour" data-tone="warning"[\s\S]*?25%[\s\S]*?data-window="weekly" data-tone="critical"[\s\S]*?8%/);
+  assert.match(announcer.textContent, /^额度紧张；5 小时额度剩余 25%；每周额度剩余 8%$/);
 
   accountUsageResult = {
     ...accountUsageResult,
@@ -736,20 +781,35 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   };
   await window.__codeyRefreshAccountUsage();
   assert.equal(usage.dataset.windowCount, "1");
-  assert.match(usage.innerHTML, /周额度/);
-  assert.doesNotMatch(usage.innerHTML, /data-window="five-hour"/);
+  assert.match(summary.innerHTML, /每周/);
+  assert.doesNotMatch(summary.innerHTML, /data-window="five-hour"/);
 
   accountUsageResult = { status: "error", message: "官方额度接口返回 401", authGeneration: 1 };
   appServerUsageResult.rateLimits.primary.resetsAt = Math.floor(Date.now() / 1000) + 29.5 * 60 * 60;
   await window.__codeyRefreshAccountUsage();
   assert.equal(appServerUsageCalls, 1);
+  assert.equal(usage.dataset.state, "ready");
   assert.equal(usage.dataset.windowCount, "1");
-  assert.match(usage.innerHTML, /周额度[\s\S]*?80%/);
-  assert.doesNotMatch(usage.innerHTML, /data-window="five-hour"/);
+  assert.match(summary.innerHTML, /每周[\s\S]*?80%/);
+  assert.doesNotMatch(summary.innerHTML, /data-window="five-hour"/);
   assert.doesNotMatch(usage.getAttribute("aria-label"), /5 小时额度/);
   assert.match(usage.getAttribute("aria-label"), /1 天 5 小时后重置/);
-  assert.match(usage.innerHTML, /Credits 余额[\s\S]*?77/);
-  assert.match(usage.innerHTML, /class="codey-usage-plan-tag">Plus<\/span>/);
+  assert.match(details.innerHTML, /Credits 余额[\s\S]*?77/);
+  assert.match(details.innerHTML, /class="codey-usage-plan">Plus<\/span>/);
+
+  // 后台与 Codex 都读取失败时保留上次结果并标记为过期，侧边栏重扫也不能清掉标记。
+  const fallbackUsageResult = appServerUsageResult;
+  accountUsageResult = { status: "error", message: "offline" };
+  appServerUsageResult = {};
+  await window.__codeyRefreshAccountUsage();
+  window.__codeyRendererScan();
+  assert.equal(appServerUsageCalls, 2);
+  assert.equal(usage.dataset.state, "stale");
+  assert.match(summary.innerHTML, /data-tone="warning">\s*<span class="codey-usage-status">未能刷新 · 截至 \d{2}:\d{2}<\/span>/);
+  assert.match(summary.innerHTML, /每周[\s\S]*?80%/);
+  assert.match(details.innerHTML, /未能刷新 · 截至 \d{2}:\d{2}/);
+  assert.match(usage.getAttribute("aria-label"), /暂未能刷新，显示上次结果/);
+  appServerUsageResult = fallbackUsageResult;
 
   accountUsageResult = { status: "unavailable", reason: "third_party" };
   const refreshSchedulesBeforeUnavailable = scheduledDelays.filter(
@@ -776,18 +836,54 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   await window.__codeyRefreshAccountUsage();
   const remountedUsage = findById("codey-account-usage");
   assert.ok(remountedUsage);
-  assert.equal(accountUsageCalls, 6);
-  assert.equal(appServerUsageCalls, 1);
+  assert.equal(accountUsageCalls, 8);
+  assert.equal(appServerUsageCalls, 2);
   assert.equal(remountedUsage.parentElement, sidebarFooterHost);
   assert.equal(remountedUsage.nextElementSibling, nativeProfileFooter);
-  assert.match(remountedUsage.innerHTML, /周额度/);
-  const remountedSummaryHtml = remountedUsage.innerHTML.split('class="codey-usage-details"')[0];
-  assert.doesNotMatch(remountedSummaryHtml, /data-window="five-hour"/);
-  assert.match(remountedSummaryHtml, /class="codey-usage-plan-tag">Plus<\/span>/);
+  assert.equal(remountedUsage.dataset.state, "ready");
+  const remounted = accountUsageParts(remountedUsage);
+  assert.match(remounted.summary.innerHTML, /class="codey-usage-plan">Plus<\/span>[\s\S]*?每周/);
+  assert.doesNotMatch(remounted.summary.innerHTML, /data-window="five-hour"/);
+  assert.match(remounted.details.innerHTML, /class="codey-usage-plan">Plus<\/span>/);
 
   accountUsageResult = { status: "disabled" };
   await window.__codeyRefreshAccountUsage();
   assert.equal(findById("codey-account-usage"), null);
+
+  // 没有可用的上次结果时显示错误摘要，原因放进详情并转义。
+  accountUsageResult = { status: "error", message: "官方额度接口返回 <401>" };
+  appServerUsageResult = {};
+  await window.__codeyRefreshAccountUsage();
+  const errorUsage = findById("codey-account-usage");
+  assert.ok(errorUsage);
+  assert.equal(errorUsage.dataset.state, "error");
+  assert.equal(errorUsage.dataset.windowCount, undefined);
+  assert.equal(errorUsage.getAttribute("aria-label"), "官方账号额度暂不可用");
+  const errorParts = accountUsageParts(errorUsage);
+  assert.match(errorParts.summary.innerHTML, /额度暂不可用/);
+  assert.match(errorParts.details.innerHTML, /官方额度接口返回 &lt;401&gt;/);
+  assert.equal(errorParts.announcer.textContent, "官方账号额度暂不可用");
+
+  // 已用完的窗口在摘要里显示恢复倒计时并成为整体结论；消耗快于时间时详情给出用尽预测。
+  const now = Math.floor(Date.now() / 1000);
+  accountUsageResult = {
+    status: "ok",
+    planType: "plus",
+    fetchedAt: now,
+    primary: { usedPercent: 100, windowMinutes: 300, resetsAt: now + 98 * 60 },
+    secondary: { usedPercent: 74, windowMinutes: 10080, resetsAt: now + 4 * 24 * 60 * 60 },
+    credits: { hasCredits: false, unlimited: false, balance: "0" },
+  };
+  await window.__codeyRefreshAccountUsage();
+  assert.equal(errorUsage.dataset.state, "ready");
+  assert.match(errorParts.summary.innerHTML, /data-tone="critical">\s*<span class="codey-usage-status">5 小时额度已用完<\/span>/);
+  assert.match(errorParts.summary.innerHTML, /data-window="five-hour" data-tone="critical" data-pace="empty"[\s\S]*?0%[\s\S]*?<span class="codey-usage-reset">1 小时 38 分钟后恢复<\/span>/);
+  assert.match(errorParts.summary.innerHTML, /data-window="weekly" data-tone="warning" data-pace="fast"[\s\S]*?26%[\s\S]*?<span class="codey-usage-reset">4 天后重置<\/span>/);
+  assert.match(errorParts.announcer.textContent, /^5 小时额度已用完；5 小时额度剩余 0%；每周额度剩余 26%$/);
+  assert.match(errorParts.details.innerHTML, /data-pace="empty"[\s\S]*?已用完，1 小时 38 分钟后恢复/);
+  assert.match(errorParts.details.innerHTML, /data-pace="fast"[\s\S]*?按当前速度约 1 天 1 小时后用完/);
+  assert.match(errorParts.details.innerHTML, /codey-usage-legend/);
+  assert.doesNotMatch(errorParts.details.innerHTML, /Credits/);
 });
 
 const createStartupUpdateFixture = (bridge) => {
@@ -1587,8 +1683,9 @@ test("mounts usage into the sidebar footer container Codex renders itself", asyn
   assert.equal(usage.nextElementSibling, codexFooterContent);
   assert.equal(footerSlot.getAttribute("data-codey-usage-host"), "true");
   assert.equal(sidebarRoot.getAttribute("data-codey-usage-host"), null);
-  assert.match(usage.innerHTML, /周额度/);
-  assert.match(usage.innerHTML, /data-window="five-hour"/);
+  const { summary } = accountUsageParts(usage);
+  assert.match(summary.innerHTML, /每周/);
+  assert.match(summary.innerHTML, /data-window="five-hour"/);
 });
 
 test("the native adapter reloads MCP without loading session UI", async () => {
