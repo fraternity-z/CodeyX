@@ -1,12 +1,9 @@
 import { useMemo } from "react";
 import {
   Collection,
-  ComboBox,
   Header,
-  Input,
-  InputGroup,
   ListBox,
-  useFilter,
+  Select,
 } from "@heroui/react";
 import type { Key } from "@heroui/react";
 import { IconAlertTriangle } from "@tabler/icons-react";
@@ -40,7 +37,6 @@ export function ModelCombobox({
   preferredProviderId,
   value,
 }: ModelComboboxProps) {
-  const { contains } = useFilter({ sensitivity: "base" });
   const selectedOption = useMemo(
     () => resolveSubagentModelOption(options, value, preferredProviderId),
     [options, preferredProviderId, value],
@@ -87,34 +83,28 @@ export function ModelCombobox({
   const emptyText = options.length === 0 ? "还没有可用于子代理的模型" : "没有匹配的模型或线路";
 
   return (
-    <ComboBox
+    <Select
       aria-label={ariaLabel}
       fullWidth
       className="w-full min-w-0"
-      defaultFilter={(textValue, inputValue) => contains(textValue, inputValue.trim())}
       isDisabled={disabled}
       isInvalid={Boolean(unavailableValue)}
+      placeholder={placeholder}
       selectedKey={selectedKey}
       onSelectionChange={(key) => {
         if (key != null) onChange(String(key));
       }}
-      menuTrigger="input"
     >
-      <ComboBox.InputGroup>
+      <Select.Trigger className="min-h-8 md:min-h-8">
         {unavailableValue ? (
-          <InputGroup.Prefix className="px-2">
-            <IconAlertTriangle size={14} className="shrink-0 text-warning" aria-hidden="true" />
-          </InputGroup.Prefix>
+          <IconAlertTriangle size={14} className="shrink-0 text-warning" aria-hidden="true" />
         ) : null}
-        <Input
-          placeholder={placeholder}
-          autoComplete="off"
-          spellCheck={false}
-          className="min-h-8 md:min-h-8"
-        />
-        <ComboBox.Trigger />
-      </ComboBox.InputGroup>
-      <ComboBox.Popover className="w-(--trigger-width) max-w-[calc(100vw-24px)]">
+        <Select.Value className="truncate">
+          {({ selectedText, isPlaceholder }) => isPlaceholder ? placeholder : selectedText}
+        </Select.Value>
+        <Select.Indicator />
+      </Select.Trigger>
+      <Select.Popover className="w-(--trigger-width) max-w-[calc(100vw-24px)]">
         <ListBox
           aria-label={ariaLabel}
           items={groups}
@@ -137,7 +127,7 @@ export function ModelCombobox({
             </ListBox.Section>
           )}
         </ListBox>
-      </ComboBox.Popover>
-    </ComboBox>
+      </Select.Popover>
+    </Select>
   );
 }

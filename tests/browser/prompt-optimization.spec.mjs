@@ -29,6 +29,37 @@ async function complete(page, index, response) {
   await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
 }
 
+test("路由模型点击整行展开且只能从列表选择，支持键盘并保存选择", async ({ page }) => {
+  await openSettings(page);
+  const label = "提示词优化 CodeyX 路由模型";
+  const model = page.getByRole("button", { name: new RegExp(label) });
+  await expect(page.getByRole("combobox", { name: label, exact: true })).toHaveCount(0);
+  await model.click({ position: { x: 18, y: 16 } });
+  const list = page.getByRole("listbox", { name: new RegExp(label) });
+  await expect(list).toBeVisible();
+  const option = list.locator('[role="option"]:not([aria-selected="true"])').first();
+  const selectedLabel = await option.innerText();
+  const selectedValue = await option.getAttribute("data-key");
+  await page.screenshot({ path: "output/playwright/model-picker-open.png", fullPage: true });
+  await option.click();
+  await expect(list).not.toBeVisible();
+  await expect(model).toContainText(selectedLabel);
+  await expect(model).toBeFocused();
+  await model.press("Space");
+  await expect(list).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(list).not.toBeVisible();
+  await expect(model).toBeFocused();
+  await model.press("ArrowDown");
+  await expect(list).toBeVisible();
+  await page.keyboard.press("Enter");
+  await expect(list).not.toBeVisible();
+  await page.getByRole("button", { name: "保存更改", exact: true }).click();
+  await expect(page.getByRole("button", { name: "已保存", exact: true })).toBeDisabled();
+  const stored = await page.evaluate(async () => (await window.__codexSessionDeleteBridge("/api/load_codey_config", {})).config);
+  expect(stored.promptOptimization.model).toBe(selectedValue);
+});
+
 test("手动配置作废旧目录，重新获取采用当前草稿，跨页保留模型和指令", async ({ page }) => {
   await openSettings(page);
   await page.getByRole("tab", { name: "手动配置", exact: true }).click();
