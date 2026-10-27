@@ -578,6 +578,12 @@ async fn send_router_websocket_request_on_stream(
         ))
         .await
         .unwrap();
+    read_router_websocket_until_terminal(socket).await
+}
+
+async fn read_router_websocket_until_terminal(
+    socket: &mut WebSocketStream<MaybeTlsStream<TcpStream>>,
+) -> Vec<Value> {
     let mut events = Vec::new();
     loop {
         let message = tokio::time::timeout(Duration::from_secs(5), socket.next())
@@ -1742,6 +1748,118 @@ async fn official_opaque_continuation_uses_http_with_complete_history() {
         );
         client.close(None).await.unwrap();
         router.stop().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn missing_local_history_returns_client_replay_signal_without_upstream_send() {
+    for adapted in [false, true] {
+        for websocket in [false, true] {
+            let streams = if websocket {
+                [None, Some(true)]
+            } else {
+                [Some(false), Some(true)]
+            };
+            for stream in streams {
+                let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+                let (mut config, provider, model) =
+                    router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+                config.profiles[0].supports_websockets = false;
+                if adapted {
+                    config.profiles[0].upstream_protocol =
+                        crate::config::UPSTREAM_PROTOCOL_OPENAI_CHAT_COMPLETIONS.into();
+                    config.profiles[0].normalize();
+                }
+                let router = LocalRouter::start(&config).await.unwrap();
+                let endpoint = router.endpoint();
+                let client = reqwest::Client::new();
+                let mut socket = if websocket {
+                    Some(connect_router_websocket(&endpoint).await)
+                } else {
+                    None
+                };
+                let mut request = json!({"type":"response.create","model":model_alias(&provider, &model),
+                    "previous_response_id":"resp_codey_missing", "input":"next"});
+                if let Some(stream) = stream {
+                    request["stream"] = stream.into();
+                }
+                if let Some(socket) = &mut socket {
+                    socket
+                        .send(WebSocketMessage::Text(request.to_string().into()))
+                        .await
+                        .unwrap();
+                    let events = read_router_websocket_until_terminal(socket).await;
+                    let error = events.last().unwrap();
+                    assert_eq!(error["type"], "error", "{error}");
+                    assert_eq!(error["error"]["code"], "previous_response_not_found");
+                    assert!(error.get("response").is_none());
+                } else {
+                    let response = client
+                        .post(format!("{}/responses", endpoint.base_url))
+                        .bearer_auth(&endpoint.token)
+                        .json(&request)
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+                    let error: Value = response.json().await.unwrap();
+                    assert_eq!(
+                        error["error"]["code"], "previous_response_not_found",
+                        "{error}"
+                    );
+                }
+                assert!(
+                    tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                        .await
+                        .is_err()
+                );
+                let upstream = tokio::spawn(async move {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let request = read_http_request(&mut stream).await.unwrap();
+                    let body: Value = serde_json::from_slice(&request.body).unwrap();
+                    assert!(body.get("previous_response_id").is_none());
+                    let response = if adapted {
+                        assert_eq!(body["messages"][0]["content"], "complete task");
+                        json!({"id":"chat-full","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]})
+                    } else {
+                        assert_eq!(
+                            body["input"],
+                            json!([{"role":"user","content":"complete task"}])
+                        );
+                        json!({"id":"resp-full","object":"response","status":"completed","output":[]})
+                    };
+                    write_json_response(&mut stream, 200, &response)
+                        .await
+                        .unwrap();
+                });
+                let request = json!({"type":"response.create","model":model_alias(&provider, &model),
+                    "input":[{"role":"user","content":"complete task"}], "stream":websocket});
+                if let Some(socket) = &mut socket {
+                    socket
+                        .send(WebSocketMessage::Text(request.to_string().into()))
+                        .await
+                        .unwrap();
+                    let events = read_router_websocket_until_terminal(socket).await;
+                    assert_eq!(
+                        events.last().unwrap()["type"],
+                        "response.completed",
+                        "{events:?}"
+                    );
+                    socket.close(None).await.unwrap();
+                } else {
+                    let response = client
+                        .post(format!("{}/responses", endpoint.base_url))
+                        .bearer_auth(&endpoint.token)
+                        .json(&request)
+                        .send()
+                        .await
+                        .unwrap();
+                    assert_eq!(response.status(), reqwest::StatusCode::OK);
+                }
+                upstream.await.unwrap();
+                router.stop().await.unwrap();
+            }
+        }
     }
 }
 

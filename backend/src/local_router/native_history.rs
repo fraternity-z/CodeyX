@@ -1,5 +1,16 @@
 use super::*;
 
+#[derive(Debug)]
+pub(crate) struct MissingResponseHistory;
+
+impl std::fmt::Display for MissingResponseHistory {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("会话历史已失效，请重新发送完整输入")
+    }
+}
+
+impl std::error::Error for MissingResponseHistory {}
+
 const NATIVE_HISTORY_CACHE_BYTES: usize = 16 * 1024 * 1024;
 const NATIVE_HISTORY_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 // Entries hold whole session snapshots, so this bound counts conversations
@@ -42,23 +53,28 @@ impl NativeHistoryCache {
         scope: [u8; 32],
         owner: [u8; 32],
         id: &str,
-    ) -> Option<(Arc<AdaptedResponsesHistory>, bool)> {
+    ) -> Result<Option<(Arc<AdaptedResponsesHistory>, bool)>> {
         self.prune(Instant::now());
         // Linear scan of at most NATIVE_HISTORY_CACHE_ENTRIES snapshots; use a
         // map if this bound grows.
-        self.entries
-            .iter()
-            .rev()
-            .find(|entry| {
-                entry.scope == scope
-                    && entry.owner == owner
-                    && entry
-                        .history
-                        .last
-                        .as_ref()
-                        .is_some_and(|(response_id, _)| response_id == id)
-            })
-            .map(|entry| (Arc::clone(&entry.history), entry.force_http))
+        let mut other_owner = false;
+        for entry in self.entries.iter().rev().filter(|entry| {
+            entry.scope == scope
+                && entry
+                    .history
+                    .last
+                    .as_ref()
+                    .is_some_and(|(response_id, _)| response_id == id)
+        }) {
+            if entry.owner == owner {
+                return Ok(Some((Arc::clone(&entry.history), entry.force_http)));
+            }
+            other_owner = true;
+        }
+        if other_owner {
+            anyhow::bail!("上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文");
+        }
+        Ok(None)
     }
 
     fn mark_requires_http(&mut self, scope: [u8; 32], owner: [u8; 32], id: [u8; 32]) {
@@ -109,7 +125,8 @@ pub(crate) struct NativeResponsesHistory {
     latest: Option<Arc<AdaptedResponsesHistory>>,
     latest_requires_http: bool,
     history: AdaptedResponsesHistory,
-    unavailable: Option<String>,
+    unavailable: Option<anyhow::Error>,
+    unrecoverable_response: Option<([u8; 32], [u8; 32])>,
 }
 
 pub(crate) fn native_history_key(
@@ -170,7 +187,9 @@ impl NativeResponsesHistory {
             self.owner = Some(owner);
         }
         self.prepare(owner, body);
-        self.refresh_scope = refresh_scope;
+        if self.owner == Some(owner) {
+            self.refresh_scope = refresh_scope;
+        }
         owner
     }
 
@@ -206,6 +225,39 @@ impl NativeResponsesHistory {
     }
 
     pub(crate) fn prepare(&mut self, owner: [u8; 32], body: &mut Value) {
+        self.pending_previous_response =
+            responses_previous_response_id(body).map(|id| Sha256::digest(id.as_bytes()).into());
+        if let Some(id) = self.pending_previous_response
+            && self.unrecoverable_response == Some((owner, id))
+        {
+            // 已见但不完整的输出不能伪装成缓存丢失，诱导同轮重发。
+            self.history.clear_pending();
+            self.unavailable = Some(anyhow::anyhow!(
+                "已见响应缺少可恢复的完整输出，请重新发送完整上下文"
+            ));
+            return;
+        }
+        if self
+            .owner
+            .is_some_and(|previous_owner| previous_owner != owner)
+            && responses_previous_response_id(body).is_some_and(|id| {
+                self.latest.as_ref().is_some_and(|history| {
+                    history
+                        .last
+                        .as_ref()
+                        .is_some_and(|(response_id, _)| response_id == id)
+                })
+            })
+        {
+            // 保留原身份，HTTP 回退再次 prepare 时仍须拒绝这条续接。
+            self.history.clear_pending();
+            self.history.requires_native_http = false;
+            self.force_http = false;
+            self.unavailable = Some(anyhow::anyhow!(
+                "上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文"
+            ));
+            return;
+        }
         if self.owner != Some(owner) {
             self.history = AdaptedResponsesHistory::default();
             self.latest = None;
@@ -214,32 +266,47 @@ impl NativeResponsesHistory {
             self.refresh_scope = None;
             self.force_http = false;
         }
-        self.pending_previous_response =
-            responses_previous_response_id(body).map(|id| Sha256::digest(id.as_bytes()).into());
-        let previous = responses_previous_response_id(body).and_then(|id| {
-            let cached = self.scope.and_then(|scope| {
-                self.cache
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
-                    .get(scope, owner, id)
-            });
-            self.latest
-                .as_ref()
-                .filter(|history| {
+        let previous = responses_previous_response_id(body)
+            .map(|id| {
+                let latest = self.latest.as_ref().filter(|history| {
                     history
                         .last
                         .as_ref()
                         .is_some_and(|(response_id, _)| response_id == id)
-                })
-                .map(|history| {
-                    (
-                        Arc::clone(history),
-                        self.latest_requires_http
-                            || cached.as_ref().is_some_and(|(_, force_http)| *force_http),
-                    )
-                })
-                .or(cached)
-        });
+                });
+                let cached = self.scope.map_or(Ok(None), |scope| {
+                    self.cache
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .get(scope, owner, id)
+                });
+                let cached = match cached {
+                    Ok(cached) => cached,
+                    // 同账号令牌刷新只允许使用当前连接已确认归属的快照。
+                    Err(_) if latest.is_some() => None,
+                    Err(error) => return Err(error),
+                };
+                Ok(latest
+                    .map(|history| {
+                        (
+                            Arc::clone(history),
+                            self.latest_requires_http
+                                || cached.as_ref().is_some_and(|(_, force_http)| *force_http),
+                        )
+                    })
+                    .or(cached))
+            })
+            .transpose();
+        let previous = match previous {
+            Ok(previous) => previous.flatten(),
+            Err(error) => {
+                self.history.clear_pending();
+                self.history.requires_native_http = false;
+                self.force_http = false;
+                self.unavailable = Some(error);
+                return;
+            }
+        };
         self.force_http = previous.as_ref().is_some_and(|(_, force_http)| *force_http);
         self.history.requires_native_http = self.force_http;
         // A cache miss must not prevent a healthy native WS continuation.
@@ -247,8 +314,7 @@ impl NativeResponsesHistory {
         self.unavailable = self
             .history
             .stage_native(body, previous.as_ref().map(|(history, _)| history.as_ref()))
-            .err()
-            .map(|error| error.to_string());
+            .err();
         self.history.requires_native_http |= self.force_http;
         if self.unavailable.is_some() {
             self.history.clear_pending();
@@ -275,6 +341,9 @@ impl NativeResponsesHistory {
             anyhow::bail!("上游身份已变化，无法安全恢复续接历史；请重新发送完整上下文");
         }
         if let Some(reason) = &self.unavailable {
+            if reason.is::<MissingResponseHistory>() {
+                return Err(MissingResponseHistory.into());
+            }
             anyhow::bail!("无法恢复原生续接历史：{reason}；请重新发送完整上下文");
         }
         let input = self
@@ -330,11 +399,22 @@ impl NativeResponsesHistory {
             return;
         }
         let response = &event["response"];
-        let complete = event.get("type").and_then(Value::as_str) == Some("response.completed")
-            && response
-                .get("status")
-                .and_then(Value::as_str)
-                .is_none_or(|status| status == "completed");
+        let compacting = self.history.pending_input.as_ref().is_some_and(|input| {
+            input
+                .iter()
+                .any(|item| item["type"] == "compaction_trigger")
+        });
+        let status = response.get("status").and_then(Value::as_str);
+        // 普通中断响应仍可续接，未完成压缩不能替换完整窗口。
+        let complete = match event.get("type").and_then(Value::as_str) {
+            Some("response.completed") => status.is_none_or(|status| {
+                status == "completed" || (!compacting && status == "incomplete")
+            }),
+            Some("response.incomplete") => {
+                !compacting && status.is_none_or(|status| status == "incomplete")
+            }
+            _ => false,
+        };
         let id = response
             .get("id")
             .and_then(Value::as_str)
@@ -346,20 +426,22 @@ impl NativeResponsesHistory {
                 // Missing/oversized terminal output makes recovery unavailable;
                 // it must not turn an already delivered generation into a retry.
                 let output = terminal_output.map_or(&[][..], Vec::as_slice);
-                if self.history.pending_input.as_ref().is_some_and(|input| {
-                    input
-                        .iter()
-                        .any(|item| item["type"] == "compaction_trigger")
-                }) {
+                if compacting {
                     // 显式压缩的 output 是完整的新窗口，不能再拼接旧历史与触发项。
                     self.history.pending_input = Some(Vec::new());
                 }
-                self.unavailable = self
-                    .history
-                    .remember(id, output)
-                    .err()
-                    .map(|error| error.to_string());
+                self.unavailable = self.history.remember(id, output).err();
                 remembered = self.unavailable.is_none();
+            }
+        }
+        if let (Some(owner), Some(id)) = (self.owner, id) {
+            let response = (owner, Sha256::digest(id.as_bytes()).into());
+            if remembered {
+                if self.unrecoverable_response == Some(response) {
+                    self.unrecoverable_response = None;
+                }
+            } else {
+                self.unrecoverable_response = Some(response);
             }
         }
         self.clear_pending();
@@ -926,39 +1008,160 @@ mod tests {
             .await
             .unwrap();
         let failure = terminal(&mut client).await;
-        assert_eq!(failure["response"]["error"]["code"], "invalid_prompt");
-        assert_eq!(
-            failure["response"]["error"]["codey"]["errorCode"],
-            "context_not_recoverable"
-        );
+        assert_eq!(failure["type"], "error", "{failure}");
+        assert_eq!(failure["error"]["code"], "previous_response_not_found");
         client.close(None).await.unwrap();
         router.stop().await.unwrap();
     }
 
     #[tokio::test]
-    async fn unknown_native_tool_continuation_never_reaches_upstream() {
+    async fn interrupted_websocket_response_stays_restorable_for_compaction() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let (mut config, provider, model) =
             router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
         config.profiles[0].supports_websockets = true;
+        config.profiles[0].supports_remote_compaction = true;
+        let partial = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]});
+        let upstream_partial = partial.clone();
+        let upstream = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            for event in [
+                completed("resp-first", vec![]),
+                json!({"type":"response.incomplete","response":{
+                    "id":"resp-interrupted","object":"response","status":"incomplete",
+                    "incomplete_details":{"reason":"interrupted"},"output":[upstream_partial]
+                }}),
+                completed("resp-after-interrupt", vec![]),
+            ] {
+                socket.next().await.unwrap().unwrap();
+                socket
+                    .send(WebSocketMessage::Text(event.to_string().into()))
+                    .await
+                    .unwrap();
+            }
+            let (mut http, _) = listener.accept().await.unwrap();
+            let request = read_http_request(&mut http).await.unwrap();
+            let body: Value = serde_json::from_slice(&request.body).unwrap();
+            assert!(body.get("previous_response_id").is_none());
+            assert_eq!(
+                body["input"],
+                json!([
+                    {"role":"user","content":"task"}, {"role":"user","content":"next"},
+                    partial, {"role":"user","content":"steer"}, {"type":"compaction_trigger"}
+                ])
+            );
+            write_json_response(
+                &mut http,
+                200,
+                &completed(
+                    "resp-compact",
+                    vec![json!({"type":"compaction","encrypted_content":"opaque"})],
+                )["response"],
+            )
+            .await
+            .unwrap();
+        });
         let router = LocalRouter::start(&config).await.unwrap();
         let mut client = connect_router_websocket(&router.endpoint()).await;
-        for custom in [false, true] {
-            client.send(WebSocketMessage::Text(json!({"type":"response.create","model":model_alias(&provider, &model),"previous_response_id":"resp-from-another-socket","input":[result(custom, "missing-call")]}).to_string().into())).await.unwrap();
-            let error = terminal(&mut client).await;
-            assert_eq!(
-                error["response"]["error"]["codey"]["errorCode"],
-                "context_not_recoverable"
-            );
-            assert_eq!(error["response"]["error"]["code"], "invalid_prompt");
-        }
-        assert!(
-            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+        let model = model_alias(&provider, &model);
+        for (previous, input, expected) in [
+            (None, json!("task"), "resp-first"),
+            (Some("resp-first"), json!("next"), "resp-interrupted"),
+            (
+                Some("resp-interrupted"),
+                json!([{"role":"user","content":"steer"}]),
+                "resp-after-interrupt",
+            ),
+            (
+                Some("resp-after-interrupt"),
+                json!([{"type":"compaction_trigger"}]),
+                "resp-compact",
+            ),
+        ] {
+            let mut request = json!({"type":"response.create","model":model,"input":input});
+            if let Some(previous) = previous {
+                request["previous_response_id"] = previous.into();
+            }
+            client
+                .send(WebSocketMessage::Text(request.to_string().into()))
                 .await
-                .is_err()
-        );
+                .unwrap();
+            let event = terminal(&mut client).await;
+            assert_eq!(event["response"]["id"], expected, "{event}");
+        }
+        upstream.await.unwrap();
         client.close(None).await.unwrap();
         router.stop().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn unknown_native_tool_continuation_requests_full_input_before_upstream() {
+        for supports_websockets in [false, true] {
+            let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+            let (mut config, provider, model) =
+                router_config(format!("http://{}/v1", listener.local_addr().unwrap()));
+            config.profiles[0].supports_websockets = supports_websockets;
+            let router = LocalRouter::start(&config).await.unwrap();
+            let mut client = connect_router_websocket(&router.endpoint()).await;
+            for custom in [false, true] {
+                client.send(WebSocketMessage::Text(json!({"type":"response.create","model":model_alias(&provider, &model),"previous_response_id":"resp-from-another-socket","input":[result(custom, "missing-call")]}).to_string().into())).await.unwrap();
+                let error = terminal(&mut client).await;
+                assert_eq!(error["type"], "error", "{error}");
+                assert_eq!(error["status"], 400);
+                assert_eq!(error["error"]["code"], "previous_response_not_found");
+                assert!(error.get("response").is_none());
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_err()
+            );
+            let full_input = json!([
+                {"role":"user","content":"task"},
+                call(false, "call-1"), result(false, "call-1")
+            ]);
+            let expected = full_input.clone();
+            let upstream = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                if supports_websockets {
+                    let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+                    let WebSocketMessage::Text(text) = socket.next().await.unwrap().unwrap() else {
+                        panic!("expected full input");
+                    };
+                    let body: Value = serde_json::from_str(&text).unwrap();
+                    assert!(body.get("previous_response_id").is_none());
+                    assert_eq!(body["input"], expected);
+                    socket
+                        .send(WebSocketMessage::Text(
+                            completed("resp-recovered", vec![]).to_string().into(),
+                        ))
+                        .await
+                        .unwrap();
+                } else {
+                    let mut stream = stream;
+                    let request = read_http_request(&mut stream).await.unwrap();
+                    let body: Value = serde_json::from_slice(&request.body).unwrap();
+                    assert!(body.get("previous_response_id").is_none());
+                    assert_eq!(body["input"], expected);
+                    write_json_response(
+                        &mut stream,
+                        200,
+                        &completed("resp-recovered", vec![])["response"],
+                    )
+                    .await
+                    .unwrap();
+                }
+            });
+            client.send(WebSocketMessage::Text(json!({
+            "type":"response.create", "model":model_alias(&provider, &model), "input":full_input
+        }).to_string().into())).await.unwrap();
+            let recovered = terminal(&mut client).await;
+            assert_eq!(recovered["response"]["id"], "resp-recovered", "{recovered}");
+            upstream.await.unwrap();
+            client.close(None).await.unwrap();
+            router.stop().await.unwrap();
+        }
     }
 
     #[tokio::test]
@@ -1162,12 +1365,203 @@ mod tests {
             let mut next =
                 json!({"previous_response_id":"resp-no-output","input":[result(custom, "call-1")]});
             history.prepare(key, &mut next);
-            assert!(history.restore(key, &mut next).is_err());
+            let error = history.restore(key, &mut next).unwrap_err();
+            assert!(!error.is::<MissingResponseHistory>());
             let mut orphan = json!({"input":[result(custom, "missing-call")]});
             history.prepare(key, &mut orphan);
             let error = history.restore(key, &mut orphan).unwrap_err().to_string();
             assert!(error.contains("工具结果缺少对应的完整调用历史"), "{error}");
             assert!(error.contains("call_id=missing-call"), "{error}");
+        }
+    }
+
+    #[test]
+    fn missing_history_is_distinct_from_invalid_input_and_incomplete_output() {
+        let owner = [1; 32];
+        let mut history = NativeResponsesHistory::default();
+        let mut missing = json!({"previous_response_id":"resp-unknown","input":"next"});
+        history.prepare(owner, &mut missing);
+        assert!(
+            history
+                .restore(owner, &mut missing)
+                .unwrap_err()
+                .is::<MissingResponseHistory>()
+        );
+        let mut adapted = AdaptedResponsesHistory::default();
+        assert!(
+            adapted
+                .prepare(&mut json!({
+                    "previous_response_id":"resp_codey_missing", "input":[]
+                }))
+                .unwrap_err()
+                .is::<MissingResponseHistory>()
+        );
+        let mut orphan = json!({"input":[result(false, "missing-call")]});
+        history.prepare(owner, &mut orphan);
+        assert!(
+            !history
+                .restore(owner, &mut orphan)
+                .unwrap_err()
+                .is::<MissingResponseHistory>()
+        );
+
+        for (kind, status, output) in [
+            ("response.completed", "completed", Value::Null),
+            ("response.incomplete", "failed", json!([])),
+        ] {
+            history.prepare(owner, &mut json!({"input":"task"}));
+            history.observe(&json!({"type":kind,"response":{
+                "id":"resp-invalid", "status":status, "output":output
+            }}));
+            for _ in 0..2 {
+                let mut next = json!({"previous_response_id":"resp-invalid","input":"next"});
+                history.prepare(owner, &mut next);
+                assert!(
+                    !history
+                        .restore(owner, &mut next)
+                        .unwrap_err()
+                        .is::<MissingResponseHistory>()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recovered_native_response_clears_only_its_owner_rejection() {
+        for changed_owner in [false, true] {
+            let mut history = NativeResponsesHistory::default();
+            let original_owner = [1; 32];
+            history.prepare(original_owner, &mut json!({"input":"original"}));
+            history.observe(&json!({"type":"response.completed","response":{
+                "id":"resp-shared", "status":"completed"
+            }}));
+            let mut rejected = json!({"previous_response_id":"resp-shared","input":"next"});
+            history.prepare(original_owner, &mut rejected);
+            assert!(
+                !history
+                    .restore(original_owner, &mut rejected)
+                    .unwrap_err()
+                    .is::<MissingResponseHistory>()
+            );
+
+            let owner = if changed_owner {
+                [2; 32]
+            } else {
+                original_owner
+            };
+            history.prepare(owner, &mut json!({"input":"replacement"}));
+            history.observe(&completed("resp-shared", vec![]));
+            let mut next = json!({"previous_response_id":"resp-shared","input":"next"});
+            history.prepare(owner, &mut next);
+            assert!(history.restore(owner, &mut next).unwrap());
+            assert_eq!(
+                next["input"],
+                json!([
+                    {"role":"user","content":"replacement"},
+                    {"role":"user","content":"next"}
+                ])
+            );
+        }
+    }
+
+    #[test]
+    fn incomplete_native_responses_preserve_only_valid_non_compaction_history() {
+        let owner = [1; 32];
+        for kind in ["response.incomplete", "response.completed"] {
+            for compacting in [false, true] {
+                let mut history = NativeResponsesHistory::default();
+                history.prepare(owner, &mut json!({"input":"task"}));
+                history.observe(&completed("resp-first", vec![]));
+                let input = if compacting {
+                    json!([{"type":"compaction_trigger"}])
+                } else {
+                    json!("continue")
+                };
+                history.prepare(
+                    owner,
+                    &mut json!({"previous_response_id":"resp-first","input":input}),
+                );
+                let partial = json!({"type":"message","role":"assistant","content":[{"type":"output_text","text":"partial"}]});
+                history.observe(&json!({"type":kind,"response":{
+                    "id":"resp-incomplete", "status":"incomplete", "output":[partial]
+                }}));
+                let mut next = json!({"previous_response_id":"resp-incomplete","input":"next"});
+                history.prepare(owner, &mut next);
+                if compacting {
+                    assert!(
+                        !history
+                            .restore_for_http(owner, &mut next, true)
+                            .unwrap_err()
+                            .is::<MissingResponseHistory>()
+                    );
+                    assert_eq!(
+                        history.latest.as_ref().unwrap().last.as_ref().unwrap().0,
+                        "resp-first"
+                    );
+                } else {
+                    assert!(history.restore(owner, &mut next).unwrap());
+                    assert_eq!(
+                        next["input"],
+                        json!([
+                            {"role":"user","content":"task"}, {"role":"user","content":"continue"},
+                            partial, {"role":"user","content":"next"}
+                        ])
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn known_native_identity_changes_remain_fatal_after_reprepare() {
+        let (config, provider, model) = router_config("http://127.0.0.1:9/v1".into());
+        let snapshot = RouterSnapshot::from_config(&config);
+        let route = snapshot.routes[&provider].as_ref();
+        let original = UpstreamWebSocketAuthIdentity {
+            authorization: Some([1; 32]),
+            account_id: Some([2; 32]),
+        };
+        for scoped in [false, true] {
+            for changed in 0..4 {
+                let cache = Arc::new(Mutex::new(NativeHistoryCache::default()));
+                let headers = if scoped {
+                    vec![("session-id".into(), "identity-change".into())]
+                } else {
+                    vec![]
+                };
+                let mut history = NativeResponsesHistory::with_cache(Arc::clone(&cache), &headers);
+                history.prepare_for_route(
+                    route,
+                    original,
+                    &mut json!({"model":model,"input":"task"}),
+                );
+                history.observe(&completed("resp-original", vec![]));
+                let mut changed_route = route.clone();
+                let mut auth = original;
+                let mut next =
+                    json!({"model":model,"previous_response_id":"resp-original","input":"next"});
+                match changed {
+                    0 => changed_route.provider_id.push_str("-other"),
+                    1 => next["model"] = "other-model".into(),
+                    2 => auth.authorization = Some([3; 32]),
+                    _ => auth.account_id = Some([4; 32]),
+                }
+                for _ in 0..2 {
+                    let owner = history.prepare_for_route(&changed_route, auth, &mut next);
+                    let error = history.restore(owner, &mut next).unwrap_err();
+                    assert!(!error.is::<MissingResponseHistory>());
+                    assert!(error.to_string().contains("上游身份已变化"), "{error}");
+                }
+                if scoped {
+                    let mut reconnected = NativeResponsesHistory::with_cache(cache, &headers);
+                    for _ in 0..2 {
+                        let owner = reconnected.prepare_for_route(&changed_route, auth, &mut next);
+                        let error = reconnected.restore(owner, &mut next).unwrap_err();
+                        assert!(!error.is::<MissingResponseHistory>());
+                        assert!(error.to_string().contains("上游身份已变化"), "{error}");
+                    }
+                }
+            }
         }
     }
 
@@ -1321,6 +1715,7 @@ mod tests {
                     .unavailable
                     .as_ref()
                     .unwrap()
+                    .to_string()
                     .contains("流式输出条目超过")
             );
             assert_eq!(
@@ -1331,11 +1726,10 @@ mod tests {
             let next = json!({"previous_response_id":"resp-overflow","input":"later"});
             let mut same_connection = next.clone();
             history.prepare(owner, &mut same_connection);
-            assert!(
-                history
-                    .restore_for_http(owner, &mut same_connection, true)
-                    .is_err()
-            );
+            let error = history
+                .restore_for_http(owner, &mut same_connection, true)
+                .unwrap_err();
+            assert!(!error.is::<MissingResponseHistory>());
             assert_eq!(same_connection, next);
             let mut reconnected = NativeResponsesHistory::with_cache(Arc::clone(&cache), &headers);
             let mut shared = next.clone();
@@ -1635,6 +2029,7 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(scope, [1; 32], "resp-0")
+                .unwrap()
                 .is_none()
         );
         for index in 0..3 {
@@ -1649,9 +2044,9 @@ mod tests {
         }
         let mut cache = cache.lock().unwrap();
         assert!(cache.bytes <= NATIVE_HISTORY_CACHE_BYTES);
-        assert!(cache.get(scope, [1; 32], "large-0").is_none());
-        assert!(cache.get(scope, [1; 32], "large-1").is_some());
-        assert!(cache.get(scope, [1; 32], "large-2").is_some());
+        assert!(cache.get(scope, [1; 32], "large-0").unwrap().is_none());
+        assert!(cache.get(scope, [1; 32], "large-1").unwrap().is_some());
+        assert!(cache.get(scope, [1; 32], "large-2").unwrap().is_some());
     }
 
     #[test]

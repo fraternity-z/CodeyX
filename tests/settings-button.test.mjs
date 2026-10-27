@@ -1309,6 +1309,7 @@ test("marks the CodeyX icon unavailable after consecutive hung health checks and
   assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
   assert.match(button.getAttribute("aria-label"), /CodeyX 连接中断/);
   assert.match(button.title, /CodeyX 后端未响应/);
+  assert.ok(fixture.activeTimers().some((timer) => timer.delay === 5_000));
   let settingsLoads = 0;
   fixture.window.__codeySettingsOverlay = {
     __codeyLazyLoader: true,
@@ -1322,6 +1323,9 @@ test("marks the CodeyX icon unavailable after consecutive hung health checks and
     preventDefault() {},
     stopPropagation() {},
   });
+  assert.deepEqual(fixture.alerts, [], "click waits for a fresh health check");
+  fireLatestHealthTimeout();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(fixture.alerts, [
     "CodeyX 与 Codex 的连接已中断，当前配置面板无法连接。"
     + "CodeyX 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 CodeyX。",
@@ -1334,6 +1338,70 @@ test("marks the CodeyX icon unavailable after consecutive hung health checks and
   assert.equal(button.getAttribute("aria-label"), "打开 CodeyX 配置");
   assert.equal(button.title, "打开 CodeyX 配置");
   assert.equal(fixture.window.__codeyRuntimeHealth.consecutiveFailures, 0);
+});
+
+test("waits for an in-flight health check before opening recovered settings", async () => {
+  let healthCalls = 0;
+  let resolveHealth;
+  const fixture = createStartupUpdateFixture(async (path) => {
+    if (path === "/backend/status") return { status: "ok", availableUpdate: null };
+    if (path === "/backend/health") {
+      healthCalls += 1;
+      if (healthCalls === 1) return { status: "failed", code: "bridge_unavailable" };
+      return new Promise((resolve) => { resolveHealth = resolve; });
+    }
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  const button = fixture.document.getElementById("codey-settings-button");
+  assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
+  let toggles = 0;
+  fixture.window.__codeySettingsOverlay = { toggle() { toggles += 1; } };
+
+  const check = fixture.window.__codeyRefreshRuntimeHealth();
+  button.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {} });
+  button.dispatchEvent({ type: "click", preventDefault() {}, stopPropagation() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(healthCalls, 2, "click shares the pending check");
+  assert.equal(toggles, 0);
+  assert.deepEqual(fixture.alerts, []);
+
+  resolveHealth({ status: "ok" });
+  await check;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(toggles, 1);
+  assert.equal(button.getAttribute("data-codey-runtime-state"), "healthy");
+  assert.deepEqual(fixture.alerts, []);
+});
+
+test("does not count bridge rebuilds or delayed renderer timeouts as backend failures", async () => {
+  let healthResult = { status: "failed", code: "bridge_reinstalled" };
+  const fixture = createStartupUpdateFixture(async (path) => {
+    if (path === "/backend/status") return { status: "ok", availableUpdate: null };
+    if (path === "/backend/health") return healthResult;
+    throw new Error(`unexpected bridge path: ${path}`);
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(fixture.window.__codeyRuntimeHealth?.consecutiveFailures ?? 0, 0);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    healthResult = new Promise(() => {});
+    const check = fixture.window.__codeyRefreshRuntimeHealth();
+    fixture.advanceClock(10_000);
+    const timeout = fixture.activeTimers().filter((timer) => timer.delay === 3_250).at(-1);
+    assert.ok(timeout);
+    timeout.cleared = true;
+    timeout.callback();
+    await check;
+  }
+  const button = fixture.document.getElementById("codey-settings-button");
+  assert.notEqual(button.getAttribute("data-codey-runtime-state"), "unavailable");
+  assert.equal(fixture.window.__codeyRuntimeHealth?.consecutiveFailures ?? 0, 0);
+  assert.ok(fixture.activeTimers().some((timer) => timer.delay === 1_000));
+
+  healthResult = { status: "failed", code: "bridge_unavailable" };
+  await fixture.window.__codeyRefreshRuntimeHealth();
+  assert.equal(button.getAttribute("data-codey-runtime-state"), "unavailable");
 });
 
 test("pauses CodeyX health checks while the page is hidden and resumes immediately", async () => {

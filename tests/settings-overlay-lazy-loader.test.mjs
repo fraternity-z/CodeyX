@@ -189,3 +189,65 @@ test("settings overlay loader reports a failure and permits a retry", async () =
   assert.equal(window.__codeySettingsOverlay, realOverlay);
   assert.equal(realOverlay.opened, 1);
 });
+
+test("settings overlay loader uses a bounded bridge call and retries a rebuild once", async () => {
+  const calls = [];
+  const realOverlay = { opened: 0, open() { this.opened += 1; }, toggle() {} };
+  const window = {
+    alert() { assert.fail("bridge recovery must not alert"); },
+    async __codexSessionDeleteBridge(path, payload, options) {
+      assert.equal(path, "/internal/codey/settings-overlay/load");
+      calls.push(options);
+      if (calls.length === 1) return { status: "failed", code: "bridge_reinstalled" };
+      window.__codeySettingsOverlay = realOverlay;
+      return { status: "ok" };
+    },
+  };
+  vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+  const proxy = window.__codeySettingsOverlay;
+  const preload = proxy.load();
+  proxy.toggle();
+  proxy.toggle();
+  await preload;
+  await flushPromises();
+
+  assert.equal(calls.length, 2);
+  assert.ok(calls.every((options) => options.timeoutMs === 15_000));
+  assert.equal(realOverlay.opened, 1);
+});
+
+test("settings overlay loader does not retry other failures or repeated rebuilds", async () => {
+  for (const code of ["bridge_reinstalled", "bridge_request_failed"]) {
+    let calls = 0;
+    const window = {
+      async __codexSessionDeleteBridge() {
+        calls += 1;
+        return { status: "failed", code, message: code };
+      },
+    };
+    vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+    const proxy = window.__codeySettingsOverlay;
+    await assert.rejects(proxy.load(), new RegExp(code));
+    assert.equal(calls, code === "bridge_reinstalled" ? 2 : 1);
+    await assert.rejects(proxy.load(), new RegExp(code));
+    assert.equal(calls, code === "bridge_reinstalled" ? 4 : 2, "failed preload releases its promise");
+  }
+});
+
+for (const rejects of [false, true]) {
+  test(`settings overlay loader accepts a ready panel after a backend ${rejects ? "rejection" : "timeout result"}`, async () => {
+    const realOverlay = { opened: 0, open() { this.opened += 1; }, toggle() {} };
+    const window = {
+      alert() { assert.fail("a ready panel must not alert"); },
+      async __codexSessionDeleteBridge() {
+        window.__codeySettingsOverlay = realOverlay;
+        if (rejects) throw new Error("CDP timed out");
+        return { status: "failed", code: "bridge_request_failed", message: "CDP timed out" };
+      },
+    };
+    vm.runInNewContext(loaderScript, { Error, Promise, String, window });
+    window.__codeySettingsOverlay.toggle();
+    await flushPromises();
+    assert.equal(realOverlay.opened, 1);
+  });
+}

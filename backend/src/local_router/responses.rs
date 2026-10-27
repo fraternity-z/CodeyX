@@ -1814,6 +1814,15 @@ impl RouterServer {
         if bridge != ProtocolBridge::NativeResponses
             && let Err(error) = downstream.prepare_adapted_response_context(&mut body)
         {
+            if error.is::<MissingResponseHistory>() {
+                return write_missing_response_history(
+                    downstream,
+                    &error,
+                    &resolved.route,
+                    "restore_adapted_response_history",
+                )
+                .await;
+            }
             downstream
                 .write_error(
                     413,
@@ -1829,6 +1838,15 @@ impl RouterServer {
         if restoring_adapted_history {
             match downstream.prepare_adapted_response_context(&mut body) {
                 Ok(true) => {}
+                Err(error) if error.is::<MissingResponseHistory>() => {
+                    return write_missing_response_history(
+                        downstream,
+                        &error,
+                        &resolved.route,
+                        "restore_adapted_response_history",
+                    )
+                    .await;
+                }
                 _ => {
                     return downstream
                         .write_error(
@@ -2229,6 +2247,10 @@ impl RouterServer {
                 }
                 Ok(false) => {}
                 Err(error) => {
+                    if error.is::<MissingResponseHistory>() {
+                        return write_missing_response_history(downstream, &error, &resolved.route,
+                            "restore_native_response_history").await;
+                    }
                     record_router_failure_nonblocking(
                         "local_router_context_not_recoverable",
                         "restore_native_response_history",
@@ -2953,4 +2975,42 @@ pub(crate) fn format_upstream_response_headers(headers: &reqwest::header::Header
 
 fn is_sensitive_upstream_response_header(name: &str) -> bool {
     name.eq_ignore_ascii_case("set-cookie") || name.eq_ignore_ascii_case("set-cookie2")
+}
+
+// 只在发送前报告本地历史缺失，由 Codex 决定补发完整输入。
+async fn write_missing_response_history<D>(
+    downstream: &mut D,
+    error: &anyhow::Error,
+    route: &RouteTarget,
+    operation: &'static str,
+) -> Result<()>
+where
+    D: ResponsesDownstream + ?Sized,
+{
+    record_router_failure_nonblocking(
+        "local_router_previous_response_not_found",
+        operation,
+        error.to_string(),
+        json!({"requestId": current_router_request_id(), "routeId": route.provider_id}),
+    );
+    if !downstream.is_websocket() {
+        return downstream
+            .write_json(
+                400,
+                &json!({"error": {
+                    "type": "invalid_request_error", "code": "previous_response_not_found",
+                    "message": error.to_string(),
+                }}),
+            )
+            .await;
+    }
+    downstream
+        .write_event(&json!({
+            "type": "error", "status": 400,
+            "error": {
+                "type": "invalid_request_error", "code": "previous_response_not_found",
+                "message": error.to_string(),
+            },
+        }))
+        .await
 }

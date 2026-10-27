@@ -394,6 +394,13 @@ impl HttpResponsesDownstream {
 
 #[async_trait]
 impl ResponsesDownstream for HttpResponsesDownstream {
+    fn prepare_adapted_response_context(&mut self, body: &mut Value) -> Result<bool> {
+        if has_codey_synthetic_previous_response_id(body) {
+            return Err(MissingResponseHistory.into());
+        }
+        Ok(false)
+    }
+
     fn event_stream_started(&self) -> bool {
         self.event_stream_started
     }
@@ -764,7 +771,7 @@ impl AdaptedResponsesHistory {
                 .as_ref()
                 .filter(|(response_id, _)| response_id == previous_response_id)
             else {
-                anyhow::bail!("会话历史已失效，请压缩上下文后重新发送完整输入");
+                return Err(MissingResponseHistory.into());
             };
             Some(context)
         } else {

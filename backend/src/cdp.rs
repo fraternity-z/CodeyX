@@ -1851,11 +1851,30 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
   }
   if (existing?.__codeyLazyLoader) return;
 
+  const loadTimeoutMs = 15000;
   let loading = null;
   let opening = false;
   const formatError = (error) => error instanceof Error
     ? `${error.name}: ${error.message}`
     : String(error || "未知错误");
+  const readyOverlay = () => {
+    const overlay = window.__codeySettingsOverlay;
+    return overlay && overlay !== proxy && typeof overlay.toggle === "function"
+      ? overlay
+      : null;
+  };
+  const requestLoad = (retried) => new Promise((resolve) => {
+    resolve(window.__codexSessionDeleteBridge(loadPath, {}, { timeoutMs: loadTimeoutMs }));
+  }).then((result) => {
+    // 后端求值超时后页面可能已完成加载，以真实浮层为准。
+    const overlay = readyOverlay();
+    if (overlay) return overlay;
+    if (result?.code === "bridge_reinstalled" && !retried) return requestLoad(true);
+    if (!result || result.status !== "ok") {
+      throw new Error(result?.message || "配置面板加载请求失败");
+    }
+    throw new Error(window.__codeyOverlayError || "未生成浮层控制器");
+  });
   const proxy = {
     __codeyLazyLoader: true,
     close() {},
@@ -1865,18 +1884,9 @@ fn lazy_settings_overlay_loader_script() -> &'static str {
       if (typeof window.__codexSessionDeleteBridge !== "function") {
         return Promise.reject(new Error("CodeyX bridge 尚未就绪"));
       }
-      loading = new Promise((resolve) => {
-        resolve(window.__codexSessionDeleteBridge(loadPath, {}));
-      }).then((result) => {
-        if (!result || result.status !== "ok") {
-          throw new Error(result?.message || "配置面板加载请求失败");
-        }
-        const overlay = window.__codeySettingsOverlay;
-        if (!overlay || overlay === proxy || typeof overlay.toggle !== "function") {
-          throw new Error(window.__codeyOverlayError || "未生成浮层控制器");
-        }
-        return overlay;
-      }).catch((error) => {
+      loading = requestLoad(false).catch((error) => {
+        const overlay = readyOverlay();
+        if (overlay) return overlay;
         loading = null;
         throw error;
       });

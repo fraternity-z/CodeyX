@@ -23,7 +23,9 @@
   const runtimeHealthCheckIntervalMs = 30_000;
   const runtimeHealthCheckTimeoutMs = 3_000;
   const runtimeHealthFailureRetryMs = 1_000;
+  const runtimeHealthUnavailableRetryMs = 5_000;
   const runtimeHealthFailureThreshold = 2;
+  const runtimeHealthStallToleranceMs = 1_500;
   // 系统睡眠会同时冻结页面和后端，唤醒瞬间所有进程一起恢复，
   // 3 秒的往返预算不足以判断 CodeyX 是否真的退出。排程间隔远超定时器
   // 周期即视为刚从睡眠恢复，在这段宽限期内放宽超时与失败阈值。
@@ -64,7 +66,8 @@
   let codeyUpdatePolicy = null;
   let updateCheckGeneration = 0;
   let runtimeHealthTimer = 0;
-  let runtimeHealthCheckInFlight = false;
+  let runtimeHealthCheckPromise = null;
+  let settingsHealthCheckPending = false;
   let runtimeHealthFailures = 0;
   let runtimeHealthState = "checking";
   let runtimeHealthMessage = "";
@@ -322,8 +325,14 @@
       scheduleRuntimeHealthCheck();
       return runtimeHealthSnapshot();
     }
-    if (runtimeHealthCheckInFlight) return runtimeHealthSnapshot();
-    runtimeHealthCheckInFlight = true;
+    runtimeHealthCheckPromise ||= runRuntimeHealthCheck().finally(() => {
+      runtimeHealthCheckPromise = null;
+    });
+    return runtimeHealthCheckPromise;
+  };
+
+  const runRuntimeHealthCheck = async () => {
+    let inconclusive = false;
     const observedAt = Date.now();
     const observedGap = runtimeHealthLastCheckAt > 0
       ? observedAt - runtimeHealthLastCheckAt
@@ -360,19 +369,26 @@
       error.code = result?.code || "backend_unavailable";
       throw error;
     } catch (error) {
-      runtimeHealthFailures += 1;
       const immediate = error?.code === "bridge_unavailable";
+      // 桥接重装或页面卡顿后的超时不能证明后端已断线。
+      inconclusive = !immediate && (
+        error?.code === "bridge_reinstalled"
+        || Date.now() - observedAt > checkTimeoutMs + runtimeHealthStallToleranceMs
+      );
+      if (inconclusive) return runtimeHealthSnapshot();
+      runtimeHealthFailures += 1;
       if (immediate) runtimeHealthFailures = failureThreshold;
       if (runtimeHealthFailures >= failureThreshold) {
         return setRuntimeHealthState("unavailable", "CodeyX 后端未响应");
       }
       return setRuntimeHealthState("checking", "正在确认 CodeyX 进程状态");
     } finally {
-      runtimeHealthCheckInFlight = false;
-      const nextDelay = runtimeHealthFailures > 0
-        && runtimeHealthFailures < failureThreshold
-        ? runtimeHealthFailureRetryMs
+      let nextDelay = runtimeHealthState === "unavailable"
+        ? runtimeHealthUnavailableRetryMs
         : runtimeHealthCheckIntervalMs;
+      if (inconclusive || (runtimeHealthFailures > 0 && runtimeHealthFailures < failureThreshold)) {
+        nextDelay = runtimeHealthFailureRetryMs;
+      }
       scheduleRuntimeHealthCheck(nextDelay);
     }
   };
@@ -1037,13 +1053,22 @@
     }
   };
 
-  const openSettings = () => {
+  const openSettings = async () => {
     if (runtimeHealthState === "unavailable") {
-      window.alert(
-        "CodeyX 与 Codex 的连接已中断，当前配置面板无法连接。"
-        + "CodeyX 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 CodeyX。",
-      );
-      return;
+      if (settingsHealthCheckPending) return;
+      settingsHealthCheckPending = true;
+      try {
+        await checkRuntimeHealth();
+      } finally {
+        settingsHealthCheckPending = false;
+      }
+      if (runtimeHealthState === "unavailable") {
+        window.alert(
+          "CodeyX 与 Codex 的连接已中断，当前配置面板无法连接。"
+          + "CodeyX 会继续尝试自动恢复；若长时间仍未恢复，请退出 Codex 后重新启动 CodeyX。",
+        );
+        return;
+      }
     }
     if (window.__codeySettingsOverlay?.toggle) {
       window.__codeySettingsOverlay.toggle();
@@ -1239,7 +1264,7 @@
       button.addEventListener("click", (event) => {
         event.preventDefault();
         event.stopPropagation();
-        openSettings();
+        void openSettings();
       }, true);
     }
     if (railMount) {
