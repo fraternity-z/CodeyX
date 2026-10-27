@@ -135,7 +135,7 @@
       #${buttonId}[data-codey-runtime-state="unavailable"][data-codey-update-available="true"]::after { top: auto; right: 3px; bottom: 3px; width: 5px; height: 5px; }
       /* 额度块直接取 Codex 的语义色板，宿主切换明暗主题时同步变化；变量缺失时退回系统色。
          侧边栏本身半透明，额度块铺一层随主题变化的半透明磨砂浮层与之融合，悬停时略微提亮。 */
-      #${accountUsageId} { --codey-usage-ink: var(--color-text, CanvasText); --codey-usage-ink-2: color-mix(in srgb, var(--codey-usage-ink) 72%, transparent); --codey-usage-ink-3: color-mix(in srgb, var(--codey-usage-ink) 60%, transparent); --codey-usage-line: var(--color-token-border, color-mix(in srgb, CanvasText 8%, transparent)); --codey-usage-track: color-mix(in srgb, var(--codey-usage-ink) 9%, transparent); --codey-usage-fill: color-mix(in srgb, var(--codey-usage-ink) 62%, transparent); --codey-usage-warning: var(--color-text-warning, #e25507); --codey-usage-danger: var(--color-text-danger, #e02e2a); --codey-usage-success: var(--color-text-success, #00a240); --codey-usage-surface: var(--color-token-dropdown-background, var(--color-surface-elevated, Canvas)); --codey-usage-ring: var(--color-token-side-bar-background, Canvas); --codey-usage-ease: cubic-bezier(.22, 1, .36, 1); -webkit-app-region: no-drag !important; position: relative; isolation: isolate; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 0; transition: box-shadow .15s ease; color: var(--codey-usage-ink); font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif); font-size: 12px; line-height: 16px; outline: none; pointer-events: auto !important; user-select: none; }
+      #${accountUsageId} { --codey-usage-ink: var(--color-text, CanvasText); --codey-usage-ink-2: color-mix(in srgb, var(--codey-usage-ink) 72%, transparent); --codey-usage-ink-3: color-mix(in srgb, var(--codey-usage-ink) 60%, transparent); --codey-usage-line: var(--color-token-border, color-mix(in srgb, CanvasText 8%, transparent)); --codey-usage-track: color-mix(in srgb, var(--codey-usage-ink) 9%, transparent); --codey-usage-fill: color-mix(in srgb, var(--codey-usage-ink) 62%, transparent); --codey-usage-warning: var(--color-text-warning, #e25507); --codey-usage-danger: var(--color-text-danger, #e02e2a); --codey-usage-success: var(--color-text-success, #00a240); --codey-usage-surface: var(--color-token-dropdown-background, var(--color-surface-elevated, Canvas)); --codey-usage-ease: cubic-bezier(.22, 1, .36, 1); -webkit-app-region: no-drag !important; position: relative; isolation: isolate; display: block; box-sizing: border-box; width: 100%; min-width: 0; padding: 0; transition: box-shadow .15s ease; color: var(--codey-usage-ink); font-family: var(--font-sans, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif); font-size: 12px; line-height: 16px; outline: none; pointer-events: auto !important; user-select: none; }
       #${accountUsageId}::before { content: ""; position: absolute; z-index: -1; inset: -20px 0 0; background: color-mix(in srgb, var(--codey-usage-surface) 58%, transparent); -webkit-backdrop-filter: blur(16px) saturate(1.4); backdrop-filter: blur(16px) saturate(1.4); -webkit-mask-image: linear-gradient(to bottom, transparent, #000 20px); mask-image: linear-gradient(to bottom, transparent, #000 20px); transition: background-color .15s ease; pointer-events: none; }
       /* 摘要不再使用卡片外框，整块以半透明浮层铺满侧边栏底部：顶部给出整体结论与套餐，下面每个额度窗口一行进度、一行重置倒计时。 */
       #${accountUsageId} .codey-usage-summary { display: grid; min-width: 0; grid-template-columns: max-content minmax(0, 1fr) max-content; align-items: center; column-gap: 10px; row-gap: 8px; padding: 10px 18px 12px; }
@@ -161,11 +161,9 @@
       #${accountUsageId} .codey-usage-fill { position: absolute; inset: 0 auto 0 0; width: calc(var(--codey-usage-remaining) * 100%); border-radius: inherit; background: var(--codey-usage-fill); }
       #${accountUsageId} [data-tone="warning"] .codey-usage-fill { background: var(--codey-usage-warning); }
       #${accountUsageId} [data-tone="critical"] .codey-usage-fill { background: var(--codey-usage-danger); }
-      /* 详情里的刻度标出窗口剩余时间的比例：进度条越过刻度，说明额度比时间宽裕。 */
-      #${accountUsageId} .codey-usage-pace { position: absolute; top: -2px; bottom: -2px; left: clamp(1px, calc(var(--codey-usage-time-left) * 100%), calc(100% - 1px)); width: 2px; margin-left: -1px; border-radius: 1px; background: var(--codey-usage-ink-2); box-shadow: 0 0 0 1.5px var(--codey-usage-ring); }
       #${accountUsageId} .codey-usage-error { display: flex; grid-column: 1 / -1; align-items: center; gap: 7px; min-width: 0; color: var(--codey-usage-ink-2); font-size: 11.5px; }
       #${accountUsageId} .codey-usage-error svg { flex: 0 0 auto; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 1.6; }
-      #${accountUsageId} .codey-usage-details { --codey-usage-ring: var(--codey-usage-surface); position: absolute; z-index: 2; right: 8px; bottom: calc(100% - 2px); left: 8px; box-sizing: border-box; min-width: 0; padding: 12px 14px 11px; border-radius: 12px; background: var(--codey-usage-surface); box-shadow: var(--shadow-dropdown-overlay, 0 0 0 .5px rgb(0 0 0 / .08), 0 8px 16px -4px rgb(0 0 0 / .12)); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(4px) scale(.985); transform-origin: 50% 100%; transition: opacity .12s ease, transform .12s ease, visibility 0s linear .12s; visibility: hidden; }
+      #${accountUsageId} .codey-usage-details { position: absolute; z-index: 2; right: 8px; bottom: calc(100% - 2px); left: 8px; box-sizing: border-box; min-width: 0; padding: 12px 14px 11px; border-radius: 12px; background: var(--codey-usage-surface); box-shadow: var(--shadow-dropdown-overlay, 0 0 0 .5px rgb(0 0 0 / .08), 0 8px 16px -4px rgb(0 0 0 / .12)); color: var(--codey-usage-ink); opacity: 0; pointer-events: none; transform: translateY(4px) scale(.985); transform-origin: 50% 100%; transition: opacity .12s ease, transform .12s ease, visibility 0s linear .12s; visibility: hidden; }
       #${accountUsageId}:hover .codey-usage-details, #${accountUsageId}:focus-visible .codey-usage-details { opacity: 1; transform: none; transition: opacity .18s var(--codey-usage-ease) .12s, transform .22s var(--codey-usage-ease) .12s, visibility 0s linear .12s; visibility: visible; }
       #${accountUsageId}[data-dismissed="true"] .codey-usage-details { opacity: 0; transition: none; visibility: hidden; }
       #${accountUsageId} .codey-usage-pop-head { display: flex; min-width: 0; align-items: center; gap: 8px; margin-bottom: 12px; }
@@ -188,8 +186,6 @@
       #${accountUsageId} .codey-usage-credits { display: flex; min-width: 0; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--codey-usage-line); color: var(--codey-usage-ink-2); }
       #${accountUsageId} .codey-usage-credits-value { color: var(--codey-usage-ink); font-variant-numeric: tabular-nums; font-weight: 600; white-space: nowrap; }
       #${accountUsageId} .codey-usage-pop-foot { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 2px 8px; margin-top: 12px; color: var(--codey-usage-ink-3); font-size: 11px; line-height: 15px; }
-      #${accountUsageId} .codey-usage-legend { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
-      #${accountUsageId} .codey-usage-legend::before { content: ""; width: 2px; height: 10px; border-radius: 1px; background: var(--codey-usage-ink-2); }
       #${accountUsageId} .codey-usage-updated, #${accountUsageId} .codey-usage-stale-note { overflow: hidden; margin-inline-start: auto; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
       #${accountUsageId} .codey-usage-stale-note { display: none; color: var(--codey-usage-warning); }
       #${accountUsageId}[data-state="stale"] .codey-usage-updated { display: none; }
@@ -657,7 +653,7 @@
     const state = remaining < 0.5 ? "empty" : Number(window.usedPercent) <= 0 ? "idle" : "";
     if (!Number.isFinite(resetsAt) || resetsAt <= 0 || !(windowMinutes > 0)) return { state };
     const minutesLeft = Math.max(0, Math.min(windowMinutes, (resetsAt * 1000 - now) / 60_000));
-    const pace = { state, minutesLeft, timeLeft: minutesLeft / windowMinutes };
+    const pace = { state, minutesLeft };
     const elapsedMinutes = windowMinutes - minutesLeft;
     if (state || elapsedMinutes < Math.max(10, windowMinutes * 0.02)) return pace;
     const minutesToEmpty = remaining / ((100 - remaining) / elapsedMinutes);
@@ -752,18 +748,17 @@
 
   const accountUsageDetailWindow = (model) => {
     const note = accountUsagePaceNote(model.pace);
-    const { minutesLeft, timeLeft } = model.pace;
+    const { minutesLeft } = model.pace;
     const countdown = minutesLeft === undefined
       ? ""
       : minutesLeft > 0 ? `${accountUsageDurationLabel(minutesLeft)}后` : "即将重置";
-    const timeStyle = timeLeft === undefined ? "" : `;--codey-usage-time-left:${Number(timeLeft.toFixed(3))}`;
     return `
-      <section class="codey-usage-window" data-tone="${model.tone}" data-pace="${model.pace.state || "unknown"}" style="--codey-usage-remaining:${model.remainingRatio}${timeStyle}">
+      <section class="codey-usage-window" data-tone="${model.tone}" data-pace="${model.pace.state || "unknown"}" style="--codey-usage-remaining:${model.remainingRatio}">
         <div class="codey-usage-window-head">
           <span class="codey-usage-window-name">${escapeAccountUsageText(model.name)}</span>
           <span class="codey-usage-figure"><span class="codey-usage-figure-label">剩余</span><span class="codey-usage-figure-value">${escapeAccountUsageText(model.percent)}</span></span>
         </div>
-        <span class="codey-usage-meter" aria-hidden="true"><span class="codey-usage-fill"></span>${timeLeft === undefined ? "" : '<span class="codey-usage-pace"></span>'}</span>
+        <span class="codey-usage-meter" aria-hidden="true"><span class="codey-usage-fill"></span></span>
         ${model.resetTime ? `<div class="codey-usage-window-meta"><span>${escapeAccountUsageText(model.resetTime)}</span>${countdown ? `<span>${countdown}</span>` : ""}</div>` : ""}
         ${note ? `<div class="codey-usage-pace-note">${escapeAccountUsageText(note)}</div>` : ""}
       </section>`;
@@ -793,7 +788,6 @@
     const plan = accountUsagePlanLabel(result?.planType);
     const credits = accountUsageCreditsLabel(result?.credits);
     const fetched = accountUsageClockLabel(result?.fetchedAt);
-    const hasPace = models.some((model) => model.pace.timeLeft !== undefined);
     return `
       <div class="codey-usage-pop-head">
         <span class="codey-usage-pop-title">账号额度</span>
@@ -802,7 +796,6 @@
       ${models.map(accountUsageDetailWindow).join("")}
       ${credits ? `<div class="codey-usage-credits"><span>Credits 余额</span><span class="codey-usage-credits-value">${escapeAccountUsageText(credits)}</span></div>` : ""}
       <div class="codey-usage-pop-foot">
-        ${hasPace ? '<span class="codey-usage-legend">剩余时间</span>' : ""}
         ${fetched ? `<span class="codey-usage-updated">更新于 ${fetched}</span>` : ""}
         <span class="codey-usage-stale-note">${fetched ? `未能刷新 · 截至 ${fetched}` : "未能刷新，显示上次结果"}</span>
       </div>`;

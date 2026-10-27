@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { Button, Select, Tooltip } from "../../components/ui";
 import { formatUsageNumber, usageHeatmap } from "./state";
 import type { LogAnalytics } from "./types";
@@ -10,7 +10,7 @@ export function UsageHeatmap({ stats }: { stats: LogAnalytics }) {
   const [selectedDay, setSelectedDay] = useState<number>();
   const [focusIndex, setFocusIndex] = useState(0);
   const grid = useRef<HTMLDivElement>(null);
-  const map = usageHeatmap(stats, selectedYear);
+  const map = useMemo(() => usageHeatmap(stats, selectedYear), [stats, selectedYear]);
   const offset = map.days.length ? new Date(map.days[0].timestampUnixMs).getUTCDay() : 0;
   const months = map.days.flatMap((day, index) => {
     const date = new Date(day.timestampUnixMs);

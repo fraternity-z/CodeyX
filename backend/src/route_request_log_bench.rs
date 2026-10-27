@@ -1,9 +1,11 @@
 //! Opt-in statistics measurements against synthetic, temporary databases.
+//! Run: cargo test -p codey --lib --locked --release statistics_query_benchmark -- --ignored --nocapture
 use super::*;
 
 #[test]
 #[ignore = "opt-in request log statistics benchmark"]
 fn statistics_query_benchmark() {
+    let mut failures = Vec::new();
     for rows in [10_000, 100_000, 1_000_000] {
         let directory = tempfile::tempdir().unwrap();
         let sink = SqliteSink::open(&directory.path().join(SQLITE_FILE_NAME), 30).unwrap();
@@ -33,10 +35,27 @@ fn statistics_query_benchmark() {
             .execute_batch("PRAGMA wal_checkpoint(TRUNCATE); ANALYZE;")
             .unwrap();
         for (name, search, provider, group_by, all_time) in [
+            ("range-summary", None, None, "", false),
             ("range-model", None, None, "model", false),
             ("range-session", None, None, "session", false),
+            ("all-time-model", None, None, "model", true),
+            ("all-time-summary", None, None, "", true),
             ("provider", None, Some("provider-1"), "model", false),
             ("search-broad", Some("synthetic"), None, "model", false),
+            (
+                "search-no-match",
+                Some("unmatched-synthetic-event"),
+                None,
+                "model",
+                false,
+            ),
+            (
+                "search-no-match-all-time",
+                Some("unmatched-synthetic-event"),
+                None,
+                "model",
+                true,
+            ),
             (
                 "search-selective-all-time",
                 Some("diagnostic 1234"),
@@ -50,20 +69,29 @@ fn statistics_query_benchmark() {
                 to_unix_ms: (!all_time).then_some(now),
                 search: search.map(str::to_owned),
                 provider: provider.map(str::to_owned),
-                group_by: Some(group_by.into()),
+                group_by: (!group_by.is_empty()).then(|| group_by.into()),
                 include_daily_trend: true,
                 all_time,
                 ..Default::default()
             };
-            // Each request opens a fresh SQLite page cache; the second also benefits
+            // Each request opens a fresh SQLite page cache; later samples also benefit
             // from OS file caching. This does not flush the operating system cache.
-            for sample in 0..2 {
+            for sample in 0..3 {
                 let start = Instant::now();
                 let result = query_route_request_log_stats(
                     directory.path(),
                     RouteRequestLogBackend::Sqlite,
                     query.clone(),
                 );
+                match &result {
+                    Ok(stats) => assert!(stats.queryable),
+                    Err(error) => {
+                        // Record timeouts without skipping the remaining measurements.
+                        failures.push(format!(
+                            "rows={rows} case={name} sample={sample}: {error:#}"
+                        ));
+                    }
+                }
                 eprintln!(
                     "stats rows={rows} case={name} sample={sample} elapsed_ms={:.2} result={}",
                     start.elapsed().as_secs_f64() * 1000.0,
@@ -82,8 +110,10 @@ fn statistics_query_benchmark() {
                 let plan = sink
                     .connection
                     .prepare(&format!(
-                        "EXPLAIN QUERY PLAN SELECT {} FROM route_request_logs{where_clause}",
-                        summary_columns(),
+                        "EXPLAIN QUERY PLAN SELECT {},
+                        timestamp_unix_ms / {DAY_MS} * {DAY_MS} AS bucket
+                        FROM route_request_logs{where_clause} GROUP BY bucket ORDER BY bucket",
+                        statistics_bucket_columns(),
                     ))
                     .unwrap()
                     .query_map(params_from_iter(values.iter()), |row| {
@@ -96,4 +126,5 @@ fn statistics_query_benchmark() {
             }
         }
     }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

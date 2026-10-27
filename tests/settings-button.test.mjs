@@ -733,6 +733,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(details.innerHTML, /每周额度[\s\S]*?剩余[\s\S]*?60%[\s\S]*?明天 23:45 重置/);
   assert.match(details.innerHTML, /Credits 余额[\s\S]*?42/);
   assert.match(details.innerHTML, /更新于 \d{2}:\d{2}/);
+  assert.doesNotMatch(details.innerHTML, /class="codey-usage-pace"|codey-usage-legend|--codey-usage-time-left/);
   assert.equal(usage.dataset.state, "ready");
   assert.equal(usage.dataset.windowCount, "2");
   assert.equal(usage.dataset.plan, undefined);
@@ -882,7 +883,7 @@ test("renders weekly and optional five-hour usage above the sidebar account", as
   assert.match(errorParts.announcer.textContent, /^5 小时额度已用完；5 小时额度剩余 0%；每周额度剩余 26%$/);
   assert.match(errorParts.details.innerHTML, /data-pace="empty"[\s\S]*?已用完，1 小时 38 分钟后恢复/);
   assert.match(errorParts.details.innerHTML, /data-pace="fast"[\s\S]*?按当前速度约 1 天 1 小时后用完/);
-  assert.match(errorParts.details.innerHTML, /codey-usage-legend/);
+  assert.doesNotMatch(errorParts.details.innerHTML, /class="codey-usage-pace"|codey-usage-legend|--codey-usage-time-left/);
   assert.doesNotMatch(errorParts.details.innerHTML, /Credits/);
 });
 
