@@ -928,6 +928,10 @@ impl OfficialAccountStore {
     }
 
     fn write(&self, record: &OfficialAccountRecord) -> Result<()> {
+        anyhow::ensure!(
+            !sanitize_id(&record.id).eq_ignore_ascii_case("default"),
+            "官方账号 ID 与默认账号保留文件名冲突"
+        );
         let bytes = serde_json::to_vec_pretty(record)?;
         crate::fs_util::atomic_write_private_with_parent(&self.account_path(&record.id), &bytes)
             .with_context(|| format!("保存官方账号失败：{}", record.id))
@@ -3401,6 +3405,46 @@ mod tests {
         store.remove("acct_2").unwrap();
         assert_eq!(store.default_account_id().unwrap(), None);
         assert_eq!(store.list().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn store_rejects_reserved_account_ids_without_overwriting_existing_accounts() {
+        let dir = TempDir::new().unwrap();
+        let store = OfficialAccountStore::new(dir.path().join(ACCOUNTS_DIR_NAME));
+        let existing = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_1", "a@example.com", "2026-01-01T00:00:00Z"),
+            1,
+        )
+        .unwrap();
+        store.upsert(&existing).unwrap();
+        store.set_default_account_id(Some(&existing.id)).unwrap();
+        let default_bytes = fs::read(store.default_path()).unwrap();
+        let account_bytes = fs::read(store.account_path(&existing.id)).unwrap();
+
+        for id in ["default", "DEFAULT", "Default", "dEfAuLt"] {
+            let mut auth = chatgpt_auth(id, "b@example.com", "2026-01-02T00:00:00Z");
+            auth["tokens"]["account_id"] = json!(id);
+            let record = OfficialAccountRecord::from_auth(auth, 2).unwrap();
+            let error = store.upsert(&record).unwrap_err();
+            assert!(error.to_string().contains("保留文件名"));
+            assert_eq!(fs::read(store.default_path()).unwrap(), default_bytes);
+            assert_eq!(
+                fs::read(store.account_path(&existing.id)).unwrap(),
+                account_bytes
+            );
+            assert_eq!(store.list().unwrap(), vec![existing.clone()]);
+            assert_eq!(store.default_account().unwrap(), Some(existing.clone()));
+        }
+
+        let imported = OfficialAccountRecord::from_auth(
+            chatgpt_auth("acct_2", "b@example.com", "2026-01-02T00:00:00Z"),
+            2,
+        )
+        .unwrap();
+        store.upsert(&imported).unwrap();
+        assert_eq!(store.get(&imported.id).unwrap(), Some(imported));
+        assert_eq!(store.default_account().unwrap(), Some(existing));
+        assert_eq!(fs::read(store.default_path()).unwrap(), default_bytes);
     }
 
     #[test]

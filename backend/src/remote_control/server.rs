@@ -400,9 +400,18 @@ async fn route(core: Arc<Core>, mut request: Request<Incoming>) -> Reply {
                 let Some(state) = core.state.upgrade() else {
                     return failure(StatusCode::SERVICE_UNAVAILABLE, "CodeyX 正在退出");
                 };
-                let args = {
-                    let config = state.config.read().await;
-                    restore_panel_headers(&config, command, args)
+                let config = state.config.read().await.clone();
+                let args = restore_panel_headers(&config, command, args);
+                let args = match restore_panel_account_proxy(
+                    &config,
+                    state.official_accounts(),
+                    command,
+                    args,
+                )
+                .await
+                {
+                    Ok(args) => args,
+                    Err(error) => return failure(StatusCode::BAD_REQUEST, &error),
                 };
                 let result = crate::commands::invoke_api(&state, command, args).await;
                 Ok(redact_panel_config(result))
@@ -632,6 +641,7 @@ fn validate_model_settings(catalog: &Value, desktop: &Value, args: &Value) -> Re
 
 fn redact_panel_config(mut value: Value) -> Value {
     if let Some(config) = value.get_mut("config").filter(|config| config.is_object()) {
+        config.as_object_mut().unwrap().remove("networkProxy");
         if let Some(profiles) = config.get_mut("profiles").and_then(Value::as_array_mut) {
             for profile in profiles {
                 if !profile.is_object() {
@@ -641,6 +651,9 @@ fn redact_panel_config(mut value: Value) -> Value {
                 // Request headers may contain provider credentials too. Keep
                 // them on the host when remote users save the redacted form.
                 profile["modelRequestHeaders"] = json!({});
+                if let Some(proxy) = profile.get_mut("upstreamProxy").filter(|v| v.is_string()) {
+                    *proxy = json!(redacted_proxy_url(proxy.as_str().unwrap()));
+                }
             }
         }
         if let Some(prompt) = config
@@ -663,7 +676,43 @@ fn redact_panel_config(mut value: Value) -> Value {
             }
         }
     }
+    if let Some(accounts) = value.get_mut("accounts").and_then(Value::as_array_mut) {
+        for account in accounts {
+            if let Some(proxy) = account.get_mut("upstreamProxy").filter(|v| v.is_string()) {
+                *proxy = json!(redacted_proxy_url(proxy.as_str().unwrap()));
+            }
+        }
+    }
     value
+}
+
+fn redacted_proxy_url(value: &str) -> String {
+    if value.is_empty() {
+        return String::new();
+    }
+    let Ok(mut url) = reqwest::Url::parse(value) else {
+        return "http://redacted.invalid".into();
+    };
+    if !matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h") || url.host_str().is_none()
+    {
+        return "http://redacted.invalid".into();
+    }
+    if url.username().is_empty() && url.password().is_none() {
+        return value.to_string();
+    }
+    if url.set_username("redacted").is_err() || url.set_password(Some("redacted")).is_err() {
+        return "http://redacted.invalid".into();
+    }
+    url.to_string()
+}
+
+fn restore_panel_proxy(proxy: &mut Value, saved: &str) {
+    if proxy
+        .as_str()
+        .is_some_and(|value| !value.is_empty() && value == redacted_proxy_url(saved))
+    {
+        *proxy = json!(saved);
+    }
 }
 
 fn restore_panel_headers(
@@ -674,6 +723,14 @@ fn restore_panel_headers(
     if command != "save_codey_config" {
         return args;
     }
+    if let Some(submitted) = args.get_mut("config").and_then(Value::as_object_mut) {
+        // Retired proxy settings have no remote editor and may contain credentials.
+        if let Some(saved) = &config.network_proxy {
+            submitted.insert("networkProxy".into(), saved.clone());
+        } else {
+            submitted.remove("networkProxy");
+        }
+    }
     if let Some(profiles) = args
         .get_mut("config")
         .and_then(|config| config.get_mut("profiles"))
@@ -683,13 +740,19 @@ fn restore_panel_headers(
             if !profile.is_object() {
                 continue;
             }
+            let saved = config
+                .profiles
+                .iter()
+                .find(|saved| Some(saved.id.as_str()) == profile["id"].as_str());
+            if let Some(saved) = saved
+                && let Some(proxy) = profile.get_mut("upstreamProxy")
+            {
+                restore_panel_proxy(proxy, &saved.upstream_proxy);
+            }
             if profile
                 .get("modelRequestHeaders")
                 .is_none_or(|v| v.as_object().is_none_or(|headers| headers.is_empty()))
-                && let Some(saved) = config
-                    .profiles
-                    .iter()
-                    .find(|saved| Some(saved.id.as_str()) == profile["id"].as_str())
+                && let Some(saved) = saved
             {
                 profile["modelRequestHeaders"] = serde_json::to_value(&saved.model_request_headers)
                     .unwrap_or_else(|_| json!({}));
@@ -697,6 +760,47 @@ fn restore_panel_headers(
         }
     }
     args
+}
+
+async fn restore_panel_account_proxy(
+    config: &crate::config::CodeyConfig,
+    store: crate::official_accounts::OfficialAccountStore,
+    command: &str,
+    mut args: Value,
+) -> Result<Value, String> {
+    if !matches!(
+        command,
+        "save_official_account_route_settings" | "save_official_route_models"
+    ) || !args.get("upstreamProxy").is_some_and(Value::is_string)
+        || args["upstreamProxy"] == ""
+    {
+        return Ok(args);
+    }
+    let account_id = args["accountId"]
+        .as_str()
+        .filter(|id| !id.trim().is_empty())
+        .map(str::trim)
+        .or_else(|| {
+            (command == "save_official_route_models")
+                .then(|| {
+                    config.profiles.iter().find(|profile| {
+                        Some(profile.id.as_str()) == args["routeId"].as_str().map(str::trim)
+                    })
+                })
+                .flatten()
+                .and_then(|profile| profile.official_account_id.as_deref())
+        })
+        .map(str::to_string);
+    if let Some(account_id) = account_id {
+        let account = tokio::task::spawn_blocking(move || store.get(&account_id))
+            .await
+            .map_err(|_| "读取官方账号代理设置任务失败".to_string())?
+            .map_err(|_| "读取官方账号代理设置失败".to_string())?;
+        if let Some(saved) = account.and_then(|account| account.upstream_proxy) {
+            restore_panel_proxy(&mut args["upstreamProxy"], &saved);
+        }
+    }
+    Ok(args)
 }
 
 fn panel_command(command: &str) -> bool {
