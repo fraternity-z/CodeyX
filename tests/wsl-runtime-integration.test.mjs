@@ -48,7 +48,7 @@ test("Windows development probes WSL settings without launching Codex or rewriti
 });
 
 for (const mode of ["native", "cli-fallback"]) {
-  test(`real WSL backend accepts Linux paths, loads FastCtx and streams through Windows loopback (${mode})`, {
+  test(`real WSL backend accepts Linux paths and streams through Windows loopback (${mode})`, {
     skip: process.platform !== "win32" || !helper || !host || !cli,
     timeout: 120_000,
   }, t => testWslRuntime(t, mode));
@@ -105,10 +105,6 @@ async function testWslRuntime(t, mode) {
     'model_providers.codey_router.wire_api="responses"',
     'model_providers.codey_router.requires_openai_auth=false',
     'model_providers.codey_router.supports_websockets=false',
-    'mcp_servers.codey_fastctx.command="C:/ignored/fastctx.exe"',
-    'mcp_servers.codey_fastctx.args=["--codey-fastctx-mcp"]',
-    'mcp_servers.codey_fastctx.startup_timeout_sec=60',
-    'features.code_mode.direct_only_tool_namespaces=["mcp__codey_fastctx"]',
   ];
   const appServerArgs = ["-c", "features.code_mode_host=true", "app-server", "--analytics-default-enabled"];
   const options = { windowsHide: true, stdio: ["pipe", "pipe", "pipe"] };
@@ -177,7 +173,7 @@ async function testWslRuntime(t, mode) {
   const done = await wait(value => value.method === "turn/completed");
   assert.equal(done.params.turn.status, "completed", JSON.stringify(done.params.turn.error));
   assert.ok(requests.some(value => value.url === "/v1/responses"));
-  assert.ok(requests.some(value => value.body.tools?.some(tool => /codey_fastctx/.test(tool.name ?? ""))));
+  assert.ok(requests.every(value => !value.body.tools?.some(tool => /codey_fastctx/.test(tool.name ?? ""))));
   const marker = JSON.parse(await readFile(join(home, "marker.json"), "utf8"));
   assert.equal(marker.status, "executed");
 }

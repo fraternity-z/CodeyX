@@ -202,6 +202,31 @@ pub(super) const DIRECT_COLLABORATION_USAGE_HINT: &str = concat!(
     "collaboration tools are unavailable, do not loop on an unregistered tool.",
 );
 
+pub(super) const MCP_FASTCTX_GUIDANCE: &str = "Codey FastCtx context tools are enabled as direct \
+tools in native clients. Prefer FastCtx for supported local file operations. Use `mcp__codey_fastctx__inspect_local_file` for focused inspection, \
+`mcp__codey_fastctx__grep` for search, `mcp__codey_fastctx__glob` for discovery, and \
+`mcp__codey_fastctx__replace` only for deterministic replacement. Batch 2-32 known text files or ranges \
+per inspect call; limit large files to needed ranges. A top-level `limit` applies to entries without one. \
+Pass plain absolute filesystem paths; convert local URIs and Windows paths to a drive-letter path such as \
+`E:/repo/file.ts`. Start broad grep with `files_with_matches`, then request minimal `content`; use summary \
+or count only for totals. Glob with `filter_mode=ignore`, stable sorting, and `output_mode=details` only \
+when metadata matters. Run replace as dry-run first with `max_replacements`, then inspect and test; never \
+transparently retry a write after transport failure. Follow every Complete or Partial continuation without \
+parallel page speculation. In native clients FastCtx is a direct-only tool namespace, not an MCP Resources \
+server or code-mode aggregate; call tools directly and use `tool_search` when deferred and available. \
+If a client explicitly provides a tool catalog through a transport-only endpoint, use that documented \
+endpoint with the exact catalog name and argument schema, preserving the full result and continuation \
+metadata. A catalog-listed FastCtx tool is available even without a same-named direct schema. Never \
+invent wrappers or treat an execution aggregate as a transport-only endpoint. Use terminal commands for \
+builds, tests, Git, package managers, advanced shell/streaming operations, unsupported metadata, or after \
+the applicable FastCtx tool is unavailable or fails. Use CodeGraph only for semantic symbols and call \
+paths. Every tool call must advance the task; put progress and corrections in commentary.";
+
+pub(super) const NATIVE_MCP_FALLBACK_GUIDANCE: &str = "When the client declares the `codey_fastctx` native \
+namespace, use its directly declared file tools instead of the MCP names above. Its result and \
+Complete/Partial continuation contract are unchanged. Otherwise keep using the available MCP tools; \
+never retry an uncertain native write through MCP.";
+
 pub(super) const DIRECT_FASTCTX_GUIDANCE: &str = concat!(
     "Codey FastCtx context tools are enabled as direct tools. Use ",
     "`mcp__codey_fastctx__inspect_local_file` for focused inspection, `mcp__codey_fastctx__grep` for ",

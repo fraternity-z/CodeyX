@@ -70,8 +70,6 @@ const CODEY_FASTCTX_HOST_TOKEN_LIMIT: i64 = 60_000;
 const CODEY_FASTCTX_TOKEN_BUDGET: usize = 54_000;
 const CODEY_FASTCTX_GREP_TOKEN_BUDGET: usize = 10_800;
 const CODEY_FASTCTX_GLOB_TOKEN_BUDGET: usize = 5_400;
-const CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS: i64 = 120;
-const CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS: i64 = 300;
 const DEFAULT_SUBAGENT_MAX_CONCURRENCY: i64 = 2;
 const APPLIED_HOOKS_JSON_FILE: &str = "applied-hooks.json";
 const CODEY_CONSTRAINTS_DIR: &str = "codex-constraints";
@@ -401,52 +399,29 @@ pub(crate) fn fastctx_server_command() -> Result<PathBuf> {
         })
 }
 
-pub(crate) fn prepare_shared_fastctx(
+pub(crate) fn fastctx_native_environment(home: &Path) -> Result<Option<BTreeMap<String, String>>> {
+    let mut document = read_codex_config_document(&home.join("config.toml"))?;
+    Ok(fastctx::native_environment(&mut document))
+}
+
+pub(crate) fn remove_legacy_fastctx_mcp(
     home: &Path,
     data_dir: PathBuf,
     user_home: PathBuf,
-    command: Option<&Path>,
 ) -> Result<()> {
     let service =
         codey_codex_extensions::ExtensionService::new(home.to_path_buf(), data_dir, user_home)
             .with_mcp_relay_executable(std::env::current_exe()?);
-    if command.is_some() && !service.mcp_scheduler_enabled()? {
-        return Ok(());
-    }
     let inventory = service.inventory(&codey_codex_extensions::Scope::User)?;
-    let mut document = parse_document(&service.logical_user_mcp_document()?)?;
-    let Some(command) = command else {
-        if document
-            .get("mcp_servers")
-            .and_then(Item::as_table)
-            .and_then(|servers| servers.get(CODEY_FASTCTX_SERVER_ID))
-            .and_then(Item::as_table)
-            .is_some_and(fastctx_table_server_is_codey_owned)
-        {
-            service.dispatch(serde_json::json!({"action":"remove_mcp","id":CODEY_FASTCTX_SERVER_ID,"confirmed":true,"revision":inventory["revision"]}))?;
-        }
-        return Ok(());
-    };
-    if fastctx::configured_user_fastctx_server_id(&document).is_some() {
-        return Ok(());
-    }
+    let document = parse_document(&service.logical_user_mcp_document()?)?;
     if document
         .get("mcp_servers")
         .and_then(Item::as_table_like)
         .and_then(|servers| servers.get(CODEY_FASTCTX_SERVER_ID))
-        .and_then(Item::as_table_like)
-        .and_then(|server| server.get("enabled"))
-        .and_then(Item::as_bool)
-        == Some(false)
+        .is_some_and(fastctx::fastctx_item_server_is_codey_owned)
     {
-        return Ok(());
+        service.dispatch(serde_json::json!({"action":"remove_mcp","id":CODEY_FASTCTX_SERVER_ID,"confirmed":true,"revision":inventory["revision"]}))?;
     }
-    enable_fast_context_tools(&mut document, command)?;
-    service.synchronize_builtin_mcp(
-        CODEY_FASTCTX_SERVER_ID,
-        &document.to_string(),
-        inventory["revision"].as_str().context("MCP 版本无效")?,
-    )?;
     Ok(())
 }
 
@@ -542,13 +517,9 @@ fn apply_isolated_runtime_router_config(
             model_catalog_path.as_deref(),
         );
     }
-    let fastctx_namespace = effective_document
-        .get("mcp_servers")
-        .and_then(Item::as_table)
-        .and_then(|servers| servers.get(CODEY_FASTCTX_SERVER_ID))
-        .and_then(Item::as_table)
-        .is_some_and(fastctx_table_server_is_codey_owned)
-        .then_some(CODEY_FASTCTX_NAMESPACE);
+    let fastctx_namespace = (fastctx_command.is_some()
+        && fastctx::configured_user_fastctx_server_id(&effective_document).is_none())
+    .then_some(CODEY_FASTCTX_SERVER_ID);
 
     let constraints_dir = marker.with_file_name(CODEY_CONSTRAINTS_DIR);
     create_private_dir_all(&constraints_dir)?;
@@ -1498,9 +1469,10 @@ fn runtime_fastctx_instructions(
     state: &RuntimeConfigLease,
 ) -> Result<Option<String>> {
     if state.fastctx_command.is_some() {
-        Ok(Some(read_or_create_constraint_file(
+        Ok(Some(read_or_create_versioned_constraint_file(
             &constraints_dir.join(CODEY_FASTCTX_INSTRUCTIONS_FILE),
             CODEY_FASTCTX_GUIDANCE,
+            CODEY_FASTCTX_GUIDANCE_VERSIONS,
         )?))
     } else {
         Ok(None)
@@ -2426,8 +2398,8 @@ fn patch_config_with_fastctx_mode(
     }
     enable_desktop_reasoning_efforts(&mut doc)?;
     ensure_default_service_tier(&mut doc);
-    let fastctx_namespace = if let Some(command) = fastctx_command {
-        enable_fast_context_tools(&mut doc, command)?
+    let fastctx_namespace = if fastctx_command.is_some() {
+        enable_fast_context_tools(&mut doc)?
     } else {
         disable_fast_context_tools(&mut doc);
         None
@@ -2836,58 +2808,12 @@ fn build_isolated_runtime_overrides(
     }
 
     if fastctx_namespace.is_some() {
-        for (path, key) in [
-            (
-                &["mcp_servers", CODEY_FASTCTX_SERVER_ID, "command"][..],
-                "mcp_servers.codey_fastctx.command",
-            ),
-            (
-                &["mcp_servers", CODEY_FASTCTX_SERVER_ID, "args"][..],
-                "mcp_servers.codey_fastctx.args",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    CODEY_FASTCTX_SERVER_ID,
-                    "startup_timeout_sec",
-                ][..],
-                "mcp_servers.codey_fastctx.startup_timeout_sec",
-            ),
-            (
-                &["mcp_servers", CODEY_FASTCTX_SERVER_ID, "tool_timeout_sec"][..],
-                "mcp_servers.codey_fastctx.tool_timeout_sec",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    CODEY_FASTCTX_SERVER_ID,
-                    "env",
-                    "FASTCTX_TOKEN_BUDGET",
-                ][..],
-                "mcp_servers.codey_fastctx.env.FASTCTX_TOKEN_BUDGET",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    CODEY_FASTCTX_SERVER_ID,
-                    "env",
-                    "FASTCTX_GREP_TOKEN_BUDGET",
-                ][..],
-                "mcp_servers.codey_fastctx.env.FASTCTX_GREP_TOKEN_BUDGET",
-            ),
-            (
-                &[
-                    "mcp_servers",
-                    CODEY_FASTCTX_SERVER_ID,
-                    "env",
-                    "FASTCTX_GLOB_TOKEN_BUDGET",
-                ][..],
-                "mcp_servers.codey_fastctx.env.FASTCTX_GLOB_TOKEN_BUDGET",
-            ),
-            (&["tool_output_token_limit"][..], "tool_output_token_limit"),
-        ] {
-            push_required_document_override(&mut overrides, effective, path, key)?;
-        }
+        push_required_document_override(
+            &mut overrides,
+            effective,
+            &["tool_output_token_limit"],
+            "tool_output_token_limit",
+        )?;
         push_document_override(
             &mut overrides,
             effective,

@@ -6,7 +6,7 @@ use tokio::{
     process::{Child, ChildStdin, ChildStdout, Command},
 };
 
-pub(super) struct Process {
+pub(crate) struct Process {
     child: Child,
     pub input: Option<ChildStdin>,
     pub output: Option<BufReader<ChildStdout>>,

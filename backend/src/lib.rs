@@ -19,6 +19,7 @@ mod crashpad_pending_guard;
 mod desktop_instance;
 mod electron_fuses;
 use codey_error_log as error_log;
+mod fastctx_native;
 mod fastctx_route_gate;
 mod fs_util;
 mod hook_io;

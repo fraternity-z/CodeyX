@@ -10,21 +10,8 @@ codey-error-log = { path = "../codey-error-log" }
 fastctx.workspace = true
 rmcp = { version = "=2.2.0", features = ["transport-io"] }
 serde.workspace = true
-serde_json = { workspace = true, features = ["preserve_order", "raw_value"] }
+serde_json = { workspace = true, features = ["preserve_order"] }
 tokio = { workspace = true, features = ["io-std", "io-util", "sync"] }
 
 [dev-dependencies]
 tempfile.workspace = true
-
-[target.'cfg(unix)'.dev-dependencies]
-libc = "0.2"
-
-[target.'cfg(windows)'.dev-dependencies]
-windows = { version = "0.58", default-features = false, features = [
-  "Win32_Foundation",
-  "Win32_System_Threading",
-] }
-
-[[bench]]
-name = "fastctx_protocol"
-harness = false

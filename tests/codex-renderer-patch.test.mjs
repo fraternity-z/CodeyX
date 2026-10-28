@@ -1142,6 +1142,155 @@ test("an incompatible optional renderer patch never blocks the Codex module resp
     // bundle patched cleanly, so no further skips were logged.
     assert.equal(patchErrors.length, 2);
 
+    const nativeToolRegistrationSource = [
+      "const nativeRequest=`dynamic-tools-for-thread-start-requested`;",
+      "const loadExecution=()=>import(`./execution-fixture.js`);",
+      "async function nativeTools(e){let n=[{namespace:`codex_app`,name:`existing`}],r=!1;",
+      "if(e.responseTarget===`electron`){bridge.postMessage({type:`dynamic-tools-for-thread-start-response`,requestId:e.requestId,dynamicTools:n,hostedAutomationsAvailable:r});return}",
+      "e.respond(n)}",
+    ].join("");
+    electron.protocol.handle("app", async () => new Response(nativeToolRegistrationSource));
+    const registrationResponse = await installedHandler({ url: "app://-/assets/initialize-app-host-services-native.js" });
+    const registrationSource = await registrationResponse.text();
+    assert.match(registrationSource, /__codeyFastCtxNative\?\.appendTools/);
+    const responses = [];
+    const registrationGlobals = { __codeyFastCtxNative: { async appendTools(tools, event, load) {
+      assert.equal(typeof load, "function");
+      return [...tools, { namespace: "codey_fastctx", name: "grep" }];
+    } } };
+    const nativeTools = Function("globalThis", "bridge", `${registrationSource};return nativeTools`)(registrationGlobals, { postMessage: (value) => responses.push(value.dynamicTools) });
+    await nativeTools({ hostId: "local", respond: (value) => responses.push(value) });
+    await nativeTools({ hostId: "local", responseTarget: "electron", requestId: "request-1" });
+    assert.equal(responses.length, 2);
+    assert.deepEqual(responses[0], responses[1]);
+    assert.equal(responses[0][1].namespace, "codey_fastctx");
+
+    const nativeToolExecutionSource = [
+      "async function originalOwner(){return tryClaimExecution()}",
+      "async function nativeExecution({scope:a,serverRequest:b,hostId:c,queryClient:d,signal:f,transport:g},{onToolResult:h,conversationId:j}){",
+      "let{id:k,params:m}=b,{threadId:n,tool:o}=m,result,known=!1,legacy=!1;",
+      "let hostContext=manager(a,c);await hostContext.getThreadExecutionState(j);await hostContext.getCurrentPermissions(j);",
+      "let context={cwd:a.get(cwdSignal,threadKey(n))};",
+      "if(false)result=null;else if(!known&&!legacy)result=fail(`Unsupported dynamic tool namespace: ${m.namespace}`);else result={success:!0};",
+      "h({success:result.success});if(f?.aborted)return!1;return{replyWithDynamicToolResponse:{id:k,result}}}",
+      "const executeDynamicToolCallRequest=nativeExecution;",
+    ].join("");
+    electron.protocol.handle("app", async () => new Response(nativeToolExecutionSource));
+    const executionResponse = await installedHandler({ url: "app://-/assets/execution-native.js" });
+    const executionSource = await executionResponse.text();
+    assert.match(executionSource, /__codeyFastCtxNative\.execute\(/);
+    assert.match(executionSource, /async function originalOwner\(\)\{return tryClaimExecution\(\)\}/);
+    assert.match(executionSource, /h\(\{success:result.success\}\);if\(f\?\.aborted\)return!1;return\{replyWithDynamicToolResponse:/);
+    const nativeContexts = [];
+    const executionGlobals = { __codeyFastCtxNative: { async execute(value) { nativeContexts.push(value); return { success: true, contentItems: [] }; } } };
+    const nativeExecution = Function("globalThis", "manager", "cwdSignal", "threadKey", "fail", `${executionSource};return nativeExecution`)(
+      executionGlobals, () => ({ getCurrentPermissions: () => ({}), getThreadExecutionState: () => ({}), subscribe: () => () => {} }), {}, (id) => id, (message) => ({ success: false, message }),
+    );
+    const nativeResult = await nativeExecution({ scope: { get: () => "E:/trusted" }, serverRequest: { id: 7, params: { namespace: "codey_fastctx", threadId: "thread-1", tool: "grep" } }, hostId: "local" }, { onToolResult() {}, conversationId: "thread-1" });
+    assert.equal(nativeResult.replyWithDynamicToolResponse.id, 7);
+    assert.equal(nativeContexts[0].cwd, "E:/trusted");
+    assert.equal(typeof nativeContexts[0].getCurrentPermissions, "function");
+    assert.equal(executionGlobals.__codeyFastCtxNativeExecutionInstalled, true);
+    assert.equal(patchErrors.length, 2);
+
+    // A changed dispatcher must not advertise a working native execution path.
+    const incompatibleNativeSource = nativeToolExecutionSource.replace("getCurrentPermissions(j)", "permissions(j)");
+    electron.protocol.handle("app", async () => new Response(incompatibleNativeSource));
+    const incompatibleNativeResponse = await installedHandler({ url: "app://-/assets/execution-native-drift.js" });
+    assert.equal(await incompatibleNativeResponse.text(), incompatibleNativeSource);
+    assert.match(String(patchErrors.at(-1)[0]), /FastCtx native execution context/);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    const mainToolSource = [
+      "async function prepare(options,inputs){let result={...options.params};let definitions=await inputs.readDynamicTools();",
+      "let available=definitions.flatMap(spec=>spec.type===`namespace`?spec.tools:[spec]),names=available.map(({name:value})=>value);",
+      "options.registerDynamicTools!==false&&(result.dynamicTools=options.usesDesktopMcp?[]:helpers.flatten(definitions));",
+      "if(options.usesDesktopMcp)result.config={...result.config,enabled:names};return result}",
+    ].join("");
+    const patchMainTools = globalThis.__CODEY_PATCH_CODEX_MAIN_FASTCTX_NATIVE_TOOLS__;
+    const patchedMainTools = patchMainTools(mainToolSource);
+    assert.equal(patchMainTools(patchedMainTools), patchedMainTools);
+    assert.throws(() => patchMainTools(mainToolSource + mainToolSource), /assignment matched 2/);
+    assert.throws(() => patchMainTools(mainToolSource.replace("names=available.map", "names=available.filter")), /tool-name list is incompatible/);
+    const prepare = Function("globalThis", "helpers", `${patchedMainTools};return prepare`)({}, {
+      flatten: (tools) => tools.flatMap((tool) => tool.type === "namespace" ? tool.tools.map((entry) => ({ ...entry, namespace: tool.name })) : [tool]),
+    });
+    const toolGroups = [
+      { type: "namespace", name: "codex_app", tools: [{ name: "existing" }] },
+      { type: "namespace", name: "plugin_management", tools: [{ name: "plugin" }] },
+      { type: "namespace", name: "codey_fastctx", tools: [{ name: "grep" }, { name: "replace" }] },
+    ];
+    const desktopMcpTools = await prepare({ usesDesktopMcp: true, params: { permissions: ":danger-full-access", config: { existing: true } } }, { readDynamicTools: async () => toolGroups });
+    assert.deepEqual(desktopMcpTools.dynamicTools.map(({ namespace, name }) => ({ namespace, name })), [
+      { namespace: "codey_fastctx", name: "grep" }, { namespace: "codey_fastctx", name: "replace" },
+    ]);
+    assert.deepEqual(desktopMcpTools.config.enabled, ["existing", "plugin"]);
+    assert.equal(desktopMcpTools.config["mcp_servers.codey_fastctx.enabled"], undefined);
+    assert.equal(desktopMcpTools.config.existing, true);
+    const nativeDynamicTools = await prepare({ usesDesktopMcp: false, params: { sandbox: "danger-full-access" } }, { readDynamicTools: async () => toolGroups });
+    assert.deepEqual(nativeDynamicTools.dynamicTools.map(({ name }) => name), ["existing", "plugin", "grep", "replace"]);
+    for (const params of [{}, { sandbox: "read-only" }, { sandbox: "workspace-write" }, { permissions: "custom" }, { permissions: ":danger-full-access", sandbox: "read-only" }]) {
+      for (const usesDesktopMcp of [true, false]) {
+        const restricted = await prepare({ usesDesktopMcp, params }, { readDynamicTools: async () => toolGroups });
+        assert.ok(restricted.dynamicTools.every((tool) => tool.namespace !== "codey_fastctx"));
+        assert.equal(restricted.config?.["mcp_servers.codey_fastctx.enabled"], undefined);
+      }
+    }
+    const unregistered = await prepare({ usesDesktopMcp: true, registerDynamicTools: false, params: { sandbox: "danger-full-access" } }, { readDynamicTools: async () => toolGroups });
+    assert.equal(unregistered.dynamicTools, undefined);
+    assert.equal(unregistered.config["mcp_servers.codey_fastctx.enabled"], undefined);
+    const fsForCompile = process.getBuiltinModule("fs");
+    const originalReadForCompile = fsForCompile.readFileSync;
+    const virtualBuildAsset = "C:\\Codex\\.vite\\build\\native-fastctx-fixture.js";
+    let compiledMainTools = null;
+    try {
+      fsForCompile.readFileSync = function (filename, ...args) {
+        return filename === virtualBuildAsset ? mainToolSource : Reflect.apply(originalReadForCompile, this, [filename, ...args]);
+      };
+      Module._extensions[".js"]({ filename: virtualBuildAsset, _compile(source) { compiledMainTools = source; } }, virtualBuildAsset);
+    } finally { fsForCompile.readFileSync = originalReadForCompile; }
+    assert.equal(compiledMainTools, patchedMainTools, "the installed startup compile hook must reach the native-tool patch");
+    assert.equal(globalThis.__CODEY_CODEX_STARTUP_PATCH__.fastCtxNativeToolsSourcePatched, true);
+
+    const nativeAsar = process.env.CODEY_NATIVE_FASTCTX_ASAR;
+    if (nativeAsar) {
+      const fs = process.getBuiltinModule("fs");
+      const fd = fs.openSync(nativeAsar, "r");
+      try {
+        const prefix = Buffer.alloc(16);
+        fs.readSync(fd, prefix, 0, prefix.length, 0);
+        const header = Buffer.alloc(prefix.readUInt32LE(12));
+        fs.readSync(fd, header, 0, header.length, prefix.length);
+        const archive = JSON.parse(header);
+        const assets = archive.files.webview.files.assets.files;
+        for (const assetPrefix of ["initialize-app-host-services-", "execution-"]) {
+          const names = Object.keys(assets).filter((name) => name.startsWith(assetPrefix) && /^[\w]+\.js$/.test(name.slice(assetPrefix.length)));
+          assert.equal(names.length, 1);
+          const entry = assets[names[0]];
+          const bytes = Buffer.alloc(Number(entry.size));
+          fs.readSync(fd, bytes, 0, bytes.length, 8 + prefix.readUInt32LE(4) + Number(entry.offset));
+          const original = bytes.toString("utf8");
+          electron.protocol.handle("app", async () => new Response(original));
+          const response = await installedHandler({ url: `app://-/assets/${names[0]}` });
+          const patched = await response.text();
+          assert.match(patched, assetPrefix === "execution-" ? /__codeyFastCtxNative\.execute\(/ : /__codeyFastCtxNative\?\.appendTools/);
+          const syntax = nativeSpawnSync(process.execPath, ["--check", "--input-type=module"], { input: patched, encoding: "utf8" });
+          assert.equal(syntax.status, 0, syntax.stderr);
+        }
+        const mainEntries = archive.files[".vite"].files.build.files;
+        const mainNames = Object.keys(mainEntries).filter((name) => /^main-[\w]+\.js$/.test(name));
+        assert.equal(mainNames.length, 1);
+        const mainEntry = mainEntries[mainNames[0]];
+        const mainBytes = Buffer.alloc(Number(mainEntry.size));
+        fs.readSync(fd, mainBytes, 0, mainBytes.length, 8 + prefix.readUInt32LE(4) + Number(mainEntry.offset));
+        const patchedMain = patchMainTools(mainBytes.toString("utf8"));
+        assert.match(patchedMain, /usesDesktopMcp\?[^;]{0,1000}codey_fastctx/);
+        const syntax = nativeSpawnSync(process.execPath, ["--check"], { input: patchedMain, encoding: "utf8" });
+        assert.equal(syntax.status, 0, syntax.stderr);
+      } finally { fs.closeSync(fd); }
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+
     const productionRendererAsset = process.env.CODEY_RENDERER_ASSET;
     if (productionRendererAsset) {
       const productionSource = await readFile(productionRendererAsset, "utf8");

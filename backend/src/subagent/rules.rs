@@ -581,17 +581,25 @@ pub(crate) fn normalize_tool_name(tool_name: &str) -> String {
         "functions.wait" | "functions/wait" | "functions:wait" | "functions__wait"
         | "functions_wait" => Some("wait_agent"),
         "apply_patch" | "functions.apply_patch" => Some("apply_patch"),
-        "replace" | "mcp__codey_fastctx__replace" => Some("replace"),
+        "replace"
+        | "mcp__codey_fastctx__replace"
+        | "codey_fastctx__replace"
+        | "codey_fastctx.replace" => Some("replace"),
         "write_file" => Some("write_file"),
         "edit_file" => Some("edit_file"),
         "create_file" => Some("create_file"),
         "delete_file" => Some("delete_file"),
         "read_file" => Some("read_file"),
-        "inspect_local_file" | "mcp__codey_fastctx__inspect_local_file" => {
-            Some("inspect_local_file")
+        "inspect_local_file"
+        | "mcp__codey_fastctx__inspect_local_file"
+        | "codey_fastctx__inspect_local_file"
+        | "codey_fastctx.inspect_local_file" => Some("inspect_local_file"),
+        "grep" | "mcp__codey_fastctx__grep" | "codey_fastctx__grep" | "codey_fastctx.grep" => {
+            Some("grep")
         }
-        "grep" | "mcp__codey_fastctx__grep" => Some("grep"),
-        "glob" | "mcp__codey_fastctx__glob" => Some("glob"),
+        "glob" | "mcp__codey_fastctx__glob" | "codey_fastctx__glob" | "codey_fastctx.glob" => {
+            Some("glob")
+        }
         "tool_search" => Some("tool_search"),
         "read_mcp_resource" | "functions.read_mcp_resource" => Some("read_mcp_resource"),
         "list_mcp_resources" | "functions.list_mcp_resources" => Some("list_mcp_resources"),
@@ -928,6 +936,18 @@ mod tests {
 
     #[test]
     fn trusted_tool_aliases_share_canonical_classification() {
+        for (tool, expected) in [
+            ("inspect_local_file", ToolClass::Read),
+            ("grep", ToolClass::Read),
+            ("glob", ToolClass::Read),
+            ("replace", ToolClass::Write),
+        ] {
+            for separator in [".", "__"] {
+                let alias = format!("codey_fastctx{separator}{tool}");
+                assert_eq!(classify_tool(&alias), expected, "{alias}");
+                assert_eq!(normalize_tool_name(&alias), tool, "{alias}");
+            }
+        }
         assert_eq!(
             classify_tool("mcp__codey_fastctx__replace"),
             ToolClass::Write

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::collections::BTreeMap;
 
 use anyhow::Result;
 use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
@@ -6,79 +6,41 @@ use toml_edit::{Array, DocumentMut, Item, Table, TableLike, Value, value};
 use super::{
     CODEY_FASTCTX_ARG_MARKER, CODEY_FASTCTX_GLOB_TOKEN_BUDGET, CODEY_FASTCTX_GREP_TOKEN_BUDGET,
     CODEY_FASTCTX_HOST_TOKEN_LIMIT, CODEY_FASTCTX_NAMESPACE, CODEY_FASTCTX_SERVER_ID,
-    CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS, CODEY_FASTCTX_TOKEN_BUDGET,
-    CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS, FastContextToolsStatus, ensure_child_table,
-    ensure_root_table, fastctx_table_server_is_codey_owned,
+    CODEY_FASTCTX_TOKEN_BUDGET, FastContextToolsStatus, ensure_child_table, ensure_root_table,
+    fastctx_table_server_is_codey_owned,
 };
 use crate::codex_config_guidance::{
     codey_fastctx_guidance_for_namespace, remove_codey_fastctx_guidance,
 };
 
-pub(super) fn enable_fast_context_tools(
-    doc: &mut DocumentMut,
-    command: &Path,
-) -> Result<Option<String>> {
-    let codey_owned_server = mcp_server_is_codey_owned_by_id(doc, CODEY_FASTCTX_SERVER_ID);
-    if configured_user_fastctx_server_id(doc).is_some() {
-        disable_fast_context_tools(doc);
+pub(super) fn enable_fast_context_tools(doc: &mut DocumentMut) -> Result<Option<String>> {
+    let user_configured = configured_user_fastctx_server_id(doc).is_some();
+    disable_fast_context_tools(doc);
+    if user_configured {
         return Ok(None);
     }
-    let budgets = output_budgets(doc);
-
-    let mcp_servers = ensure_mcp_servers_table(doc)?;
-    let server_table = if codey_owned_server {
-        mcp_servers
-            .get(CODEY_FASTCTX_SERVER_ID)
-            .and_then(item_table_clone)
-            .unwrap_or_default()
-    } else {
-        Table::new()
-    };
-    mcp_servers.insert(CODEY_FASTCTX_SERVER_ID, Item::Table(server_table));
-    let server = mcp_servers
-        .get_mut(CODEY_FASTCTX_SERVER_ID)
-        .and_then(Item::as_table_mut)
-        .ok_or_else(|| {
-            anyhow::anyhow!("mcp_servers.{CODEY_FASTCTX_SERVER_ID} 必须是 TOML table")
-        })?;
-    if !fastctx_table_is_relay(server) {
-        server["command"] = value(command.to_string_lossy().to_string());
-        let mut args = Array::new();
-        args.push(CODEY_FASTCTX_ARG_MARKER);
-        server["args"] = Item::Value(toml_edit::Value::Array(args));
-    }
-    server["startup_timeout_sec"] = value(CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS);
-    server["tool_timeout_sec"] = value(CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS);
-    let mut env = server
-        .get("env")
-        .and_then(item_table_clone)
-        .unwrap_or_default();
-    if let Some(budgets) = budgets {
-        env["FASTCTX_TOKEN_BUDGET"] = value(budgets.global.to_string());
-        env["FASTCTX_GREP_TOKEN_BUDGET"] = value(budgets.grep.to_string());
-        env["FASTCTX_GLOB_TOKEN_BUDGET"] = value(budgets.glob.to_string());
-        server["env"] = Item::Table(env);
-    } else {
-        // 用户显式 tool_output_token_limit = 0：不再派生预算，并移除 Codey
-        // 此前写入的预算键，避免残留预算与用户显式值相互矛盾。
-        let had_env = server.get("env").is_some();
-        for key in [
-            "FASTCTX_TOKEN_BUDGET",
-            "FASTCTX_GREP_TOKEN_BUDGET",
-            "FASTCTX_GLOB_TOKEN_BUDGET",
-        ] {
-            env.remove(key);
-        }
-        if had_env {
-            server["env"] = Item::Table(env);
-        }
-    }
+    output_budgets(doc);
 
     // FastCtx reserves a terminal Complete/Partial line. Keeping it direct-only
     // prevents code-mode aggregation from truncating that continuation contract.
-    ensure_direct_only_tool_namespace(doc, CODEY_FASTCTX_NAMESPACE)?;
-    apply_fastctx_guidance(doc, CODEY_FASTCTX_NAMESPACE)?;
-    Ok(Some(CODEY_FASTCTX_NAMESPACE.to_string()))
+    ensure_direct_only_tool_namespace(doc, CODEY_FASTCTX_SERVER_ID)?;
+    apply_fastctx_guidance(doc, CODEY_FASTCTX_SERVER_ID)?;
+    Ok(Some(CODEY_FASTCTX_SERVER_ID.to_string()))
+}
+
+pub(super) fn native_environment(doc: &mut DocumentMut) -> Option<BTreeMap<String, String>> {
+    if configured_user_fastctx_server_id(doc).is_some() {
+        return None;
+    }
+    let environment = output_budgets(doc).map_or_else(BTreeMap::new, |budgets| {
+        [
+            ("FASTCTX_TOKEN_BUDGET".into(), budgets.global.to_string()),
+            ("FASTCTX_GREP_TOKEN_BUDGET".into(), budgets.grep.to_string()),
+            ("FASTCTX_GLOB_TOKEN_BUDGET".into(), budgets.glob.to_string()),
+        ]
+        .into()
+    });
+    Some(environment)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -205,6 +167,7 @@ pub(super) fn disable_fast_context_tools(doc: &mut DocumentMut) {
     if !mcp_server_exists(doc, CODEY_FASTCTX_SERVER_ID) {
         remove_direct_only_tool_namespace(doc, CODEY_FASTCTX_NAMESPACE);
     }
+    remove_direct_only_tool_namespace(doc, CODEY_FASTCTX_SERVER_ID);
 }
 
 pub(super) fn remove_direct_only_tool_namespace(doc: &mut DocumentMut, namespace: &str) -> bool {
@@ -342,7 +305,7 @@ pub(super) fn arguments_have_codey_fastctx_marker(arguments: &Array) -> bool {
         .any(|argument| argument.as_str() == Some(CODEY_FASTCTX_ARG_MARKER))
 }
 
-fn fastctx_item_server_is_codey_owned(server: &Item) -> bool {
+pub(super) fn fastctx_item_server_is_codey_owned(server: &Item) -> bool {
     server
         .as_table()
         .is_some_and(fastctx_table_server_is_codey_owned)
@@ -374,39 +337,12 @@ fn fastctx_value_server_is_codey_owned(server: &Value) -> bool {
         )
 }
 
-fn mcp_server_is_codey_owned_by_id(doc: &DocumentMut, server_id: &str) -> bool {
-    match doc.get("mcp_servers") {
-        Some(Item::Table(mcp_servers)) => mcp_servers
-            .get(server_id)
-            .is_some_and(fastctx_item_server_is_codey_owned),
-        Some(Item::Value(Value::InlineTable(mcp_servers))) => mcp_servers
-            .get(server_id)
-            .is_some_and(fastctx_value_server_is_codey_owned),
-        _ => false,
-    }
-}
-
 pub(super) fn mcp_server_exists(doc: &DocumentMut, server_id: &str) -> bool {
     match doc.get("mcp_servers") {
         Some(Item::Table(mcp_servers)) => mcp_servers.contains_key(server_id),
         Some(Item::Value(Value::InlineTable(mcp_servers))) => mcp_servers.contains_key(server_id),
         _ => false,
     }
-}
-
-fn ensure_mcp_servers_table(doc: &mut DocumentMut) -> Result<&mut Table> {
-    let inline_table = match doc.get("mcp_servers") {
-        Some(Item::Value(Value::InlineTable(mcp_servers))) => Some(mcp_servers.clone()),
-        _ => None,
-    };
-    if let Some(inline_table) = inline_table {
-        let mut table = Table::new();
-        for (server_id, server) in inline_table.iter() {
-            table.insert(server_id, Item::Value(server.clone()));
-        }
-        doc.as_table_mut().insert("mcp_servers", Item::Table(table));
-    }
-    ensure_root_table(doc, "mcp_servers")
 }
 
 fn item_table_clone(item: &Item) -> Option<Table> {

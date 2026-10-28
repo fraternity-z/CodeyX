@@ -1,6 +1,6 @@
 //! Opt-in, bounded stdio MCP multiplexing. Configuration remains owned by extensions.
 mod io;
-mod process;
+pub(crate) mod process;
 #[cfg(test)]
 mod relay_tests;
 #[cfg(test)]
@@ -326,11 +326,6 @@ impl Drop for Queued<'_> {
 }
 
 impl Pool {
-    fn owns_fastctx_engine(&self) -> bool {
-        self.registration.id == "codey_fastctx"
-            && self.registration.config["args"] == json!(["--codey-fastctx-mcp"])
-    }
-
     async fn acquire(&self) -> Result<Reservation<'_>> {
         let previous = self.queued.fetch_add(1, Ordering::AcqRel);
         let _queued = Queued(&self.queued);
@@ -424,8 +419,7 @@ impl Pool {
                 if !slots[index].busy.load(Ordering::Acquire)
                     && (release_all
                         || self.stopped.load(Ordering::Acquire)
-                        || ((index > 0 || self.owns_fastctx_engine())
-                            && slots[index].used.lock().unwrap().elapsed() >= IDLE))
+                        || (index > 0 && slots[index].used.lock().unwrap().elapsed() >= IDLE))
                 {
                     removed.push(slots.remove(index));
                 }
@@ -471,11 +465,7 @@ impl Drop for Worker {
 impl Worker {
     async fn start(pool: &Pool) -> Result<Self> {
         tokio::time::timeout(startup_timeout(&pool.registration.config), async {
-            let mut config = pool.registration.config.clone();
-            if pool.owns_fastctx_engine() {
-                config["args"] = json!(["--codey-fastctx-owned-mcp"]);
-            }
-            let mut process = process::Process::spawn(&config, &pool.cwd, &pool.env).await?;
+            let mut process = process::Process::spawn(&pool.registration.config, &pool.cwd, &pool.env).await?;
             let request = json!({"jsonrpc":"2.0","id":"codey-initialize","method":"initialize","params":pool.initialize});
             io::write(process.input.as_mut().ok_or_else(|| anyhow!("MCP 输入已关闭"))?, &request).await?;
             let response = io::read(process.output.as_mut().unwrap()).await?.ok_or_else(|| anyhow!("MCP 在握手前退出"))?;

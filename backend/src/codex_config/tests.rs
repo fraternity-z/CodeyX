@@ -2438,7 +2438,7 @@ args = ["serve"]
 }
 
 #[test]
-fn shared_fastctx_runtime_patch_preserves_relay_and_switches_back_to_direct() {
+fn legacy_fastctx_mcp_cleanup_removes_shared_registration() {
     let temp = tempfile::tempdir().unwrap();
     let home = temp.path().canonicalize().unwrap();
     let data = home.join("extensions");
@@ -2452,25 +2452,15 @@ fn shared_fastctx_runtime_patch_preserves_relay_and_switches_back_to_direct() {
         service.dispatch(serde_json::json!({"action":"set_mcp_scheduler_enabled","enabled":enabled,"revision":inventory["revision"]})).unwrap();
     };
     toggle(true);
-    let command = home.join("fastctx-server.exe");
-    prepare_shared_fastctx(&home, data.clone(), home.clone(), Some(&command)).unwrap();
-    let existing = fs::read_to_string(home.join("config.toml")).unwrap();
-    let patched = patch_config_with_fastctx(&existing, None, None, Some(&command), false).unwrap();
-    let doc = parse_document(&patched).unwrap();
-    assert_eq!(
-        doc["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["args"][0].as_str(),
-        Some("--mcp-relay")
-    );
-    assert!(!fast_context_tools_status_from_document(&doc).user_configured);
-    toggle(false);
-    let existing = fs::read_to_string(home.join("config.toml")).unwrap();
-    let patched = patch_config_with_fastctx(&existing, None, None, Some(&command), false).unwrap();
-    let doc = parse_document(&patched).unwrap();
-    assert_eq!(
-        doc["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["args"][0].as_str(),
-        Some(CODEY_FASTCTX_ARG_MARKER)
-    );
-    prepare_shared_fastctx(&home, data, home.clone(), None).unwrap();
+    let inventory = service
+        .inventory(&codey_codex_extensions::Scope::User)
+        .unwrap();
+    service.synchronize_builtin_mcp(
+        CODEY_FASTCTX_SERVER_ID,
+        "[mcp_servers.codey_fastctx]\ncommand='old-codey-fastctx'\nargs=['--codey-fastctx-mcp']\n",
+        inventory["revision"].as_str().unwrap(),
+    ).unwrap();
+    remove_legacy_fastctx_mcp(&home, data, home.clone()).unwrap();
     assert!(
         !service
             .logical_user_mcp_document()
@@ -2480,10 +2470,10 @@ fn shared_fastctx_runtime_patch_preserves_relay_and_switches_back_to_direct() {
 }
 
 #[test]
-fn shared_fastctx_prepare_preserves_user_configuration_and_disabled_state() {
+fn legacy_fastctx_mcp_cleanup_preserves_user_configuration() {
     for original in [
         "[mcp_servers.codey_fastctx]\ncommand='custom'\nargs=['serve']\n",
-        "[mcp_servers.codey_fastctx]\ncommand='builtin'\nargs=['--codey-fastctx-mcp']\nenabled=false\n",
+        "mcp_servers = { codey_fastctx = { command='custom', args=['serve'] } }\n",
         "",
     ] {
         let temp = tempfile::tempdir().unwrap();
@@ -2496,14 +2486,7 @@ fn shared_fastctx_prepare_preserves_user_configuration_and_disabled_state() {
             .inventory(&codey_codex_extensions::Scope::User)
             .unwrap();
         service.dispatch(serde_json::json!({"action":"set_mcp_scheduler_enabled","enabled":true,"revision":inventory["revision"]})).unwrap();
-        let command = home.join("fastctx-server.exe");
-        prepare_shared_fastctx(
-            &home,
-            data,
-            home.clone(),
-            (!original.is_empty()).then_some(command.as_path()),
-        )
-        .unwrap();
+        remove_legacy_fastctx_mcp(&home, data, home.clone()).unwrap();
         assert_eq!(
             fs::read_to_string(home.join("config.toml")).unwrap(),
             original
@@ -2576,7 +2559,7 @@ direct_only_tool_namespaces = ["mcp__codey_fastctx"]
 }
 
 #[test]
-fn enabling_fast_context_tools_normalizes_inline_owned_servers() {
+fn enabling_native_fast_context_tools_removes_inline_owned_mcp_servers() {
     let existing = r#"
 mcp_servers = { codey_fastctx = { command = "/old/codey", args = ["--codey-fastctx-mcp"], env = { CUSTOM = "preserve" } } }
 "#;
@@ -2589,36 +2572,7 @@ mcp_servers = { codey_fastctx = { command = "/old/codey", args = ["--codey-fastc
     )
     .unwrap();
     let document = parse_document(&result).unwrap();
-    let server = document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]
-        .as_table()
-        .unwrap();
-
-    assert_eq!(server["command"].as_str(), Some("/new/codey-fastctx"));
-    assert_eq!(server["env"]["CUSTOM"].as_str(), Some("preserve"));
-    assert_eq!(
-        server["env"]["FASTCTX_TOKEN_BUDGET"]
-            .as_str()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap(),
-        CODEY_FASTCTX_TOKEN_BUDGET
-    );
-    assert_eq!(
-        server["env"]["FASTCTX_GREP_TOKEN_BUDGET"]
-            .as_str()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap(),
-        CODEY_FASTCTX_GREP_TOKEN_BUDGET
-    );
-    assert_eq!(
-        server["env"]["FASTCTX_GLOB_TOKEN_BUDGET"]
-            .as_str()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap(),
-        CODEY_FASTCTX_GLOB_TOKEN_BUDGET
-    );
+    assert!(!mcp_server_exists(&document, CODEY_FASTCTX_SERVER_ID));
     assert_eq!(
         fast_context_tools_status_from_document(&document),
         FastContextToolsStatus::default()
@@ -2683,7 +2637,7 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__fastctx"]
 }
 
 #[test]
-fn fast_context_tools_migrate_the_owned_main_executable_proxy_to_the_sidecar() {
+fn fast_context_tools_remove_the_owned_main_executable_mcp_proxy() {
     let existing = r#"
 [mcp_servers.codey_fastctx]
 command = "/Applications/Codey.app/Contents/MacOS/codey"
@@ -2705,39 +2659,7 @@ CONCURRENT = "preserve"
     )
     .unwrap();
     let document = result.parse::<DocumentMut>().unwrap();
-    let server = document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]
-        .as_table()
-        .unwrap();
-
-    assert_eq!(
-        server["command"].as_str(),
-        Some("/Applications/Codey.app/Contents/MacOS/codey-fastctx")
-    );
-    assert_eq!(
-        server["args"]
-            .as_array()
-            .and_then(|arguments| arguments.get(0))
-            .and_then(Value::as_str),
-        Some("--codey-fastctx-mcp")
-    );
-    assert_eq!(
-        server["startup_timeout_sec"].as_integer(),
-        Some(CODEY_FASTCTX_STARTUP_TIMEOUT_SECONDS)
-    );
-    assert_eq!(
-        server["tool_timeout_sec"].as_integer(),
-        Some(CODEY_FASTCTX_TOOL_TIMEOUT_SECONDS)
-    );
-    assert_eq!(server["runtime_note"].as_str(), Some("preserve"));
-    assert_eq!(server["env"]["CONCURRENT"].as_str(), Some("preserve"));
-    assert_eq!(
-        server["env"]["FASTCTX_TOKEN_BUDGET"]
-            .as_str()
-            .unwrap()
-            .parse::<usize>()
-            .unwrap(),
-        CODEY_FASTCTX_TOKEN_BUDGET
-    );
+    assert!(!mcp_server_exists(&document, CODEY_FASTCTX_SERVER_ID));
 }
 
 #[test]
@@ -2750,27 +2672,17 @@ fn fast_context_tools_scale_budgets_down_for_a_smaller_user_host_limit() {
         false,
     )
     .unwrap();
-    let document = parse_document(&result).unwrap();
-    let server = document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]
-        .as_table()
-        .unwrap();
+    let mut document = parse_document(&result).unwrap();
+    assert!(!mcp_server_exists(&document, CODEY_FASTCTX_SERVER_ID));
+    let environment = fastctx::native_environment(&mut document).unwrap();
 
     assert_eq!(
         document["tool_output_token_limit"].as_integer(),
         Some(16_000)
     );
-    assert_eq!(
-        server["env"]["FASTCTX_TOKEN_BUDGET"].as_str(),
-        Some("14400")
-    );
-    assert_eq!(
-        server["env"]["FASTCTX_GREP_TOKEN_BUDGET"].as_str(),
-        Some("10800")
-    );
-    assert_eq!(
-        server["env"]["FASTCTX_GLOB_TOKEN_BUDGET"].as_str(),
-        Some("5400")
-    );
+    assert_eq!(environment["FASTCTX_TOKEN_BUDGET"], "14400");
+    assert_eq!(environment["FASTCTX_GREP_TOKEN_BUDGET"], "10800");
+    assert_eq!(environment["FASTCTX_GLOB_TOKEN_BUDGET"], "5400");
 }
 
 #[test]
@@ -2783,14 +2695,13 @@ fn fast_context_tools_keep_an_explicit_zero_host_output_limit() {
         false,
     )
     .unwrap();
-    let document = parse_document(&result).unwrap();
-    let server = document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]
-        .as_table()
-        .unwrap();
+    let mut document = parse_document(&result).unwrap();
 
     assert_eq!(document["tool_output_token_limit"].as_integer(), Some(0));
     assert!(
-        server.get("env").is_none(),
+        fastctx::native_environment(&mut document)
+            .unwrap()
+            .is_empty(),
         "显式 0 且此前无 env 时不应派生预算环境变量"
     );
 }
@@ -2817,24 +2728,14 @@ USER_KEY = "preserve"
         false,
     )
     .unwrap();
-    let document = parse_document(&result).unwrap();
-    let server = document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]
-        .as_table()
-        .unwrap();
-
+    let mut document = parse_document(&result).unwrap();
+    assert!(!mcp_server_exists(&document, CODEY_FASTCTX_SERVER_ID));
     assert_eq!(document["tool_output_token_limit"].as_integer(), Some(0));
-    let env = server
-        .get("env")
-        .and_then(|env| env.as_table())
-        .expect("已有 env 中的用户键应保留");
-    assert_eq!(env["USER_KEY"].as_str(), Some("preserve"));
-    for key in [
-        "FASTCTX_TOKEN_BUDGET",
-        "FASTCTX_GREP_TOKEN_BUDGET",
-        "FASTCTX_GLOB_TOKEN_BUDGET",
-    ] {
-        assert!(env.get(key).is_none(), "应清掉残留的 {key}");
-    }
+    assert!(
+        fastctx::native_environment(&mut document)
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -2906,10 +2807,8 @@ command = "/custom/breakfastctx"
     .unwrap();
     let document = result.parse::<DocumentMut>().unwrap();
 
-    assert_eq!(
-        document["mcp_servers"][CODEY_FASTCTX_SERVER_ID]["command"].as_str(),
-        Some("/tmp/codey")
-    );
+    assert!(!mcp_server_exists(&document, CODEY_FASTCTX_SERVER_ID));
+    assert!(document.get("developer_instructions").is_some());
 }
 
 #[test]
@@ -3110,10 +3009,11 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__codey_fastctx", "mcp__code
     assert_eq!(first.matches(CODEY_FASTCTX_GUIDANCE).count(), 1);
     let document = first.parse::<DocumentMut>().unwrap();
     let guidance = document["developer_instructions"].as_str().unwrap();
-    assert!(guidance.contains("`mcp__codey_fastctx__inspect_local_file`"));
-    assert!(guidance.contains("`mcp__codey_fastctx__grep`"));
-    assert!(guidance.contains("`mcp__codey_fastctx__glob`"));
-    assert!(guidance.contains("`mcp__codey_fastctx__replace`"));
+    assert!(guidance.contains("`codey_fastctx.inspect_local_file`"));
+    assert!(guidance.contains("`codey_fastctx.grep`"));
+    assert!(guidance.contains("`codey_fastctx.glob`"));
+    assert!(guidance.contains("`codey_fastctx.replace`"));
+    assert!(!guidance.contains("mcp__codey_fastctx"));
     assert!(guidance.contains("Use CodeGraph only for semantic symbols"));
     assert!(guidance.contains("Batch 2-32 known text files or ranges"));
     assert!(guidance.contains("Start broad grep with `files_with_matches`"));
@@ -3123,9 +3023,10 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__codey_fastctx", "mcp__code
     assert!(!guidance.contains("list_mcp_resources"));
     assert!(!guidance.contains("read_mcp_resource"));
     assert!(!guidance.contains("Write-Output"));
-    for stale_guidance in &CODEY_FASTCTX_GUIDANCE_VERSIONS[1..] {
-        assert!(!guidance.contains(stale_guidance));
-    }
+    assert_eq!(
+        guidance,
+        crate::codex_config_guidance::codey_fastctx_guidance_for_namespace("codey_fastctx")
+    );
     assert_eq!(
         document["features"]["code_mode"]["direct_only_tool_namespaces"]
             .as_array()
@@ -3133,7 +3034,7 @@ direct_only_tool_namespaces = ["mcp__existing", "mcp__codey_fastctx", "mcp__code
             .iter()
             .filter_map(Value::as_str)
             .collect::<Vec<_>>(),
-        vec!["mcp__existing", "mcp__codey_fastctx"]
+        vec!["mcp__existing", "codey_fastctx"]
     );
     assert_eq!(
         document["tool_output_token_limit"].as_integer(),
@@ -3174,7 +3075,7 @@ user_flag = true
                 .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>(),
-            vec!["mcp__existing", "mcp__codey_fastctx"]
+            vec!["mcp__existing", "codey_fastctx"]
         );
         assert_eq!(
             document["features"]["user_flag"].as_bool(),
@@ -4139,20 +4040,13 @@ wire_api = "responses"
         applied
             .runtime_config_overrides
             .iter()
-            .any(|entry| entry.starts_with("mcp_servers.codey_fastctx.command="))
+            .all(|entry| !entry.starts_with("mcp_servers.codey_fastctx."))
     );
     for required_key in [
         "model_catalog_json",
         "desktop.enabled-reasoning-efforts",
         "service_tier",
         "developer_instructions",
-        "mcp_servers.codey_fastctx.command",
-        "mcp_servers.codey_fastctx.args",
-        "mcp_servers.codey_fastctx.startup_timeout_sec",
-        "mcp_servers.codey_fastctx.tool_timeout_sec",
-        "mcp_servers.codey_fastctx.env.FASTCTX_TOKEN_BUDGET",
-        "mcp_servers.codey_fastctx.env.FASTCTX_GREP_TOKEN_BUDGET",
-        "mcp_servers.codey_fastctx.env.FASTCTX_GLOB_TOKEN_BUDGET",
         "tool_output_token_limit",
         "agents.enabled",
         "agents.max_concurrent_threads_per_session",

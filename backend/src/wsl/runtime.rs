@@ -159,20 +159,8 @@ async fn run_backend(
             .context("缺少 WSL Codey 运行时配置")?;
         let supplied: Vec<String> =
             serde_json::from_str(&raw).context("WSL Codey 运行时配置格式无效")?;
-        let fastctx = executable.with_file_name("codey-fastctx");
-        if supplied
-            .iter()
-            .any(|value| value.starts_with("mcp_servers.codey_fastctx.command="))
-        {
-            require_elf(&fastctx, "WSL FastCtx")?;
-        }
         let windows_host = super::config::wslpath("-w", &bridges.host.to_string_lossy())?;
-        overrides = map_overrides(
-            &supplied,
-            &fastctx,
-            Path::new(&windows_host),
-            map_windows_path,
-        )?;
+        overrides = map_overrides(&supplied, Path::new(&windows_host), map_windows_path)?;
         if let Some(root) = std::env::var_os("CODEY_WSL_CODEGRAPH_ROOT") {
             let path = crate::codex_config::codex_home().join("config.toml");
             if path.try_exists()? {

@@ -663,9 +663,9 @@ pub(crate) fn subagent_source_config_versions(role: &str) -> Option<[&'static st
 }
 
 pub(crate) const CODEY_FASTCTX_GUIDANCE: &str = "Codey FastCtx context tools are enabled as direct \
-tools in native clients. Prefer FastCtx for supported local file operations. Use `mcp__codey_fastctx__inspect_local_file` for focused inspection, \
-`mcp__codey_fastctx__grep` for search, `mcp__codey_fastctx__glob` for discovery, and \
-`mcp__codey_fastctx__replace` only for deterministic replacement. Batch 2-32 known text files or ranges \
+tools in native clients. Prefer FastCtx for supported local file operations. Use `codey_fastctx.inspect_local_file` for focused inspection, \
+`codey_fastctx.grep` for search, `codey_fastctx.glob` for discovery, and \
+`codey_fastctx.replace` only for deterministic replacement. Batch 2-32 known text files or ranges \
 per inspect call; limit large files to needed ranges. A top-level `limit` applies to entries without one. \
 Pass plain absolute filesystem paths; convert local URIs and Windows paths to a drive-letter path such as \
 `E:/repo/file.ts`. Start broad grep with `files_with_matches`, then request minimal `content`; use summary \
@@ -684,14 +684,20 @@ paths. Every tool call must advance the task; put progress and corrections in co
 
 pub(crate) const CODEY_FASTCTX_GUIDANCE_VERSIONS: &[&str] = &[
     CODEY_FASTCTX_GUIDANCE,
+    legacy::MCP_FASTCTX_GUIDANCE,
     legacy::DIRECT_FASTCTX_GUIDANCE,
     legacy::TASK_ROUTED_FASTCTX_GUIDANCE,
+    legacy::NATIVE_MCP_FALLBACK_GUIDANCE,
 ];
 
 const DEFAULT_FASTCTX_TOOL_NAMESPACE: &str = "mcp__codey_fastctx";
 
 pub(crate) fn codey_fastctx_guidance_for_namespace(namespace: &str) -> String {
-    CODEY_FASTCTX_GUIDANCE.replace(DEFAULT_FASTCTX_TOOL_NAMESPACE, namespace)
+    if namespace == "codey_fastctx" {
+        CODEY_FASTCTX_GUIDANCE.to_string()
+    } else {
+        legacy::MCP_FASTCTX_GUIDANCE.replace(DEFAULT_FASTCTX_TOOL_NAMESPACE, namespace)
+    }
 }
 
 #[cfg(test)]
@@ -854,9 +860,11 @@ mod tests {
     #[test]
     fn fastctx_guidance_encodes_the_direct_and_cost_efficient_tool_contract() {
         assert_eq!(
-            codey_fastctx_guidance_for_namespace("mcp__codey_fastctx"),
+            codey_fastctx_guidance_for_namespace("codey_fastctx"),
             CODEY_FASTCTX_GUIDANCE
         );
+        assert!(CODEY_FASTCTX_GUIDANCE.contains("`codey_fastctx.inspect_local_file`"));
+        assert!(!CODEY_FASTCTX_GUIDANCE.contains("mcp__codey_fastctx"));
         assert!(CODEY_FASTCTX_GUIDANCE.contains("enabled as direct tools"));
         assert!(CODEY_FASTCTX_GUIDANCE.contains("Batch 2-32 known text files or ranges"));
         assert!(CODEY_FASTCTX_GUIDANCE.contains("top-level `limit`"));

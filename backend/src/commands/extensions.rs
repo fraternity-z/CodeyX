@@ -71,20 +71,14 @@ fn scoped_status(mut status: Value, config_path: &Value) -> Value {
     status
 }
 
-pub(super) async fn prepare_shared_fastctx(state: &AppState, enabled: bool) -> anyhow::Result<()> {
+pub(super) async fn remove_legacy_fastctx_mcp(state: &AppState) -> anyhow::Result<()> {
     let (data_dir, user_home) = paths(state)?;
-    let command = if enabled {
-        crate::codex_config::fastctx_server_command().ok()
-    } else {
-        None
-    };
     let _write = state.config_write_lock.lock().await;
     tokio::task::spawn_blocking(move || {
-        crate::codex_config::prepare_shared_fastctx(
+        crate::codex_config::remove_legacy_fastctx_mcp(
             crate::codex_config::codex_home(),
             data_dir,
             user_home,
-            command.as_deref(),
         )
     })
     .await??;
@@ -95,10 +89,6 @@ pub(super) async fn prepare_shared_fastctx(state: &AppState, enabled: bool) -> a
 pub(super) async fn invoke(state: &Arc<AppState>, args: &Value) -> Result<Value, String> {
     let request = argument::<Value>(args, "request")?;
     let scheduler_toggle = request["action"] == "set_mcp_scheduler_enabled";
-    let scope = request
-        .get("scope")
-        .cloned()
-        .unwrap_or(json!({"kind":"user"}));
     let reload_mcp = matches!(
         request["action"].as_str(),
         Some(
@@ -164,23 +154,6 @@ pub(super) async fn invoke(state: &Arc<AppState>, args: &Value) -> Result<Value,
     .await
     .map_err(|error| error.to_string())?;
     drop(_write);
-    if scheduler_toggle && result["inventory"]["mcpSchedulerEnabled"] == true {
-        let fastctx_enabled = state.config.read().await.fast_context_tools;
-        if let Err(_error) = prepare_shared_fastctx(state, fastctx_enabled).await {
-            result["applyStatus"] = json!("reload-failed");
-            result["message"] =
-                json!("共享器设置已保存，内置 FastCtx 配置准备失败，请重启 Codey 后重试。");
-            return Ok(result);
-        }
-        result["inventory"] = crate::codex_extensions::dispatch(
-            crate::codex_config::codex_home().to_path_buf(),
-            data_dir,
-            user_home,
-            json!({"action":"list","scope":scope}),
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-    }
     if reload_mcp {
         if let Err(_error) = ensure_scheduler(state).await {
             result["applyStatus"] = json!("reload-failed");
@@ -217,12 +190,6 @@ pub(super) async fn invoke(state: &Arc<AppState>, args: &Value) -> Result<Value,
             result["applyStatus"] = json!("pending-runtime");
             result["message"] = json!("配置已保存，Codex 下次启动时生效。");
         }
-    }
-    if scheduler_toggle && state.runtime.lock().await.is_some() {
-        result["message"] = json!(format!(
-            "{} 内置 FastCtx 的启动覆盖需重启 Codex 后生效，已有共享会话在重连前继续使用共享器。",
-            result["message"].as_str().unwrap_or("共享器设置已保存。")
-        ));
     }
     Ok(result)
 }

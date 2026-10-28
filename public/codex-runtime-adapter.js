@@ -1,7 +1,7 @@
 // Codex's private desktop interfaces live behind this adapter. Installing it
 // does not mount controls, observe the DOM, or start background polling.
 (() => {
-  const version = 3;
+  const version = 4;
   const previous = window.__codeyNativeRuntime;
   if (previous?.version === version && previous.isActive?.()) return;
   previous?.dispose?.();
@@ -674,6 +674,129 @@
     };
   };
 
+  const fastCtxNamespace = "codey_fastctx";
+  const fastCtxTools = new Set(["inspect_local_file", "grep", "glob", "replace"]);
+  const fastCtxCalls = new Map();
+  const fastCtxCancellations = new Set();
+  const fastCtxFailure = (text) => ({ success: false, contentItems: [{ type: "inputText", text }] });
+  const fastCtxAbortError = () => Object.assign(new Error("FastCtx 调用已取消"), { name: "AbortError" });
+  const fastCtxDisposeSubscription = (subscription) => {
+    if (typeof subscription === "function") subscription();
+    else if (typeof subscription?.[Symbol.dispose] === "function") subscription[Symbol.dispose]();
+    else subscription?.dispose?.();
+  };
+  const fastCtxNative = Object.freeze({
+    async appendTools(tools, event, ensureExecution) {
+      if (disposed || event?.hostId !== "local" || !Array.isArray(tools)
+        || typeof window.__codeyInvokeApi !== "function") return tools;
+      try {
+        if (typeof ensureExecution === "function") await ensureExecution();
+        if (window.__codeyFastCtxNativeExecutionInstalled !== true) return tools;
+        const response = await waitForNativeSessionOperation(() => window.__codeyInvokeApi("get_fastctx_native_tools", {}));
+        if (disposed || response?.available !== true || !Array.isArray(response.tools)) return tools;
+        const definitions = response.tools.filter((tool) => fastCtxTools.has(tool?.name)
+          && typeof tool.description === "string" && tool.inputSchema?.type === "object");
+        if (definitions.length !== fastCtxTools.size || new Set(definitions.map((tool) => tool.name)).size !== fastCtxTools.size) return tools;
+        return [
+          ...tools.filter((tool) => tool?.namespace !== fastCtxNamespace
+            && !(tool?.type === "namespace" && tool.name === fastCtxNamespace)),
+          {
+            type: "namespace", name: fastCtxNamespace,
+            description: "FastCtx local file tools executed by Codey's Rust runtime.",
+            tools: definitions.map(({ name, description, inputSchema }) => ({
+              type: "function", name, description, inputSchema, deferLoading: false,
+            })),
+          },
+        ];
+      } catch {
+        return tools;
+      }
+    },
+    async execute(context) {
+      const request = context?.request;
+      if (disposed || context?.hostId !== "local" || request?.namespace !== fastCtxNamespace
+        || !fastCtxTools.has(request.tool) || typeof context.cwd !== "string" || !context.cwd
+        || ![request.threadId, request.turnId, request.callId].every((value) => typeof value === "string" && value.length > 0)
+        || !request.arguments || typeof request.arguments !== "object" || Array.isArray(request.arguments)
+        || typeof window.__codeyInvokeApi !== "function"
+        || typeof context.getCurrentPermissions !== "function" || typeof context.getThreadExecutionState !== "function"
+        || typeof context.subscribeTurnCompleted !== "function") {
+        return fastCtxFailure("当前客户端不支持 FastCtx 原生执行上下文，请使用兼容的客户端重试。");
+      }
+      const key = `${request.threadId}\0${request.callId}`;
+      const existing = fastCtxCalls.get(key);
+      if (existing) return existing;
+      const operation = (async () => {
+        let cancelled = context.signal?.aborted === true;
+        let submitted = false;
+        let cancelSent = false;
+        const subscriptions = new Set();
+        const cancel = () => {
+          cancelled = true;
+          if (!submitted || cancelSent) return;
+          cancelSent = true;
+          Promise.resolve().then(() => window.__codeyInvokeApi("cancel_fastctx_native_tool", {
+            requestId: request.callId, threadId: request.threadId,
+          })).catch(() => {});
+        };
+        const assertCurrent = () => {
+          if (disposed || cancelled || context.signal?.aborted) throw fastCtxAbortError();
+        };
+        fastCtxCancellations.add(cancel);
+        context.signal?.addEventListener("abort", cancel, { once: true });
+        try {
+          assertCurrent();
+          const subscription = context.subscribeTurnCompleted((event) => {
+            if (event?.conversationId === request.threadId && event?.turnId === request.turnId) cancel();
+          });
+          subscriptions.add(subscription);
+          subscriptions.add(await subscription);
+          assertCurrent();
+          const state = await context.getThreadExecutionState();
+          const permissions = await context.getCurrentPermissions();
+          assertCurrent();
+          if (state?.activeTurnId !== request.turnId) throw fastCtxAbortError();
+          const profile = permissions?.activePermissionProfile;
+          if (permissions?.sandboxPolicy?.type !== "dangerFullAccess"
+            || (profile != null && (typeof profile === "string" ? profile : profile.id) !== ":danger-full-access")) {
+            return fastCtxFailure("当前权限不允许 FastCtx 原生执行，仅支持本地标准完全访问会话。");
+          }
+          // The backend enforces the complete host policy; a known policy name alone grants no access.
+          submitted = true;
+          const result = await window.__codeyInvokeApi("call_fastctx_native_tool", {
+            requestId: request.callId, threadId: request.threadId, turnId: request.turnId,
+            cwd: context.cwd, tool: request.tool, arguments: request.arguments, permissions,
+          });
+          assertCurrent();
+          if (!Array.isArray(result?.content)) throw new Error("FastCtx 返回内容格式不兼容");
+          const contentItems = result.content.map((content) => {
+            if (content?.type === "text" && typeof content.text === "string") {
+              return { type: "inputText", text: content.text };
+            }
+            if (content?.type === "image" && typeof content.data === "string"
+              && /^image\/[a-z0-9.+-]+$/i.test(content.mimeType)) {
+              return { type: "inputImage", imageUrl: `data:${content.mimeType};base64,${content.data}` };
+            }
+            throw new Error("FastCtx 返回了不支持的内容类型");
+          });
+          return { success: result.isError !== true, contentItems };
+        } catch (error) {
+          if (cancelled || disposed || context.signal?.aborted || error?.name === "AbortError") throw fastCtxAbortError();
+          return fastCtxFailure(`FastCtx 原生执行失败：${String(error?.message || "后端不可用")}`);
+        } finally {
+          fastCtxCancellations.delete(cancel);
+          context.signal?.removeEventListener("abort", cancel);
+          for (const subscription of subscriptions) {
+            try { fastCtxDisposeSubscription(subscription); } catch {}
+          }
+        }
+      })();
+      fastCtxCalls.set(key, operation);
+      try { return await operation; }
+      finally { if (fastCtxCalls.get(key) === operation) fastCtxCalls.delete(key); }
+    },
+  });
+
   // Preserve existing host/user-script entry points while their implementation
   // and lifetime belong exclusively to the adapter.
   const exports = {
@@ -688,6 +811,7 @@
     __codeyReadAccountRateLimits: readAccountRateLimits,
     __codeyReloadMcpServers: reloadMcpServers,
     __codeyRemoteControl: remoteControl,
+    __codeyFastCtxNative: fastCtxNative,
     __codeyPageCapabilities: pageCapabilities,
   };
   const api = Object.freeze({
@@ -699,6 +823,8 @@
     dispose() {
       if (disposed) return;
       disposed = true;
+      for (const cancel of fastCtxCancellations) cancel();
+      fastCtxCalls.clear();
       capabilityProbes.clear();
       codexAssetReferenceCache.clear();
       if (window.__codeyNativeRuntime !== api) return;

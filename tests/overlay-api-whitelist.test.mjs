@@ -56,7 +56,7 @@ test("remote panel permissions remain a strict subset of dispatched commands", (
   const commands = [...whitelist.matchAll(/"([a-z][a-z0-9_]*)"/g)].map(match => match[1]);
   assert.ok(commands.length > 0);
   for (const command of commands) assert.ok(api.isCodeyApiCommand(command), `remote command is not dispatched: ${command}`);
-  for (const command of ["start_remote_control", "pair_remote_control", "revoke_remote_device", "query_route_request_log_quota_usage", "repair_codex_overlays"]) {
+  for (const command of ["start_remote_control", "pair_remote_control", "revoke_remote_device", "query_route_request_log_quota_usage", "repair_codex_overlays", "get_fastctx_native_tools", "call_fastctx_native_tool", "cancel_fastctx_native_tool"]) {
     assert.ok(!commands.includes(command), `${command} must not be remotely permitted`);
   }
 });

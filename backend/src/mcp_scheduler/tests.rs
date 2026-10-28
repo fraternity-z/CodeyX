@@ -243,27 +243,7 @@ async fn mcp_scheduler_expands_caps_and_returns_to_base() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn mcp_scheduler_owned_fastctx_expires_last_idle_slot_but_keeps_busy_calls() {
-    let mut pool = pool(json!({"args":["--codey-fastctx-mcp"]}), 1);
-    Arc::get_mut(&mut pool).unwrap().registration.id = "codey_fastctx".into();
-    let busy = pool.acquire().await.unwrap();
-    tokio::time::advance(IDLE).await;
-    assert_eq!(pool.shrink(false).await, 0);
-    assert_eq!(pool.slots.lock().unwrap().len(), 1);
-    drop(busy);
-    tokio::time::advance(IDLE - Duration::from_millis(1)).await;
-    assert_eq!(pool.shrink(false).await, 0);
-    tokio::time::advance(Duration::from_millis(1)).await;
-    assert_eq!(pool.shrink(false).await, 1);
-    assert!(pool.slots.lock().unwrap().is_empty());
-    let restarted = pool.acquire().await.unwrap();
-    assert_eq!(pool.slots.lock().unwrap().len(), 1);
-    drop(restarted);
-    close(&pool).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn mcp_scheduler_other_servers_keep_last_idle_slot() {
+async fn mcp_scheduler_servers_keep_last_idle_slot() {
     for (id, args) in [
         ("fixture", json!([])),
         ("codey_fastctx", json!([])),
@@ -362,55 +342,6 @@ async fn mcp_scheduler_initialization_expands_without_blocking_behind_busy_calls
     assert_eq!(pool.slots.lock().unwrap().len(), 2);
     drop(busy);
     close(&pool).await;
-}
-
-#[tokio::test]
-async fn mcp_scheduler_owned_fastctx_releases_real_engine() {
-    let Some(executable) = std::env::var_os("CODEY_FASTCTX_TEST_EXECUTABLE") else {
-        eprintln!(
-            "SKIP real FastCtx: set CODEY_FASTCTX_TEST_EXECUTABLE to a built codey-fastctx binary"
-        );
-        return;
-    };
-    let temp = tempfile::tempdir().unwrap();
-    std::fs::write(temp.path().join("sample.txt"), "owned engine\n").unwrap();
-    let event_log = temp.path().join("runtime-events.log");
-    let mut pool = pool(
-        json!({"command":executable.to_string_lossy(),"args":["--codey-fastctx-mcp"]}),
-        1,
-    );
-    let configured = Arc::get_mut(&mut pool).unwrap();
-    configured.registration.id = "codey_fastctx".into();
-    configured.cwd = temp.path().into();
-    configured.env.insert(
-        "FASTCTX_TEST_RUNTIME_EVENT_LOG".into(),
-        event_log.to_string_lossy().into_owned(),
-    );
-    configured.env.insert(
-        "CODEY_APP_STATE_DIR".into(),
-        temp.path().join("state").to_string_lossy().into_owned(),
-    );
-    let params = json!({"name":"glob","arguments":{"pattern":["*.txt"]}});
-    let first = call(&pool, params.clone()).await.unwrap();
-    assert_eq!(first["result"]["isError"], false, "{first}");
-    assert!(first["result"].to_string().contains("sample.txt"));
-    let slot = pool.slots.lock().unwrap()[0].clone();
-    let first_pid = slot.worker.lock().await.as_ref().unwrap().process.id();
-    *slot.used.lock().unwrap() = Instant::now() - IDLE;
-    assert_eq!(pool.shrink(false).await, 1);
-    assert!(!slot.is_live());
-    let second = call(&pool, params).await.unwrap();
-    assert_eq!(second["result"]["isError"], false, "{second}");
-    let slot = pool.slots.lock().unwrap()[0].clone();
-    assert_ne!(
-        first_pid,
-        slot.worker.lock().await.as_ref().unwrap().process.id()
-    );
-    close(&pool).await;
-    assert!(
-        !event_log.exists(),
-        "owned FastCtx unexpectedly started a detached runtime"
-    );
 }
 
 #[tokio::test(start_paused = true)]

@@ -153,18 +153,17 @@ pub(crate) async fn dispatch(
             };
             if scope == Scope::User {
                 let mut ids = Vec::new();
-                for id in ["codey_fastctx", "codey_codegraph"] {
-                    let config = if request["action"] == "save_mcp" && request["id"] == id {
-                        Some(service.mcp_save_configuration(&scope, id, &request["configJson"])?)
-                    } else {
-                        service.mcp_configuration(&scope, id).ok()
-                    };
-                    if config
-                        .as_ref()
-                        .is_some_and(|config| builtin_mcp_is_managed(id, config, &builtin_root))
-                    {
-                        ids.push(id);
-                    }
+                let id = "codey_codegraph";
+                let config = if request["action"] == "save_mcp" && request["id"] == id {
+                    Some(service.mcp_save_configuration(&scope, id, &request["configJson"])?)
+                } else {
+                    service.mcp_configuration(&scope, id).ok()
+                };
+                if config
+                    .as_ref()
+                    .is_some_and(|config| builtin_mcp_is_managed(id, config, &builtin_root))
+                {
+                    ids.push(id);
                 }
                 request["builtinIds"] = json!(ids);
             }
@@ -176,15 +175,6 @@ pub(crate) async fn dispatch(
 }
 
 fn builtin_mcp_is_managed(id: &str, config: &Value, builtin_root: &std::path::Path) -> bool {
-    if id == "codey_fastctx" {
-        return crate::codex_config::fastctx_server_command()
-            .ok()
-            .is_some_and(|command| {
-                config["command"] == json!(command)
-                    && config["args"] == json!(["--codey-fastctx-mcp"])
-                    && config.get("cwd").is_none_or(Value::is_null)
-            });
-    }
     id == "codey_codegraph" && crate::codegraph_runtime::is_managed_mcp(config, builtin_root)
 }
 

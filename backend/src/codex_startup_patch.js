@@ -473,9 +473,69 @@
       "})()).find(",
       `${coordinationName}.clientCoordination,${hostIdName},${conversationIdName})`,
     ].join("");
+  const patchFastCtxNativeTools = (source) => {
+    if (source.includes("globalThis.__codeyFastCtxNative?.appendTools")) return source;
+    const executionImports = [...new Set([...source.matchAll(
+      /import\(([`"'])(\.\/execution-[^`"']+\.js)\1\)/g,
+    )].map((match) => match[2]))];
+    if (executionImports.length !== 1) {
+      return recordIncompatibleRendererGate(source, "FastCtx native tool registration", executionImports.length);
+    }
+    return replaceUniqueRendererGate(
+      source,
+      /if\(([$A-Z_a-z][$\w]*)\.responseTarget===`electron`\)\{([$A-Z_a-z][$\w]*)\.postMessage\(\{type:`dynamic-tools-for-thread-start-response`,requestId:\1\.requestId,dynamicTools:([$A-Z_a-z][$\w]*),hostedAutomationsAvailable:/g,
+      (match, request, _bridge, tools) => `${tools}=await globalThis.__codeyFastCtxNative?.appendTools?.(${tools},${request},()=>import(${JSON.stringify(executionImports[0])}))??${tools};${match}`,
+      "FastCtx native tool registration",
+    );
+  };
+  const patchFastCtxNativeExecution = (source) => {
+    if (source.includes("globalThis.__codeyFastCtxNative?.execute")) return source;
+    const identifier = "[$A-Z_a-z][$\\w]*";
+    const signatures = new RegExp(`async function (${identifier})\\(\\{scope:(${identifier}),serverRequest:(${identifier}),hostId:(${identifier}),queryClient:(${identifier}),signal:(${identifier}),transport:${identifier}[^{}]{0,100}\\},\\{[^{}]{0,400}conversationId:(${identifier})[^{}]{0,400}\\}\\)\\{`, "g");
+    const candidates = [...source.matchAll(signatures)].flatMap((signature) => {
+      const open = signature.index + signature[0].length - 1;
+      const close = matchingBrace(source, open);
+      if (close < 0) return [];
+      const body = source.slice(open, close + 1);
+      if (!body.includes("Unsupported dynamic tool namespace:") || !signature[0].includes("onToolResult:")) return [];
+      return [{ signature, open, close, body }];
+    });
+    if (candidates.length !== 1) {
+      return recordIncompatibleRendererGate(source, "FastCtx native tool execution", candidates.length);
+    }
+    const [{ signature, open, close, body }] = candidates;
+    const [, , scope, request, hostId, , signal, conversationId] = signature;
+    const escape = (value) => value.replace(/[$]/g, "\\$");
+    const params = new RegExp(`\\bparams:(${identifier})\\}=${escape(request)},\\{threadId:(${identifier}),tool:${identifier}\\}=\\1`).exec(body);
+    const managers = [...new Set([...body.matchAll(new RegExp(`(${identifier})=(${identifier})\\(${escape(scope)},${escape(hostId)}\\)`, "g"))]
+      .filter((match) => body.includes(`${match[1]}.getCurrentPermissions(${conversationId})`)
+        && body.includes(`${match[1]}.getThreadExecutionState(${conversationId})`))
+      .map((match) => match[2]))];
+    const cwds = params == null ? [] : [...new Set([...body.matchAll(new RegExp(`cwd:(${escape(scope)}\\.get\\(${identifier},${identifier}\\(${escape(params[2])}\\)\\))`, "g"))].map((match) => match[1]))];
+    if (!params || managers.length !== 1 || cwds.length !== 1) {
+      return recordIncompatibleRendererGate(source, "FastCtx native execution context", 0);
+    }
+    const manager = `${managers[0]}(${scope},${hostId})`;
+    const branch = /else if\(!([$A-Z_a-z][$\w]*)&&!([$A-Z_a-z][$\w]*)\)([$A-Z_a-z][$\w]*)=([$A-Z_a-z][$\w]*)\(`Unsupported dynamic tool namespace: \$\{([$A-Z_a-z][$\w]*)\.namespace\}`\);/g;
+    const patchedBody = replaceUniqueRendererGate(body, branch, (match, _namespace, _legacy, result, _error, argumentsName) => {
+      if (argumentsName !== params[1]) return match;
+      return `else if(${argumentsName}.namespace===\`codey_fastctx\`&&globalThis.__codeyFastCtxNative?.execute)${result}=await globalThis.__codeyFastCtxNative.execute({hostId:${hostId},request:${argumentsName},cwd:${cwds[0]},signal:${signal},getCurrentPermissions:()=>${manager}.getCurrentPermissions(${conversationId}),getThreadExecutionState:()=>${manager}.getThreadExecutionState(${conversationId}),subscribeTurnCompleted:listener=>${manager}.subscribe({type:\`event\`,key:{hostId:${hostId}},event:\`turn-completed\`,listener})});${match}`;
+    }, "FastCtx native execution dispatch");
+    if (patchedBody === body) return source;
+    return source.slice(0, open) + patchedBody + source.slice(close + 1)
+      + "\n;globalThis.__codeyFastCtxNativeExecutionInstalled=true;\n";
+  };
   const patchCodexRendererAsset = (source) => {
     let patched = source;
     let nativeCustomProviderModelAccess = false;
+    if (source.includes("dynamic-tools-for-thread-start-requested")
+      && source.includes("dynamic-tools-for-thread-start-response")) {
+      patched = patchFastCtxNativeTools(patched);
+    }
+    if (source.includes("Unsupported dynamic tool namespace:")
+      && source.includes("executeDynamicToolCallRequest")) {
+      patched = patchFastCtxNativeExecution(patched);
+    }
     if (
       source.includes("codex-message-from-view")
       && source.includes("sendMessageFromView")
@@ -1001,7 +1061,7 @@
         url.protocol === "app:" &&
         url.pathname.includes("/assets/") &&
         (
-          /\/(?:(?:app-initial|app-shared|codex-composer-adapter|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
+          /\/(?:(?:app-initial|app-shared|initialize-app-host-services|execution|codex-composer-adapter|general-settings|model-list-filter|windows-model-controls|use-service-tier-settings|read-service-tier-for-request|subagent-activity-chip-group)(?:[~-][^/]*)?)\.(?:c|m)?js$/i.test(
             url.pathname,
           ) ||
           (
@@ -2906,9 +2966,34 @@
     },
   );
 
+  const patchCodexMainFastCtxNativeTools = (source) => {
+    if (source.includes("__CODEY_FASTCTX_NATIVE_TOOLS_SOURCE_PATCHED__=true")) return source;
+    const assignment = /\b([$A-Z_a-z][$\w]*)\.dynamicTools=([$A-Z_a-z][$\w]*)\.usesDesktopMcp\?\[\]:(([$A-Z_a-z][$\w]*)\.[$A-Z_a-z][$\w]*)\(([$A-Z_a-z][$\w]*)\)/g;
+    const assignments = [...source.matchAll(assignment)];
+    if (assignments.length !== 1) throw new Error(`Codey native FastCtx tool assignment matched ${assignments.length} times`);
+    const [, result, options, flatten, , tools] = assignments[0];
+    const fullAccess = `((${result}.permissions==null&&${result}.sandbox===\`danger-full-access\`)||(${result}.sandbox==null&&${result}.permissions===\`:danger-full-access\`))`;
+    const allowedTools = `${tools}.filter(__codeyTool=>__codeyTool.type!==\`namespace\`||__codeyTool.name!==\`codey_fastctx\`||${fullAccess})`;
+    const names = new RegExp(`let ([$A-Z_a-z][$\\w]*)=${tools.replaceAll("$", "\\$")}\\.flatMap\\(([$A-Z_a-z][$\\w]*)=>\\2\\.type===\`namespace\`\\?\\2\\.tools:\\[\\2\\]\\),([$A-Z_a-z][$\\w]*)=\\1\\.map\\(\\(\\{name:([$A-Z_a-z][$\\w]*)\\}\\)=>\\4\\);`, "g");
+    if ([...source.matchAll(names)].length !== 1) throw new Error("Codey native FastCtx tool-name list is incompatible");
+    const patched = source.replace(names, (match) => match.replace(`${tools}.flatMap`, `${tools}.filter(__codeyTool=>__codeyTool.type!==\`namespace\`||__codeyTool.name!==\`codey_fastctx\`).flatMap`))
+      .replace(assignment, `(${result}.dynamicTools=${options}.usesDesktopMcp?${flatten}(${allowedTools}.filter(__codeyTool=>__codeyTool.type===\`namespace\`&&__codeyTool.name===\`codey_fastctx\`)):${flatten}(${allowedTools}),${result}.dynamicTools)`);
+    return patched + "\n;globalThis.__CODEY_FASTCTX_NATIVE_TOOLS_SOURCE_PATCHED__=true;\n";
+  };
+  Object.defineProperty(globalThis, "__CODEY_PATCH_CODEX_MAIN_FASTCTX_NATIVE_TOOLS__", {
+    value: patchCodexMainFastCtxNativeTools,
+  });
+
   // The app-server transport can live in a shared Vite chunk, outside main.
   {
     const patchCodexBuildScript = (source, filename) => {
+      if (source.includes("readDynamicTools") && source.includes("usesDesktopMcp")
+        && source.includes("dynamicTools=")) {
+        source = applyOptionalMainBundlePatch("fastCtxNativeTools", patchCodexMainFastCtxNativeTools, source, filename);
+        globalThis.__CODEY_FASTCTX_NATIVE_TOOLS_SOURCE_PATCHED__ =
+          source.includes("__CODEY_FASTCTX_NATIVE_TOOLS_SOURCE_PATCHED__=true")
+          && !hasOptionalMainBundlePatchFailure("fastCtxNativeTools");
+      }
       if (process.platform === "win32" && source.includes("windowsCodexHome:") &&
           /spawnCommand:[`"']wsl\.exe[`"']/.test(source)) {
         source = patchCodexWslLaunch(source);
@@ -3197,6 +3282,9 @@
     },
     get localRouterMessageSourcePatched() {
       return localRouterMessageSourcePatched;
+    },
+    get fastCtxNativeToolsSourcePatched() {
+      return globalThis.__CODEY_FASTCTX_NATIVE_TOOLS_SOURCE_PATCHED__ === true;
     },
     get throttleExternalPluginFocusReconcile() {
       return !hasOptionalMainBundlePatchFailure(

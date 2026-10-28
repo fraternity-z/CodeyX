@@ -42,7 +42,6 @@ pub(super) fn is_windows_path(path: &str) -> bool {
 
 pub(super) fn map_overrides(
     overrides: &[String],
-    fastctx: &Path,
     windows_host: &Path,
     mut map_path: impl FnMut(&str) -> Result<String>,
 ) -> Result<Vec<String>> {
@@ -55,7 +54,7 @@ pub(super) fn map_overrides(
             let key = key.trim();
             let is_path = key == "model_catalog_json"
                 || (key.starts_with("agents.") && key.ends_with(".config_file"));
-            if !is_path && key != "mcp_servers.codey_fastctx.command" && key != "hooks.state" {
+            if !is_path && key != "hooks.state" {
                 return Ok(entry.clone());
             }
             let mut parsed: DocumentMut = format!("value={raw}")
@@ -71,12 +70,7 @@ pub(super) fn map_overrides(
                 let path = parsed["value"]
                     .as_str()
                     .with_context(|| format!("WSL 运行时配置 {key} 必须为字符串"))?;
-                let mapped = if key == "mcp_servers.codey_fastctx.command" {
-                    fastctx.to_string_lossy().into_owned()
-                } else {
-                    map_path(path)?
-                };
-                parsed["value"] = toml_edit::value(mapped);
+                parsed["value"] = toml_edit::value(map_path(path)?);
             }
             Ok(format!(
                 "{key}={}",
@@ -197,19 +191,13 @@ mod tests {
             r#"mcp_servers.codey_fastctx.command="C:/tools/fastctx.exe""#.to_owned(),
             r#"developer_instructions="Do not alter C:/project in text""#.to_owned(),
         ];
-        let mapped = map_overrides(
-            &original,
-            Path::new("/opt/codey-fastctx"),
-            Path::new("C:/Codey.exe"),
-            |path| Ok(format!("/mapped/{}", path.replace('\\', "/"))),
-        )
+        let mapped = map_overrides(&original, Path::new("C:/Codey.exe"), |path| {
+            Ok(format!("/mapped/{}", path.replace('\\', "/")))
+        })
         .unwrap();
         assert!(mapped[0].contains("/mapped/C:/Users/user/catalog.json"));
         assert!(mapped[1].contains("/mapped/C:/roles/worker.toml"));
-        assert_eq!(
-            mapped[2],
-            r#"mcp_servers.codey_fastctx.command="/opt/codey-fastctx""#
-        );
+        assert_eq!(mapped[2], original[2]);
         assert_eq!(mapped[3], original[3]);
     }
 
@@ -217,7 +205,6 @@ mod tests {
     fn invalid_runtime_paths_fail_without_echoing_values() {
         let error = map_overrides(
             &["model_catalog_json=123".into()],
-            Path::new("/fastctx"),
             Path::new("C:/Codey.exe"),
             |_| unreachable!(),
         )

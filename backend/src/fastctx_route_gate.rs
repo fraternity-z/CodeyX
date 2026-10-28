@@ -29,9 +29,9 @@ enum FastctxRoute {
 impl FastctxRoute {
     fn tool_name(self) -> &'static str {
         match self {
-            Self::Inspect => "mcp__codey_fastctx__inspect_local_file",
-            Self::Search => "mcp__codey_fastctx__grep",
-            Self::Discover => "mcp__codey_fastctx__glob",
+            Self::Inspect => "codey_fastctx.inspect_local_file",
+            Self::Search => "codey_fastctx.grep",
+            Self::Discover => "codey_fastctx.glob",
         }
     }
 
@@ -212,15 +212,15 @@ fn is_local_file_uri(uri: &str) -> bool {
 }
 
 fn invalid_resource_read_reason() -> String {
-    "MCP 资源读取已停止：`server` 和 `uri` 必须原样使用成功资源发现返回的真实值，不能填写 `x`、`none`、本地路径或其他占位内容。本地工作区文件请直接调用 `mcp__codey_fastctx__inspect_local_file`；若工具尚未暴露，先用 `tool_search`，或在 code mode 中从 `ALL_TOOLS` 定位。".to_string()
+    "MCP 资源读取已停止：`server` 和 `uri` 必须原样使用成功资源发现返回的真实值，不能填写 `x`、`none`、本地路径或其他占位内容。本地工作区文件请直接调用 `codey_fastctx.inspect_local_file`；若工具尚未暴露，先用 `tool_search`，或在 code mode 中从 `ALL_TOOLS` 定位。".to_string()
 }
 
 fn fastctx_resource_reason() -> String {
-    "Codey FastCtx 提供文件工具，不能作为资源服务器使用。本地文件请调用 `mcp__codey_fastctx__inspect_local_file`，搜索与发现请分别调用 `mcp__codey_fastctx__grep` 和 `mcp__codey_fastctx__glob`；使用当前客户端声明的准确工具名称和调用入口，延迟工具可在 `tool_search` 可用时发现。".to_string()
+    "Codey FastCtx 提供文件工具，不能作为资源服务器使用。本地文件请调用 `codey_fastctx.inspect_local_file`，搜索与发现请分别调用 `codey_fastctx.grep` 和 `codey_fastctx.glob`；使用当前客户端声明的准确工具名称和调用入口，延迟工具可在 `tool_search` 可用时发现。".to_string()
 }
 
 fn local_resource_bypass_reason() -> String {
-    "本地 `file://` MCP 资源读取已停止：本地工作区文件必须通过 Codey FastCtx 直接文件工具访问，不能经外部 filesystem 资源服务器绕过 direct-only 边界。请调用 `mcp__codey_fastctx__inspect_local_file`；搜索与发现请分别调用 `mcp__codey_fastctx__grep` 和 `mcp__codey_fastctx__glob`。".to_string()
+    "本地 `file://` MCP 资源读取已停止：本地工作区文件必须通过 Codey FastCtx 直接文件工具访问，不能经外部 filesystem 资源服务器绕过 direct-only 边界。请调用 `codey_fastctx.inspect_local_file`；搜索与发现请分别调用 `codey_fastctx.grep` 和 `codey_fastctx.glob`。".to_string()
 }
 
 fn deny(reason: &str) -> Value {
@@ -659,7 +659,7 @@ mod tests {
         let reason = assert_denied(&output);
         assert_eq!(
             reason,
-            "Codey FastCtx：请改用 `mcp__codey_fastctx__grep`；仅当该工具不可用时，才以 `# codey-fastctx-fallback` 作为命令首行重试。"
+            "Codey FastCtx：请改用 `codey_fastctx.grep`；仅当该工具不可用时，才以 `# codey-fastctx-fallback` 作为命令首行重试。"
         );
     }
 
@@ -671,7 +671,7 @@ mod tests {
                 json!({"command": "cat src/main.rs"}),
             ] {
                 let output = handle_hook(&tool_hook_input(tool_name, arguments));
-                assert!(assert_denied(&output).contains("mcp__codey_fastctx__"));
+                assert!(assert_denied(&output).contains("codey_fastctx."));
             }
             for command in [
                 "cargo test",
@@ -703,7 +703,7 @@ mod tests {
                 json!({ "server": server, "uri": uri }),
             ));
             let reason = assert_denied(&output);
-            assert!(reason.contains("mcp__codey_fastctx__inspect_local_file"));
+            assert!(reason.contains("codey_fastctx.inspect_local_file"));
             assert!(reason.contains("成功资源发现返回的真实值"));
         }
     }
@@ -754,7 +754,7 @@ mod tests {
             ));
             let reason = assert_denied(&output);
             assert!(reason.contains("direct-only 边界"), "{reason}");
-            assert!(reason.contains("mcp__codey_fastctx__inspect_local_file"));
+            assert!(reason.contains("codey_fastctx.inspect_local_file"));
         }
     }
 

@@ -17,6 +17,7 @@ mod config_repair;
 mod conversation_git;
 mod diagnostics;
 mod extensions;
+mod fastctx_native;
 mod models;
 mod native_plugins;
 mod official_accounts;
@@ -156,6 +157,7 @@ pub struct AppState {
     account_usage_cache: Arc<Mutex<account_usage::AccountUsageCaches>>,
     pub runtime: Mutex<Option<Arc<CodeyRuntime>>>,
     mcp_scheduler: Mutex<Option<crate::mcp_scheduler::Scheduler>>,
+    fastctx_native: crate::fastctx_native::Manager,
     runtime_operation: Mutex<()>,
     diagnostic_storage_operation: Mutex<()>,
     builtin_tools: builtin_tools::ToolState,
@@ -288,6 +290,7 @@ impl Default for AppState {
             account_usage_cache: Arc::new(Mutex::new(account_usage::AccountUsageCaches::default())),
             runtime: Mutex::new(None),
             mcp_scheduler: Mutex::new(None),
+            fastctx_native: crate::fastctx_native::Manager::default(),
             runtime_operation: Mutex::new(()),
             diagnostic_storage_operation: Mutex::new(()),
             builtin_tools: builtin_tools::ToolState::default(),
@@ -1183,6 +1186,9 @@ pub async fn invoke_api(state: &Arc<AppState>, command: &str, args: Value) -> Va
         "plugin_marketplace_status" => plugin_marketplace_status().await,
         "codex_extensions" => extensions::invoke(state, &args).await,
         "builtin_tools" => builtin_tools::invoke(state, &args).await,
+        "get_fastctx_native_tools" | "call_fastctx_native_tool" | "cancel_fastctx_native_tool" => {
+            fastctx_native::invoke(state, command, &args).await
+        }
         "list_codex_sessions" | "delete_codex_sessions" => {
             sessions::invoke(state, command, &args).await
         }

@@ -71,7 +71,8 @@ test("CodeyX keeps FastCtx in the dedicated sidecar", async () => {
   const configPatchSource = `${configSource}\n${fastctxSource}`;
 
   assert.match(manifest, /name = "codey-fastctx"/);
-  assert.match(sidecarSource, /fastctx::cli::run_server/);
+  assert.match(sidecarSource, /codey_fastctx::native::run/);
+  assert.doesNotMatch(sidecarSource, /fastctx::cli::run_server|--codey-fastctx-(?:owned-)?mcp/);
   assert.match(sidecarSource, /fastctx::cli::run\(\)/);
   assert.match(sidecarSource, /runtime-bootstrap/);
   assert.match(sidecarSource, /runtime-host/);
@@ -84,5 +85,7 @@ test("CodeyX keeps FastCtx in the dedicated sidecar", async () => {
   assert.match(configPatchSource, /CODEY_FASTCTX_SERVER_ID: &str = "codey_fastctx"/);
   assert.match(configPatchSource, /CODEY_FASTCTX_NAMESPACE: &str = "mcp__codey_fastctx"/);
   assert.match(configPatchSource, /FASTCTX_TOKEN_BUDGET/);
-  assert.match(configPatchSource, /configured_user_fastctx_server_id\(doc\)\.is_some\(\)[\s\S]*disable_fast_context_tools\(doc\);[\s\S]*return Ok\(None\)/);
+  assert.match(configPatchSource, /configured_user_fastctx_server_id\(doc\)\.is_some\(\)/);
+  assert.match(configPatchSource, /pub\(super\) fn native_environment/);
+  assert.doesNotMatch(fastctxSource, /server\["command"\] =|server\["args"\] =/);
 });
