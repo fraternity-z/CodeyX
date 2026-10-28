@@ -243,6 +243,43 @@ async fn mcp_scheduler_expands_caps_and_returns_to_base() {
 }
 
 #[tokio::test(start_paused = true)]
+async fn mcp_scheduler_owned_fastctx_expires_last_idle_slot_but_keeps_busy_calls() {
+    let mut pool = pool(json!({"args":["--codey-fastctx-mcp"]}), 1);
+    Arc::get_mut(&mut pool).unwrap().registration.id = "codey_fastctx".into();
+    let busy = pool.acquire().await.unwrap();
+    tokio::time::advance(IDLE).await;
+    assert_eq!(pool.shrink(false).await, 0);
+    assert_eq!(pool.slots.lock().unwrap().len(), 1);
+    drop(busy);
+    tokio::time::advance(IDLE - Duration::from_millis(1)).await;
+    assert_eq!(pool.shrink(false).await, 0);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    assert_eq!(pool.shrink(false).await, 1);
+    assert!(pool.slots.lock().unwrap().is_empty());
+    let restarted = pool.acquire().await.unwrap();
+    assert_eq!(pool.slots.lock().unwrap().len(), 1);
+    drop(restarted);
+    close(&pool).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn mcp_scheduler_other_servers_keep_last_idle_slot() {
+    for (id, args) in [
+        ("fixture", json!([])),
+        ("codey_fastctx", json!([])),
+        ("fixture", json!(["--codey-fastctx-mcp"])),
+    ] {
+        let mut pool = pool(json!({"args":args}), 1);
+        Arc::get_mut(&mut pool).unwrap().registration.id = id.into();
+        drop(pool.acquire().await.unwrap());
+        tokio::time::advance(IDLE).await;
+        assert_eq!(pool.shrink(false).await, 0, "{id}");
+        assert_eq!(pool.slots.lock().unwrap().len(), 1);
+        close(&pool).await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn mcp_scheduler_fifo_survives_cancelled_waiter_and_prevents_barging() {
     let pool = pool(json!({}), 1);
     let running = pool.acquire().await.unwrap();
@@ -359,7 +396,8 @@ async fn mcp_scheduler_owned_fastctx_releases_real_engine() {
     assert!(first["result"].to_string().contains("sample.txt"));
     let slot = pool.slots.lock().unwrap()[0].clone();
     let first_pid = slot.worker.lock().await.as_ref().unwrap().process.id();
-    assert_eq!(pool.shrink(true).await, 1);
+    *slot.used.lock().unwrap() = Instant::now() - IDLE;
+    assert_eq!(pool.shrink(false).await, 1);
     assert!(!slot.is_live());
     let second = call(&pool, params).await.unwrap();
     assert_eq!(second["result"]["isError"], false, "{second}");

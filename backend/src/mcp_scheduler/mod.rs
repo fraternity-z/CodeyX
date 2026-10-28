@@ -326,6 +326,11 @@ impl Drop for Queued<'_> {
 }
 
 impl Pool {
+    fn owns_fastctx_engine(&self) -> bool {
+        self.registration.id == "codey_fastctx"
+            && self.registration.config["args"] == json!(["--codey-fastctx-mcp"])
+    }
+
     async fn acquire(&self) -> Result<Reservation<'_>> {
         let previous = self.queued.fetch_add(1, Ordering::AcqRel);
         let _queued = Queued(&self.queued);
@@ -419,7 +424,8 @@ impl Pool {
                 if !slots[index].busy.load(Ordering::Acquire)
                     && (release_all
                         || self.stopped.load(Ordering::Acquire)
-                        || (index > 0 && slots[index].used.lock().unwrap().elapsed() >= IDLE))
+                        || ((index > 0 || self.owns_fastctx_engine())
+                            && slots[index].used.lock().unwrap().elapsed() >= IDLE))
                 {
                     removed.push(slots.remove(index));
                 }
@@ -466,7 +472,7 @@ impl Worker {
     async fn start(pool: &Pool) -> Result<Self> {
         tokio::time::timeout(startup_timeout(&pool.registration.config), async {
             let mut config = pool.registration.config.clone();
-            if pool.registration.id == "codey_fastctx" && config["args"] == json!(["--codey-fastctx-mcp"]) {
+            if pool.owns_fastctx_engine() {
                 config["args"] = json!(["--codey-fastctx-owned-mcp"]);
             }
             let mut process = process::Process::spawn(&config, &pool.cwd, &pool.env).await?;
