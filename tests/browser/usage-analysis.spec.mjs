@@ -80,14 +80,17 @@ for (const theme of ["light", "dark"]) test(`日历热力图在${theme}主题下
   await page.locator(".usage-heatmap").screenshot({ path: `output/playwright/usage-heatmap-${theme}-narrow.png` });
 });
 
-test("范围切换忽略旧结果，失败可重试，刷新与图表接线保持正常", async ({ page }) => {
+test("范围切换串行读取最新条件，失败可重试，刷新与图表接线保持正常", async ({ page }) => {
   await openUsage(page);
   await expect(page.getByRole("heading", { name: "用量分析", exact: true })).toBeFocused();
   await changeRange(page, "近 30 天");
+  await changeRange(page, "全部历史");
+  await changeRange(page, "近 30 天");
+  expect(await page.evaluate(() => window.usageBehavior.calls.length)).toBe(1);
+  await complete(page, 0);
   await expect.poll(() => page.evaluate(() => window.usageBehavior.calls.length)).toBe(2);
   const query = await page.evaluate(() => window.usageBehavior.calls[1]);
   expect(query.toUnixMs - query.fromUnixMs).toBe(30 * 86_400_000);
-  await complete(page, 0);
   await expect(page.getByText("正在统计用量…", { exact: true })).toBeVisible();
   await complete(page, 1, "测试：统计服务暂不可用");
   await expect(page.getByRole("alert")).toContainText("测试：统计服务暂不可用");

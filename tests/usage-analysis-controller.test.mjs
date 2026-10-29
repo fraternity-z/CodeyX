@@ -53,23 +53,37 @@ test("统计请求固定当前时间快照，重复刷新合并，全部历史�
 
 test("切换范围清空旧结果，过期成功、错误和 finally 不覆盖当前读取", async t => {
   const browser = installControllerWindow(t);
-  for (const failed of [false, true]) for (const finishOldFirst of [false, true]) {
+  for (const failed of [false, true]) {
     const h = fixture(); h.render(); await h.flush();
     h.render().changeRange("30d"); await h.flush();
+    assert.equal(h.calls.length, 1);
+    assert.equal(browser.timers.size, 1);
+    assert.deepEqual(h.render().state, { loading: true, data: null, error: "" });
+    if (failed) h.calls[0].reject(new Error("旧范围失败")); else h.calls[0].resolve(stats(7));
+    await h.flush();
     assert.equal(h.calls.length, 2);
     assert.equal(h.calls[1].args.toUnixMs - h.calls[1].args.fromUnixMs, 30 * dayMs);
     assert.deepEqual(h.render().state, { loading: true, data: null, error: "" });
-    if (!finishOldFirst) { h.calls[1].resolve(stats(30)); await h.flush(); }
-    if (failed) h.calls[0].reject(new Error("旧范围失败")); else h.calls[0].resolve(stats(7));
-    await h.flush();
-    if (finishOldFirst) {
-      assert.deepEqual(h.render().state, { loading: true, data: null, error: "" });
-      h.render().reload(); await h.flush(); assert.equal(h.calls.length, 2);
-      h.calls[1].resolve(stats(30)); await h.flush();
-    }
+    h.render().reload(); await h.flush(); assert.equal(h.calls.length, 2);
+    h.calls[1].resolve(stats(30)); await h.flush();
     assert.deepEqual(h.render().state, { loading: false, data: stats(30), error: "" });
     h.unmount(); assert.equal(browser.timers.size, 0);
   }
+});
+
+test("连续切换仅串行执行在途和最新范围，跳过其余待执行读取", async t => {
+  const browser = installControllerWindow(t);
+  const h = fixture(); h.render(); await h.flush();
+  for (const range of ["30d", "all", "7d", "30d", "all"]) {
+    h.render().changeRange(range); await h.flush();
+    assert.equal(h.calls.length, 1);
+  }
+  h.calls[0].resolve(stats(7)); await h.flush();
+  assert.equal(h.calls.length, 2);
+  assert.deepEqual(h.calls[1].args, { groupBy: "model", groupSort: "tokens", includeDailyTrend: true, allTime: true });
+  h.calls[1].resolve(stats(100)); await h.flush();
+  assert.deepEqual(h.render().state, { loading: false, data: stats(100), error: "" });
+  assert.equal(h.calls.length, 2); assert.equal(browser.timers.size, 0); h.unmount();
 });
 
 test("未开始的过期任务不发请求，隐藏禁用动作，重开保留范围并更新窗口", async t => {
@@ -89,21 +103,37 @@ test("未开始的过期任务不发请求，隐藏禁用动作，重开保留�
   h.unmount(); assert.equal(browser.timers.size, 0);
 });
 
-test("隐藏清理计时器并作废在途响应，重开后旧请求不能结束新的加载", async t => {
+test("隐藏作废在途响应并保留队列超时，重开后旧请求不能结束新的加载", async t => {
   const browser = installControllerWindow(t);
   for (const failed of [false, true]) {
     const h = fixture(); h.render(); await h.flush();
     h.props.active = false; const hidden = h.render();
-    assert.equal(browser.timers.size, 0); assert.equal(hidden.state.loading, false);
+    assert.equal(browser.timers.size, 1); assert.equal(hidden.state.loading, false);
     hidden.changeRange("all"); hidden.reload(); await h.flush(); assert.equal(h.calls.length, 1);
-    h.props.active = true; h.render(); await h.flush(); assert.equal(h.calls.length, 2);
+    h.props.active = true; h.render(); await h.flush(); assert.equal(h.calls.length, 1);
     if (failed) h.calls[0].reject("隐藏后的失败"); else h.calls[0].resolve(stats(99));
     await h.flush(); assert.deepEqual(h.render().state, { loading: true, data: null, error: "" });
+    assert.equal(h.calls.length, 2);
     h.render().reload(); await h.flush(); assert.equal(h.calls.length, 2);
     h.calls[1].resolve(stats(8)); await h.flush();
     assert.deepEqual(h.render().state, { loading: false, data: stats(8), error: "" });
     h.unmount(); assert.equal(browser.timers.size, 0);
   }
+});
+
+test("在途请求悬挂时，超时释放队列并只执行最新范围，迟到结果不回写", async t => {
+  const browser = installControllerWindow(t);
+  const h = fixture(); h.render(); await h.flush();
+  h.render().changeRange("30d"); await h.flush();
+  h.render().changeRange("all"); await h.flush();
+  assert.equal(h.calls.length, 1); assert.equal(browser.timers.size, 1);
+  browser.tick(); await h.flush();
+  assert.equal(h.calls.length, 2);
+  assert.deepEqual(h.calls[1].args, { groupBy: "model", groupSort: "tokens", includeDailyTrend: true, allTime: true });
+  h.calls[1].resolve(stats(100)); await h.flush();
+  h.calls[0].resolve(stats(7)); await h.flush();
+  assert.deepEqual(h.render().state, { loading: false, data: stats(100), error: "" });
+  assert.equal(h.calls.length, 2); assert.equal(browser.timers.size, 0); h.unmount();
 });
 
 test("超时停止加载并允许显式重试，迟到响应不能覆盖新请求或释放其防重锁", async t => {
@@ -143,7 +173,8 @@ test("同步异常和异步失败均可重试，不可查询结果保留原因�
 test("卸载清理定时器，保存的动作和迟到结果都不能回写；未发出的请求被跳过", async t => {
   const browser = installControllerWindow(t);
   for (const failed of [false, true]) {
-    const h = fixture(); const c = h.render(); await h.flush(); h.unmount();
+    const h = fixture(); const c = h.render(); await h.flush();
+    c.changeRange("30d"); await h.flush(); h.unmount();
     assert.equal(browser.timers.size, 0); c.reload(); c.changeRange("all");
     if (failed) h.calls[0].reject(new Error("卸载后失败")); else h.calls[0].resolve(stats(99));
     await h.flush(); assert.equal(h.writesAfterUnmount, 0); assert.equal(h.calls.length, 1);

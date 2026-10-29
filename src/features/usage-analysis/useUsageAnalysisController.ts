@@ -12,10 +12,12 @@ export function useUsageAnalysisController(active: boolean) {
   const mounted = useRef(false);
   const generation = useRef(0);
   const pending = useRef(false);
+  const statsTask = useRef(Promise.resolve());
+  const statsTimer = useRef<number | undefined>(undefined);
 
   useEffect(() => {
     mounted.current = true;
-    return () => { mounted.current = false; };
+    return () => { mounted.current = false; window.clearTimeout(statsTimer.current); };
   }, []);
   useEffect(() => {
     if (!active) {
@@ -30,10 +32,11 @@ export function useUsageAnalysisController(active: boolean) {
     const current = () => !cancelled && version === generation.current;
     pending.current = true;
     setState({ loading: true, data: null, error: "" });
-    void Promise.resolve().then(async () => {
+    statsTask.current = statsTask.current.then(async () => {
       if (!current()) return;
       const timeout = new Promise<never>((_, reject) => {
         timer = window.setTimeout(() => reject(new Error("统计请求超时，请稍后重试。")), 30_000);
+        statsTimer.current = timer;
       });
       try {
         const data = await Promise.race([usageAnalysisRequests.stats(query), timeout]);
@@ -45,8 +48,8 @@ export function useUsageAnalysisController(active: boolean) {
         if (current()) pending.current = false;
       }
     });
-    // 隐藏和卸载只撤销结果采纳并清理定时器，不取消或重放已发出的后端查询。
-    return () => { cancelled = true; window.clearTimeout(timer); };
+    // 失效任务保留超时以释放读取队列；超时只停止等待，不取消后端执行。
+    return () => { cancelled = true; };
   }, [active, range, revision]);
 
   const changeRange = useStableEvent((value: string | number | null) => {
