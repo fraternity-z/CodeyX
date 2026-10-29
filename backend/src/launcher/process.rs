@@ -175,6 +175,27 @@ impl StartupInjectionMode {
             Self::CliWrapper => "cli",
         }
     }
+
+    fn performance_status(self, fuses: crate::electron_fuses::ElectronFuses) -> (String, String) {
+        if self != Self::CliWrapper {
+            return ("ready".into(), "Codex 启动成功".into());
+        }
+        let reason = if fuses.node_cli_inspect == crate::electron_fuses::FuseState::Disabled
+            && fuses.node_options == crate::electron_fuses::FuseState::Disabled
+        {
+            "当前安装包已关闭 Inspector 与 NODE_OPTIONS 主进程入口".to_string()
+        } else {
+            format!(
+                "主进程注入未确认（Inspector：{}，NODE_OPTIONS：{}）",
+                fuses.node_cli_inspect.as_str(),
+                fuses.node_options.as_str(),
+            )
+        };
+        (
+            "degraded".into(),
+            format!("Codex 已通过 CLI 兼容入口启动；{reason}；主进程优化尚未确认生效"),
+        )
+    }
 }
 
 /// A packaged Electron runtime may drop the inherited `NODE_OPTIONS`, which
@@ -502,8 +523,8 @@ pub(super) async fn spawn_codex(
             match startup_result {
                 Ok(mode) => {
                     spawned.startup_injection_mode = mode.as_str().to_string();
-                    spawned.performance_status = "ready".to_string();
-                    spawned.performance_detail = "Codex 启动成功".to_string();
+                    (spawned.performance_status, spawned.performance_detail) =
+                        mode.performance_status(fuses);
                     return Ok(spawned);
                 }
                 Err(error) => {
@@ -710,8 +731,8 @@ pub(super) async fn spawn_codex(
         match startup_result {
             Ok(mode) => {
                 spawned.startup_injection_mode = mode.as_str().to_string();
-                spawned.performance_status = "ready".to_string();
-                spawned.performance_detail = "Codex 启动成功".to_string();
+                (spawned.performance_status, spawned.performance_detail) =
+                    mode.performance_status(fuses);
                 Ok(spawned)
             }
             Err(error) => {
@@ -2479,6 +2500,61 @@ fn spawn_command(command: Vec<String>, environment: &[(String, String)]) -> Resu
 #[cfg(test)]
 mod cli_wrapper_tests {
     use super::*;
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn confirmed_main_process_entries_report_ready_even_when_fuse_detection_is_unknown() {
+        let fuses = crate::electron_fuses::ElectronFuses {
+            node_cli_inspect: crate::electron_fuses::FuseState::Unknown,
+            node_options: crate::electron_fuses::FuseState::Unknown,
+        };
+        for mode in [
+            StartupInjectionMode::Inspector,
+            StartupInjectionMode::NodeRequire,
+        ] {
+            assert_eq!(
+                mode.performance_status(fuses),
+                ("ready".into(), "Codex 启动成功".into()),
+            );
+        }
+    }
+
+    #[cfg(any(windows, target_os = "macos"))]
+    #[test]
+    fn cli_fallback_reports_degradation_without_misidentifying_available_or_unknown_fuses() {
+        use crate::electron_fuses::{ElectronFuses, FuseState};
+
+        for inspect in [
+            FuseState::Enabled,
+            FuseState::Disabled,
+            FuseState::Removed,
+            FuseState::Unknown,
+        ] {
+            for options in [
+                FuseState::Enabled,
+                FuseState::Disabled,
+                FuseState::Removed,
+                FuseState::Unknown,
+            ] {
+                let (status, detail) =
+                    StartupInjectionMode::CliWrapper.performance_status(ElectronFuses {
+                        node_cli_inspect: inspect,
+                        node_options: options,
+                    });
+                assert_eq!(status, "degraded");
+                assert!(detail.contains("CLI 兼容入口"));
+                assert!(detail.contains("主进程优化尚未确认生效"));
+                assert!(!detail.contains("Codex 启动成功"));
+                if inspect == FuseState::Disabled && options == FuseState::Disabled {
+                    assert!(detail.contains("安装包已关闭"));
+                } else {
+                    assert!(!detail.contains("安装包已关闭"));
+                    assert!(detail.contains(&format!("Inspector：{}", inspect.as_str())));
+                    assert!(detail.contains(&format!("NODE_OPTIONS：{}", options.as_str())));
+                }
+            }
+        }
+    }
 
     #[cfg(windows)]
     #[test]

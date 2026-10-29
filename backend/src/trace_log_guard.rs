@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
@@ -21,6 +22,72 @@ pub struct TraceLogGuardReport {
 impl TraceLogGuardReport {
     pub fn protection_active(&self, requested: bool) -> bool {
         requested && self.log_tables_found > 0
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TraceLogGuardStatsSnapshot {
+    pub pending: bool,
+    pub captured_at: u64,
+    pub last_successful_at: Option<u64>,
+    pub databases_found: usize,
+    pub log_tables_found: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TraceLogGuardStatsHandle {
+    snapshot: Arc<RwLock<TraceLogGuardStatsSnapshot>>,
+}
+
+impl TraceLogGuardStatsHandle {
+    pub fn snapshot(&self) -> TraceLogGuardStatsSnapshot {
+        self.snapshot
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    pub fn begin_refresh(&self) {
+        self.snapshot
+            .write()
+            .unwrap_or_else(|error| error.into_inner())
+            .pending = true;
+    }
+
+    pub fn record_success(&self, report: &TraceLogGuardReport) {
+        let mut current = self
+            .snapshot
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        let captured_at = crate::fs_util::timestamp_secs();
+        *current = TraceLogGuardStatsSnapshot {
+            captured_at,
+            last_successful_at: Some(captured_at),
+            databases_found: report.databases_found,
+            log_tables_found: report.log_tables_found,
+            ..TraceLogGuardStatsSnapshot::default()
+        };
+    }
+
+    pub fn record_failure(&self, error: String) {
+        let mut current = self
+            .snapshot
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        current.pending = false;
+        current.captured_at = crate::fs_util::timestamp_secs();
+        current.errors = vec![error];
+    }
+}
+
+impl Serialize for TraceLogGuardStatsHandle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        self.snapshot().serialize(serializer)
     }
 }
 
@@ -245,6 +312,32 @@ fn collect_log_databases(directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_snapshot_keeps_last_success_on_failure_and_clears_error_on_recovery() {
+        let stats = TraceLogGuardStatsHandle::default();
+        let report = TraceLogGuardReport {
+            databases_found: 2,
+            log_tables_found: 1,
+            changed: 0,
+        };
+        stats.record_success(&report);
+        let successful_at = stats.snapshot().last_successful_at;
+        assert!(successful_at.is_some());
+        stats.begin_refresh();
+        assert!(stats.snapshot().pending);
+        stats.record_failure("database unavailable".into());
+        let failed = stats.snapshot();
+        assert!(!failed.pending);
+        assert_eq!(failed.last_successful_at, successful_at);
+        assert_eq!(failed.errors, ["database unavailable"]);
+        stats.record_success(&report);
+        assert!(stats.snapshot().errors.is_empty());
+        let json = serde_json::to_value(stats).unwrap();
+        assert_eq!(json["databasesFound"], 2);
+        assert_eq!(json["logTablesFound"], 1);
+        assert!(json["lastSuccessfulAt"].as_u64().is_some());
+    }
 
     fn create_log_database(path: &Path) {
         if let Some(parent) = path.parent() {

@@ -26,6 +26,7 @@ mod prompt_optimization;
 mod request_logs;
 mod runtime;
 mod sessions;
+mod storage_guards;
 mod updates;
 mod webhooks;
 mod wechat_claw;
@@ -102,9 +103,7 @@ use crate::config::{
     PromptOptimizationConfig, ProviderProfile, SUBAGENT_ROLE_DEFAULT, SUBAGENT_ROLE_IDS,
     SubagentRoleConfig, validate_provider_profiles,
 };
-use crate::crashpad_pending_guard::{
-    self, CrashpadPendingStatsHandle, CrashpadPendingStatsSnapshot,
-};
+use crate::crashpad_pending_guard::{self, CrashpadPendingStatsHandle};
 use crate::error_log;
 #[cfg(windows)]
 use crate::launcher::{CODEX_APP_NOT_FOUND_ERROR, CODEX_APP_PATH_INVALID_ERROR};
@@ -162,6 +161,8 @@ pub struct AppState {
     diagnostic_storage_operation: Mutex<()>,
     builtin_tools: builtin_tools::ToolState,
     trace_log_write_protection_active: AtomicBool,
+    pub(crate) trace_log_guard_stats: trace_log_guard::TraceLogGuardStatsHandle,
+    trace_log_guard_watcher: Mutex<Option<storage_guards::TraceLogGuardWatcher>>,
     pub crashpad_pending_stats: CrashpadPendingStatsHandle,
     pub startup_error: RwLock<Option<String>>,
     /// Kept apart from `startup_error`, which each launch overwrites and hot
@@ -295,6 +296,8 @@ impl Default for AppState {
             diagnostic_storage_operation: Mutex::new(()),
             builtin_tools: builtin_tools::ToolState::default(),
             trace_log_write_protection_active: AtomicBool::new(false),
+            trace_log_guard_stats: trace_log_guard::TraceLogGuardStatsHandle::default(),
+            trace_log_guard_watcher: Mutex::new(None),
             crashpad_pending_stats: CrashpadPendingStatsHandle::idle(protect_crashpad_pending),
             startup_error: RwLock::new(None),
             config_load_error,
@@ -1830,11 +1833,14 @@ async fn commit_codey_config_locked(
         match configure_trace_log_guard(home.clone(), disable_writes).await {
             Ok(report) => Some(report),
             Err(error) => {
-                let error =
-                    rollback_trace_log_guard(home, previous.disable_trace_log_writes, error).await;
-                state
-                    .trace_log_write_protection_active
-                    .store(false, Ordering::Release);
+                let error = rollback_trace_log_guard(
+                    home,
+                    previous.disable_trace_log_writes,
+                    error,
+                    &state.trace_log_write_protection_active,
+                    &state.trace_log_guard_stats,
+                )
+                .await;
                 error_log::record_failure(
                     "patch_failed",
                     "configure_trace_log_guard",
@@ -1858,11 +1864,10 @@ async fn commit_codey_config_locked(
                     codex_home().to_path_buf(),
                     previous.disable_trace_log_writes,
                     error,
+                    &state.trace_log_write_protection_active,
+                    &state.trace_log_guard_stats,
                 )
                 .await;
-                state
-                    .trace_log_write_protection_active
-                    .store(false, Ordering::Release);
                 return Err(error);
             }
             return Err(error);
@@ -1876,6 +1881,7 @@ async fn commit_codey_config_locked(
         }
     }
     if let Some(report) = trace_guard_report {
+        state.trace_log_guard_stats.record_success(&report);
         state.trace_log_write_protection_active.store(
             report.protection_active(config.disable_trace_log_writes),
             Ordering::Release,
@@ -2141,10 +2147,20 @@ async fn rollback_trace_log_guard(
     home: PathBuf,
     previous_disable_writes: bool,
     primary_error: String,
+    protection_active: &AtomicBool,
+    stats: &trace_log_guard::TraceLogGuardStatsHandle,
 ) -> String {
-    match configure_trace_log_guard(home, previous_disable_writes).await {
-        Ok(_) => primary_error,
+    let error = match configure_trace_log_guard(home, previous_disable_writes).await {
+        Ok(report) => {
+            protection_active.store(
+                report.protection_active(previous_disable_writes),
+                Ordering::Release,
+            );
+            stats.record_success(&report);
+            primary_error
+        }
         Err(rollback_error) => {
+            protection_active.store(false, Ordering::Release);
             error_log::record_failure(
                 "restore_failed",
                 "rollback_trace_log_guard",
@@ -2156,8 +2172,13 @@ async fn rollback_trace_log_guard(
             );
             format!("{primary_error}；回滚 Trace 日志保护也失败：{rollback_error}")
         }
-    }
+    };
+    stats.record_failure(error.clone());
+    error
 }
+
+#[cfg(test)]
+mod trace_guard_tests;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 enum RouteRequestLogHotReloadStatus {
@@ -2322,11 +2343,10 @@ fn schedule_crashpad_pending_refresh(state: &Arc<AppState>, protection_enabled: 
                 stats.replace(run.snapshot);
             }
             Err(error) => {
-                let mut snapshot = CrashpadPendingStatsSnapshot::idle(protection_enabled);
-                snapshot
-                    .errors
-                    .push(format!("Crashpad 磁盘保护任务异常退出：{error}"));
-                stats.replace(snapshot);
+                stats.record_failure(
+                    protection_enabled,
+                    format!("Crashpad 磁盘保护任务异常退出：{error}"),
+                );
             }
         }
     });

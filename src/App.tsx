@@ -162,6 +162,7 @@ export function App({
       activeNotificationChannelCount: status.activeNotificationChannelCount,
       traceLogWriteProtectionActive: status.traceLogWriteProtectionActive,
       crashpadDiskProtectionActive: status.crashpadDiskProtectionActive,
+      featurePolicy: status.featurePolicy,
     }),
     [
       status.running,
@@ -178,6 +179,7 @@ export function App({
       status.activeNotificationChannelCount,
       status.traceLogWriteProtectionActive,
       status.crashpadDiskProtectionActive,
+      status.featurePolicy,
     ],
   );
   const {
@@ -638,6 +640,7 @@ export function App({
               <FeaturePolicyCard
                 active={active && (!embedded || modalVisible)}
                 config={config}
+                runtimeStatus={status}
                 isMacClient={status.clientPlatform === "macos"}
                 isWindowsClient={status.clientPlatform === "windows"}
                 cleanupBusy={busy === "clear-diagnostic-storage"}

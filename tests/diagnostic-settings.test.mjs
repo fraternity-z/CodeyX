@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 
 test("settings reports startup health and the confirmed main-process injection mode", async () => {
   const [
@@ -21,9 +21,9 @@ test("settings reports startup health and the confirmed main-process injection m
       new URL("../backend/src/launcher/process.rs", import.meta.url),
       "utf8",
     ),
-    loadTypeScriptModule(
+    createModuleGraph(
       new URL("../src/runtimeStatusPresentation.ts", import.meta.url),
-    ),
+    ).exports,
   ]);
   const launcherSource = `${launcherRootSource}\n${launcherProcessSource}`;
 

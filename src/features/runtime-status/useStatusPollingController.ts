@@ -1,7 +1,8 @@
 import { useEffect, useRef } from "react";
 import type { RuntimeStatus } from "../../App.types";
 import { createStatusPollTask, hasPendingBuiltinInjection, hasPendingConfigApply, INJECTION_PROBE_DELAYS_MS,
-  INJECTION_PROBE_MAX_DURATION_MS, STATUS_POLL_MAX_CONSECUTIVE_ERRORS, STATUS_POLL_MAX_DURATION_MS } from "./state";
+  INJECTION_PROBE_MAX_DURATION_MS, STATUS_POLL_MAX_CONSECUTIVE_ERRORS, STATUS_POLL_MAX_DURATION_MS,
+  FEATURE_POLICY_POLL_INTERVAL_MS } from "./state";
 import type { StatusPollClock, StatusPollScheduler, StatusPollTask } from "./types";
 
 type Options = {
@@ -19,6 +20,7 @@ export function useStatusPollingController({ active, revision, status, restartSt
   const scheduler = schedulerRef.current;
   const builtinInjectionProbePending = hasPendingBuiltinInjection(status);
   const configApplyPending = hasPendingConfigApply(status);
+  const hasPolicyStatus = status.featurePolicy !== undefined;
 
   useEffect(() => () => scheduler.clear(), [active, revision, scheduler]);
   useEffect(() => {
@@ -54,6 +56,18 @@ export function useStatusPollingController({ active, revision, status, restartSt
     scheduler.add(task);
     return () => scheduler.remove(task);
   }, [active, revision, configApplyPending, status.configApply?.settingsRevision, restartStatusError, scheduler]);
+
+  useEffect(() => {
+    if (!active || !status.running || !hasPolicyStatus || restartStatusError) return;
+    const task = createStatusPollTask({
+      kind: "policy", delays: [FEATURE_POLICY_POLL_INTERVAL_MS],
+      pending: next => next.running && next.featurePolicy !== undefined,
+      refreshesInjectionStatus: false,
+      onExhausted: () => setRestartStatusError("暂时无法更新功能策略状态，请重新查询状态"),
+    }, Infinity, Date.now());
+    scheduler.add(task);
+    return () => scheduler.remove(task);
+  }, [active, revision, status.running, hasPolicyStatus, restartStatusError, scheduler]);
 
   return scheduler;
 }

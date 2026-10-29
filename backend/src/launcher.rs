@@ -1084,11 +1084,7 @@ async fn await_initial_storage_guards(
                     "taskJoinFailed": true,
                 }),
             );
-            let mut snapshot = crashpad_pending_guard::CrashpadPendingStatsSnapshot::idle(
-                protect_crashpad_pending,
-            );
-            snapshot.errors.push(error);
-            crashpad_pending_stats.replace(snapshot);
+            crashpad_pending_stats.record_failure(protect_crashpad_pending, error);
         }
     }
     trace_result
@@ -2489,6 +2485,10 @@ fn spawn_crashpad_guard_watcher(
                     let _ = stats.replace_if_idle(run.snapshot);
                 }
                 Err(error) => {
+                    stats.record_failure(
+                        enabled.load(Ordering::Acquire),
+                        format!("Crashpad 磁盘保护任务异常退出：{error}"),
+                    );
                     error_log::record_failure_async(
                         "cleanup_failed",
                         "enforce_crashpad_pending_limit",

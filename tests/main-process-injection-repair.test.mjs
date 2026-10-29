@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 
-const { canRepairMainProcessInjection, isMainProcessInjectionConfirmed } = await loadTypeScriptModule(
+const { canRepairMainProcessInjection, isMainProcessInjectionConfirmed } = createModuleGraph(
   new URL("../src/runtimeStatusPresentation.ts", import.meta.url),
-);
+).exports;
 const failed = { running: true, clientPlatform: "windows", maintenance: { startupInjectionMode: "cli" } };
 
 test("binary repair is offered only for a running Windows CLI fallback", () => {

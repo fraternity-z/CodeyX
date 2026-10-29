@@ -5,6 +5,7 @@ import {
 
 import type {
   Config,
+  RuntimeStatus,
 } from "./App.types";
 import {
   Button,
@@ -13,6 +14,8 @@ import {
 } from "./components/ui";
 import type { DiagnosticStorageTarget } from "./diagnosticStorage";
 import { NotificationChannelsCard, type NotificationChannel } from "./features/notifications";
+import { featurePolicyStatus, type FeaturePolicyKey } from "./features/feature-policy";
+import { formatBytes, formatTimestamp } from "./formatters";
 
 const GPU_LAUNCH_MODES = [
   { value: "off", label: "关闭" },
@@ -28,6 +31,7 @@ export type { SubagentPolicyCardProps } from "./features/subagents";
 type FeaturePolicyCardProps = {
   active?: boolean;
   config: Config;
+  runtimeStatus?: RuntimeStatus;
   isMacClient: boolean;
   isWindowsClient: boolean;
   cleanupBusy: boolean;
@@ -43,9 +47,46 @@ type FeaturePolicyCardProps = {
   onRequestRemoveChannel?: (channel: NotificationChannel) => void;
 };
 
+function PolicyStatus({
+  policyKey, config, runtimeStatus,
+}: {
+  policyKey: FeaturePolicyKey;
+  config: Config;
+  runtimeStatus?: RuntimeStatus;
+}) {
+  const status = featurePolicyStatus(policyKey, config, runtimeStatus);
+  const snapshot = policyKey === "disableTraceLogWrites"
+    ? runtimeStatus?.featurePolicy?.traceProtection
+    : policyKey === "protectCrashpadPending"
+      ? runtimeStatus?.featurePolicy?.crashpadProtection
+      : undefined;
+  const checkedAt = snapshot?.capturedAt ? formatTimestamp(snapshot.capturedAt * 1000) : "尚未检查";
+  const lastSuccessfulAt = snapshot?.lastSuccessfulAt ? formatTimestamp(snapshot.lastSuccessfulAt * 1000) : "尚未成功检查";
+  return (
+    <div className="mt-3 space-y-1.5 border-t border-[rgb(var(--codey-ink-rgb,0,0,0))]/8 pt-2.5" data-policy-status={policyKey}>
+      <div className="flex flex-wrap items-center gap-1.5">
+        {status.unsaved && <Badge variant="warning">未保存</Badge>}
+        <Badge variant={status.variant}>{status.label}</Badge>
+        {status.unsaved && <small>以下为当前实例状态</small>}
+      </div>
+      <small className="block break-words [overflow-wrap:anywhere]">{status.detail}</small>
+      {snapshot && (
+        <small className="block break-words [overflow-wrap:anywhere]">
+          {policyKey === "disableTraceLogWrites"
+            ? `日志表 ${runtimeStatus?.featurePolicy?.traceProtection.logTablesFound} / 数据库 ${runtimeStatus?.featurePolicy?.traceProtection.databasesFound}`
+            : `占用 ${formatBytes(runtimeStatus?.featurePolicy?.crashpadProtection.pendingBytes ?? 0)} / 上限 ${formatBytes(runtimeStatus?.featurePolicy?.crashpadProtection.hardLimitBytes ?? 0)}`}
+          {` · 最近检查：${checkedAt}`}
+          <span className="block">最近成功：{lastSuccessfulAt}</span>
+        </small>
+      )}
+    </div>
+  );
+}
+
 function FeaturePolicyCardComponent({
   active = true,
   config,
+  runtimeStatus,
   isMacClient,
   isWindowsClient,
   cleanupBusy,
@@ -76,13 +117,24 @@ function FeaturePolicyCardComponent({
             </span>
             <h3 id="runtime-title" className="settings-section-heading">Codex 功能策略</h3>
           </div>
-          <p>按需精简客户端模块和界面行为。</p>
+          <p>按需精简客户端模块和界面行为，修改后保存。</p>
         </div>
         <div className="runtime-settings">
+          {runtimeStatus?.running && runtimeStatus.maintenance?.startupInjectionMode === "cli" && (
+            <div className="mb-3 space-y-1.5 rounded-lg border border-[rgb(var(--codey-ink-rgb,0,0,0))]/10 px-3 py-2.5" data-main-injection-status="degraded">
+              <Badge variant="warning">主进程兼容模式</Badge>
+              <p className="text-xs leading-5 text-[var(--codey-muted,#6e6e73)] [overflow-wrap:anywhere]">
+                {runtimeStatus.maintenance.performanceStatus === "degraded"
+                  ? runtimeStatus.maintenance.performanceDetail || "当前使用 CLI 兼容启动，主进程补丁尚未确认。"
+                  : "当前使用 CLI 兼容启动，主进程补丁尚未确认。"}
+                {" 完整注入状态与修复选项见上方运行状态。"}
+              </p>
+            </div>
+          )}
           <div className="feature-grid">
             {/* GPU 渲染模式：仅 Windows 客户端展示 */}
             {isWindowsClient && (
-              <div className={`feature-card gpu-mode-card full-width-card ${gpuLaunchMode.value !== "off" ? "active" : ""}`}>
+              <div className={`feature-card justify-start! gpu-mode-card full-width-card ${gpuLaunchMode.value !== "off" ? "active" : ""}`}>
                 <div className="feature-card-header">
                   <div className="feature-card-title">
                     <strong>GPU 渲染模式</strong>
@@ -127,12 +179,13 @@ function FeaturePolicyCardComponent({
                         ? "启动 Codex 时附加 --disable-gpu-rasterization；仅将栅格化移到 CPU"
                         : "保持 Codex 默认 GPU 渲染，不附加诊断参数"}
                   </small>
+                  <PolicyStatus policyKey="gpuLaunchMode" config={config} runtimeStatus={runtimeStatus} />
                 </div>
               </div>
             )}
 
             <div
-              className={`feature-card ${config.slimCodexPet ? "active" : ""}`}
+              className={`feature-card justify-start! ${config.slimCodexPet ? "active" : ""}`}
             >
               <div className="feature-card-header">
                 <strong>精简 Codex 宠物模块</strong>
@@ -151,11 +204,12 @@ function FeaturePolicyCardComponent({
                     ? "隐藏宠物入口并抑制自动预热；语音功能仍按需启用"
                     : "保留 Codex 宠物的完整功能"}
                 </small>
+                <PolicyStatus policyKey="slimCodexPet" config={config} runtimeStatus={runtimeStatus} />
               </div>
             </div>
 
             <div
-              className={`feature-card ${config.disableTraceLogWrites ? "active" : ""}`}
+              className={`feature-card justify-start! ${config.disableTraceLogWrites ? "active" : ""}`}
             >
               <div className="feature-card-header">
                 <strong>Trace 日志写盘保护</strong>
@@ -185,12 +239,13 @@ function FeaturePolicyCardComponent({
               </div>
               <div className="feature-card-body">
                 <small>阻止 Trace 日志持续写入数据库影响硬盘寿命</small>
+                <PolicyStatus policyKey="disableTraceLogWrites" config={config} runtimeStatus={runtimeStatus} />
               </div>
             </div>
 
             {(isMacClient || isWindowsClient) && (
               <div
-                className={`feature-card ${config.protectCrashpadPending ? "active" : ""}`}
+                className={`feature-card justify-start! ${config.protectCrashpadPending ? "active" : ""}`}
               >
                 <div className="feature-card-header">
                   <strong>Crashpad 磁盘保护</strong>
@@ -223,12 +278,13 @@ function FeaturePolicyCardComponent({
                       ? "待处理崩溃报告超过安全上限时自动收敛，并保留最近写入"
                       : "仅显示占用和提供手动清理，不执行自动容量保护"}
                   </small>
+                  <PolicyStatus policyKey="protectCrashpadPending" config={config} runtimeStatus={runtimeStatus} />
                 </div>
               </div>
             )}
 
             <div
-              className={`feature-card ${config.hideFullAccessWarning ? "active" : ""}`}
+              className={`feature-card justify-start! ${config.hideFullAccessWarning ? "active" : ""}`}
             >
               <div className="feature-card-header">
                 <strong>屏蔽完全访问安全提示</strong>
@@ -247,6 +303,7 @@ function FeaturePolicyCardComponent({
                     ? "自动隐藏完全访问模式和 Ultra 的原生安全提示"
                     : "保留 Codex 原生安全提示"}
                 </small>
+                <PolicyStatus policyKey="hideFullAccessWarning" config={config} runtimeStatus={runtimeStatus} />
               </div>
             </div>
           </div>

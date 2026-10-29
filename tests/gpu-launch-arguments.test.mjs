@@ -35,7 +35,7 @@ test("three-position GPU slider is accessible and available only on Windows", as
   assert.match(stylesSource, /@media \(prefers-reduced-motion: reduce\)/);
   assert.match(
     appSource,
-    /<FeaturePolicyCard[\s\S]{0,200}isWindowsClient=\{status\.clientPlatform === "windows"\}/,
+    /<FeaturePolicyCard\b[^>]*isWindowsClient=\{status\.clientPlatform === "windows"\}/,
   );
   assert.match(previewSource, /gpuLaunchMode: "off" as const/);
 });

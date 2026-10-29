@@ -28,6 +28,7 @@ pub(super) async fn clear_diagnostic_storage(
     let previous_protection_active = state
         .trace_log_write_protection_active
         .load(std::sync::atomic::Ordering::Acquire);
+    let trace_guard_stats = state.trace_log_guard_stats.clone();
     let trace_task = tokio::task::spawn_blocking(move || {
         if !clear_trace {
             return (
@@ -39,6 +40,10 @@ pub(super) async fn clear_diagnostic_storage(
         }
         let before = trace_log_stats::snapshot(trace_home);
         let guard = trace_log_guard::configure(trace_home, disable_trace_writes);
+        match &guard {
+            Ok(report) => trace_guard_stats.record_success(report),
+            Err(error) => trace_guard_stats.record_failure(format!("{error:#}")),
+        }
         let trace_log_write_protection_active = guard
             .as_ref()
             .is_ok_and(|report| report.protection_active(disable_trace_writes));
@@ -82,6 +87,7 @@ pub(super) async fn clear_diagnostic_storage(
         }
         Err(error) => {
             let error = format!("Trace 日志库清理任务异常退出：{error}");
+            state.trace_log_guard_stats.record_failure(error.clone());
             error_log::record_failure(
                 "cleanup_failed",
                 "clear_diagnostic_trace_logs",
@@ -140,6 +146,7 @@ pub(super) async fn clear_diagnostic_storage(
             let mut cleanup = crashpad_pending_guard::CrashpadCleanupReport::default();
             cleanup.errors.push(error.clone());
             let mut snapshot = CrashpadPendingStatsSnapshot::idle(protect_crashpad_pending);
+            snapshot.captured_at = crate::fs_util::timestamp_secs();
             snapshot.errors.push(error);
             (cleanup, snapshot)
         }

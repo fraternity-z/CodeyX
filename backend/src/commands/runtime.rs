@@ -48,6 +48,7 @@ fn remote_compaction_status_value(
 
 mod injection_repair;
 pub(super) use injection_repair::schedule_main_process_injection_repair;
+mod feature_policy;
 
 pub(super) struct CodexAppVersionCache {
     runtime_app_path: Option<PathBuf>,
@@ -83,6 +84,8 @@ pub(super) async fn runtime_status_with_options(
     refresh_injection_status: bool,
 ) -> Result<Value, String> {
     let runtime = state.runtime.lock().await.clone();
+    let trace_watcher_active =
+        runtime.is_some() && super::storage_guards::trace_guard_watcher_running(state).await;
     // 先在无锁状态取运行时模型基线，再持配置读锁做同步比较：读守卫跨
     // await 会让排队写者阻塞所有新的桥接请求。
     let (applied_models, applied_subagent, crashpad_disk_protection_active) = match runtime.as_ref()
@@ -141,6 +144,13 @@ pub(super) async fn runtime_status_with_options(
         &config,
         runtime.as_ref().map(|runtime| &runtime.applied_config),
     );
+    let feature_policy = feature_policy::status_value(
+        &config,
+        runtime.as_ref().map(|runtime| &runtime.applied_config),
+        trace_watcher_active,
+        &state.trace_log_guard_stats.snapshot(),
+        &state.crashpad_pending_stats.snapshot(),
+    );
     let trace_log_write_protection_active = state
         .trace_log_write_protection_active
         .load(Ordering::Acquire);
@@ -171,6 +181,7 @@ pub(super) async fn runtime_status_with_options(
         "restartRequired": restart_required,
         "configApply": config_apply,
         "remoteCompaction": remote_compaction,
+        "featurePolicy": feature_policy,
         "restartInProgress": state.restart_in_progress.load(Ordering::Acquire),
     });
     if let (Some(status), Some(feature_status)) = (
@@ -364,8 +375,10 @@ async fn launch_codey_inner_locked(state: &Arc<AppState>) -> anyhow::Result<Valu
 async fn launch_codey_inner_attempt(state: &Arc<AppState>) -> anyhow::Result<Value> {
     ensure_runtime_can_start(state).map_err(anyhow::Error::msg)?;
     if state.runtime.lock().await.is_some() {
+        super::storage_guards::start_trace_guard_watcher(state).await;
         return Ok(json!({"status":"already_running"}));
     }
+    super::storage_guards::stop_trace_guard_watcher(state).await;
     #[cfg(windows)]
     ensure_windows_codex_app_path(state)
         .await
@@ -446,6 +459,7 @@ async fn launch_codey_inner_attempt(state: &Arc<AppState>) -> anyhow::Result<Val
     }
     let startup_warning = runtime.startup_warning.clone();
     *state.runtime.lock().await = Some(Arc::new(runtime));
+    super::storage_guards::start_trace_guard_watcher(state).await;
     let runtime_generation = state.runtime_generation.fetch_add(1, Ordering::AcqRel) + 1;
     super::sync_wechat_claw_service(state).await;
     if let Some(initial_scan_task) = initial_scan_task {
@@ -654,10 +668,13 @@ async fn stop_codey_runtime_locked(state: &Arc<AppState>) -> Result<Value, Strin
     super::extensions::stop_scheduler(state).await;
     super::stop_wechat_claw_service(state).await;
     stop_waiting_webhook_watcher(state).await;
+    // Finish any blocking scan before restoring this runtime's configuration.
+    super::storage_guards::stop_trace_guard_watcher(state).await;
     let runtime = state.runtime.lock().await.take();
     if let Some(runtime) = runtime {
         if let Err(error) = runtime.stop().await {
             *state.runtime.lock().await = Some(runtime);
+            super::storage_guards::start_trace_guard_watcher(state).await;
             return Err(format!("{error:#}"));
         }
     } else {
@@ -679,6 +696,7 @@ pub async fn stop_codey_runtime(state: &Arc<AppState>) -> Result<Value, String> 
 pub(crate) async fn reap_runtime_child_before_exit(state: &Arc<AppState>) -> Result<(), String> {
     let _operation = state.runtime_operation.lock().await;
     super::extensions::stop_scheduler(state).await;
+    super::storage_guards::stop_trace_guard_watcher(state).await;
     let runtime = state.runtime.lock().await.clone();
     if let Some(runtime) = runtime {
         runtime
@@ -697,6 +715,7 @@ pub(crate) async fn cleanup_failed_runtime_start(state: &Arc<AppState>) -> Resul
 
 pub async fn begin_shutdown(state: &Arc<AppState>) {
     state.shutting_down.store(true, Ordering::Release);
+    super::storage_guards::stop_trace_guard_watcher(state).await;
     let restart = state.restart_task.lock().await.take();
     if let Some(ScheduledRestart { cancel, task }) = restart {
         let _ = cancel.send(());
@@ -798,6 +817,77 @@ mod tests {
             runtime_feature_status_value(false, true, 0, false, true)["notificationChannelsActive"],
             serde_json::Value::Bool(false)
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_policy_status_reads_snapshots_without_starting_a_watcher() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState {
+            store: crate::config::ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(CodeyConfig {
+                disable_trace_log_writes: false,
+                protect_crashpad_pending: false,
+                ..CodeyConfig::default()
+            }),
+            config_load_error: None,
+            ..AppState::default()
+        });
+        state
+            .trace_log_guard_stats
+            .record_failure("Trace check failed".into());
+        state
+            .crashpad_pending_stats
+            .record_failure(false, "Crashpad check failed".into());
+        let trace = state.trace_log_guard_stats.snapshot();
+        let crashpad = state.crashpad_pending_stats.snapshot();
+
+        let status = super::runtime_status(&state).await.unwrap();
+
+        assert!(!super::super::storage_guards::trace_guard_watcher_running(&state).await);
+        assert_eq!(status["featurePolicy"]["applied"], serde_json::Value::Null);
+        assert_eq!(status["featurePolicy"]["traceWatcherActive"], false);
+        assert_eq!(
+            status["featurePolicy"]["traceProtection"],
+            serde_json::to_value(&trace).unwrap()
+        );
+        assert_eq!(
+            status["featurePolicy"]["crashpadProtection"],
+            serde_json::to_value(&crashpad).unwrap()
+        );
+        assert!(!directory.path().join("config.json").exists());
+    }
+
+    #[tokio::test]
+    async fn shutdown_stops_a_trace_watcher_waiting_for_a_diagnostic_operation() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = Arc::new(AppState {
+            store: crate::config::ConfigStore::new(directory.path().join("config.json")),
+            config: tokio::sync::RwLock::new(CodeyConfig {
+                disable_trace_log_writes: false,
+                protect_crashpad_pending: false,
+                ..CodeyConfig::default()
+            }),
+            config_load_error: None,
+            ..AppState::default()
+        });
+        let _diagnostic = state.diagnostic_storage_operation.lock().await;
+        super::super::storage_guards::start_trace_guard_watcher(&state).await;
+        assert!(super::super::storage_guards::trace_guard_watcher_running(&state).await);
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while Arc::strong_count(&state) == 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("watcher should be waiting for the held diagnostic lock");
+
+        tokio::time::timeout(Duration::from_secs(1), super::begin_shutdown(&state))
+            .await
+            .expect("shutdown must cancel a scan waiting for the diagnostic lock");
+
+        assert!(state.is_shutting_down());
+        assert!(!super::super::storage_guards::trace_guard_watcher_running(&state).await);
+        assert_eq!(state.trace_log_guard_stats.snapshot().captured_at, 0);
     }
 
     #[tokio::test]

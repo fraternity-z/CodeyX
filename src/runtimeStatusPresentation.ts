@@ -3,6 +3,7 @@ import type {
   InjectionScriptStatus,
   RuntimeStatus,
 } from "./App.types";
+import { confirmedDiskProtections } from "./features/feature-policy";
 
 type OptimizationFeatureIcon =
   | "code"
@@ -29,6 +30,7 @@ type OptimizationRuntimeStatus = Pick<
   | "activeNotificationChannelCount"
   | "traceLogWriteProtectionActive"
   | "crashpadDiskProtectionActive"
+  | "featurePolicy"
 >;
 
 type InjectionStatusSummary = {
@@ -95,10 +97,8 @@ export function buildEnabledOptimizationFeatures(
     });
   }
 
-  const traceWriteProtectionActive =
-    status.traceLogWriteProtectionActive === true;
-  const crashpadDiskProtectionActive =
-    status.crashpadDiskProtectionActive === true;
+  const { trace: traceWriteProtectionActive, crashpad: crashpadDiskProtectionActive } =
+    confirmedDiskProtections(status);
   if (traceWriteProtectionActive || crashpadDiskProtectionActive) {
     const protectionDetail =
       traceWriteProtectionActive && crashpadDiskProtectionActive

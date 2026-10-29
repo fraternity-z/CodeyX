@@ -22,6 +22,7 @@ const ORPHAN_FILE_QUIET_PERIOD: Duration = Duration::from_secs(24 * 60 * 60);
 pub struct CrashpadPendingStatsSnapshot {
     pub pending: bool,
     pub captured_at: u64,
+    pub last_successful_at: Option<u64>,
     pub directories_found: usize,
     pub reports_found: usize,
     pub complete_reports: usize,
@@ -49,14 +50,6 @@ impl CrashpadPendingStatsSnapshot {
             ..Self::default()
         }
     }
-
-    pub fn pending(protection_enabled: bool) -> Self {
-        Self {
-            pending: true,
-            captured_at: timestamp_seconds(SystemTime::now()),
-            ..Self::idle(protection_enabled)
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,18 +74,28 @@ impl CrashpadPendingStatsHandle {
         if current.pending {
             return false;
         }
-        *current = CrashpadPendingStatsSnapshot::pending(protection_enabled);
+        current.pending = true;
+        current.protection_enabled = protection_enabled;
         true
     }
 
-    pub fn replace(&self, snapshot: CrashpadPendingStatsSnapshot) {
-        match self.snapshot.write() {
-            Ok(mut current) => *current = snapshot,
-            Err(poisoned) => *poisoned.into_inner() = snapshot,
-        }
+    pub fn snapshot(&self) -> CrashpadPendingStatsSnapshot {
+        self.snapshot
+            .read()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
     }
 
-    pub fn replace_if_idle(&self, snapshot: CrashpadPendingStatsSnapshot) -> bool {
+    pub fn replace(&self, mut snapshot: CrashpadPendingStatsSnapshot) {
+        let mut current = self
+            .snapshot
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        update_last_successful_at(&mut snapshot, &current);
+        *current = snapshot;
+    }
+
+    pub fn replace_if_idle(&self, mut snapshot: CrashpadPendingStatsSnapshot) -> bool {
         let mut current = match self.snapshot.write() {
             Ok(current) => current,
             Err(poisoned) => poisoned.into_inner(),
@@ -100,9 +103,36 @@ impl CrashpadPendingStatsHandle {
         if current.pending {
             return false;
         }
+        update_last_successful_at(&mut snapshot, &current);
         *current = snapshot;
         true
     }
+
+    pub fn record_failure(&self, protection_enabled: bool, error: String) {
+        let mut current = self
+            .snapshot
+            .write()
+            .unwrap_or_else(|error| error.into_inner());
+        current.pending = false;
+        current.captured_at = timestamp_seconds(SystemTime::now());
+        current.protection_enabled = protection_enabled;
+        current.errors = vec![error];
+    }
+}
+
+fn update_last_successful_at(
+    snapshot: &mut CrashpadPendingStatsSnapshot,
+    previous: &CrashpadPendingStatsSnapshot,
+) {
+    snapshot.last_successful_at = if snapshot.captured_at > 0
+        && !snapshot.pending
+        && snapshot.errors.is_empty()
+        && !snapshot.over_limit
+    {
+        Some(snapshot.captured_at)
+    } else {
+        previous.last_successful_at
+    };
 }
 
 impl Default for CrashpadPendingStatsHandle {
@@ -289,6 +319,7 @@ impl PendingInventory {
         CrashpadPendingStatsSnapshot {
             pending: false,
             captured_at: timestamp_seconds(SystemTime::now()),
+            last_successful_at: None,
             directories_found: self.directories_found,
             reports_found: self.reports.len(),
             complete_reports: self.complete_reports(),
@@ -399,11 +430,13 @@ fn cleanup(
         }
     }
 
-    let snapshot = inventory(pending_directories).into_snapshot(protection_enabled);
+    let mut snapshot = inventory(pending_directories).into_snapshot(protection_enabled);
     report.bytes_after = snapshot.pending_bytes;
     report.bytes_reclaimed = report.bytes_before.saturating_sub(report.bytes_after);
     report.still_over_limit = snapshot.pending_bytes > policy.hard_limit_bytes;
     report.errors.extend(snapshot.errors.iter().cloned());
+    snapshot.over_limit = report.still_over_limit;
+    snapshot.errors = report.errors.clone();
     CrashpadGuardRun {
         cleanup: report,
         snapshot,
@@ -658,6 +691,54 @@ mod tests {
         assert_eq!(snapshot.directories_found, 0);
         assert_eq!(snapshot.files_found, 0);
         assert!(!pending.exists());
+    }
+
+    #[test]
+    fn guard_health_keeps_success_time_but_reports_failed_and_over_limit_checks() {
+        let stats = CrashpadPendingStatsHandle::idle(true);
+        let healthy = CrashpadPendingStatsSnapshot {
+            captured_at: 10,
+            pending_bytes: 7,
+            ..CrashpadPendingStatsSnapshot::idle(true)
+        };
+        stats.replace(healthy.clone());
+        assert_eq!(stats.snapshot().last_successful_at, Some(10));
+        assert!(stats.begin_refresh(true));
+        assert_eq!(stats.snapshot().last_successful_at, Some(10));
+        assert_eq!(stats.snapshot().pending_bytes, 7);
+        stats.record_failure(true, "cleanup task failed".into());
+        assert!(!stats.snapshot().pending);
+        assert_eq!(stats.snapshot().errors, ["cleanup task failed"]);
+        assert_eq!(stats.snapshot().last_successful_at, Some(10));
+        stats.replace(CrashpadPendingStatsSnapshot {
+            captured_at: 20,
+            over_limit: true,
+            ..healthy.clone()
+        });
+        assert_eq!(stats.snapshot().last_successful_at, Some(10));
+        assert!(stats.snapshot().over_limit);
+        stats.replace(CrashpadPendingStatsSnapshot {
+            captured_at: 30,
+            ..healthy
+        });
+        assert_eq!(stats.snapshot().last_successful_at, Some(30));
+        assert!(stats.snapshot().errors.is_empty());
+    }
+
+    #[test]
+    fn cleanup_snapshot_carries_inventory_and_cleanup_errors() {
+        let directory = tempfile::tempdir().unwrap();
+        let invalid = directory.path().join("not-a-directory");
+        fs::write(&invalid, b"not a directory").unwrap();
+        let run = cleanup(
+            &[invalid],
+            CleanupMode::EnforceLimit,
+            CleanupPolicy::default(),
+            true,
+        );
+        assert!(!run.cleanup.errors.is_empty());
+        assert_eq!(run.snapshot.errors, run.cleanup.errors);
+        assert_eq!(run.snapshot.over_limit, run.cleanup.still_over_limit);
     }
 
     #[test]

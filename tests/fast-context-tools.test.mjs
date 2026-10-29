@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
+import { createModuleGraph } from "./helpers/jsx-tree.mjs";
 
 const root = new URL("../", import.meta.url);
 
@@ -24,7 +24,7 @@ test("user FastCtx blocks embedded tools across the backend and settings", async
     readFile(new URL("backend/src/config.rs", root), "utf8"),
     readFile(new URL("backend/src/commands.rs", root), "utf8"),
     readFile(new URL("backend/src/commands/runtime.rs", root), "utf8"),
-    loadTypeScriptModule(new URL("src/runtimeStatusPresentation.ts", root)),
+    createModuleGraph(new URL("src/runtimeStatusPresentation.ts", root)).exports,
     readFile(new URL("src/features/configuration/useConfigurationController.ts", root), "utf8"),
   ]);
   const uiSource = `${appSource}\n${sectionsSource}`;

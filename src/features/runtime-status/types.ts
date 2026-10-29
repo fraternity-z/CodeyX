@@ -5,7 +5,7 @@ export type StatusPollTask = {
   delayIndex: number;
   delays: readonly number[];
   errors: number;
-  kind: "injection" | "restart" | "config";
+  kind: "injection" | "restart" | "config" | "policy";
   nextAt: number;
   pending: (next: RuntimeStatus) => boolean;
   refreshesInjectionStatus: boolean;

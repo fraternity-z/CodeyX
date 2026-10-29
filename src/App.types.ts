@@ -1,4 +1,5 @@
 import type { NotificationChannel } from "./features/notifications";
+import type { FeaturePolicyRuntime } from "./features/feature-policy";
 
 export type UpstreamProtocol =
   | "official"
@@ -243,6 +244,7 @@ export type OfficialAccountsResult = {
 
 export type RuntimeStatus = {
   running: boolean;
+  featurePolicy?: FeaturePolicyRuntime;
   configApply?: ConfigApplyStatus | null;
   remoteCompaction?: {
     configured: boolean;

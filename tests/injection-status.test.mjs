@@ -5,6 +5,7 @@ import { flushMicrotasks } from "./helpers/flush.mjs";
 
 import { loadTypeScriptModule } from "./helpers/load-typescript-module.mjs";
 import { createModuleGraph } from "./helpers/jsx-tree.mjs";
+import { featurePolicyRuntimeFixture } from "./helpers/feature-policy.mjs";
 
 const root = new URL("../", import.meta.url);
 const { createStatusPollScheduler } = createModuleGraph(new URL("src/features/runtime-status/useStatusPollingController.ts", root)).exports;
@@ -49,9 +50,9 @@ function createFakeClock() {
 }
 
 test("runtime feature presentation exposes only confirmed user-facing behavior", async () => {
-  const { buildEnabledOptimizationFeatures } = await loadTypeScriptModule(
+  const { buildEnabledOptimizationFeatures } = createModuleGraph(
     new URL("src/runtimeStatusPresentation.ts", root),
-  );
+  ).exports;
   const features = buildEnabledOptimizationFeatures(
     {
       running: true,
@@ -91,6 +92,7 @@ test("runtime feature presentation exposes only confirmed user-facing behavior",
       activeNotificationChannelCount: 2,
       traceLogWriteProtectionActive: true,
       crashpadDiskProtectionActive: true,
+      featurePolicy: featurePolicyRuntimeFixture().featurePolicy,
     },
     {
       userConfigured: true,
@@ -133,9 +135,9 @@ test("runtime feature presentation exposes only confirmed user-facing behavior",
 });
 
 test("injection status summary separates internal failures from feature verification", async () => {
-  const { summarizeInjectionScripts } = await loadTypeScriptModule(
+  const { summarizeInjectionScripts } = createModuleGraph(
     new URL("src/runtimeStatusPresentation.ts", root),
-  );
+  ).exports;
   const summary = summarizeInjectionScripts([
     {
       id: "internal-pending",
@@ -266,6 +268,54 @@ test("status poll scheduler never overlaps requests and clear cancels queued wor
   await flushMicrotasks();
   assert.equal(await fake.runNext(), false);
   assert.equal(requests, 1);
+});
+
+test("active policy snapshots refresh at low frequency and stop on hide, stop, or repeated errors", async (t) => {
+  for (const outcome of ["healthy", "hidden", "stopped", "legacy", "runtime-stopped", "errors"]) {
+    const fake = createFakeClock();
+    t.mock.method(Date, "now", fake.clock.now);
+    const previousWindow = globalThis.window;
+    globalThis.window = fake.clock;
+    const cleanups = [];
+    const requests = [];
+    const errors = [];
+    const ref = { current: null };
+    const { useStatusPollingController } = createModuleGraph(
+      new URL("src/features/runtime-status/useStatusPollingController.ts", root),
+      { stubs: { react: {
+        useRef: () => ref,
+        useEffect: effect => {
+          const cleanup = effect();
+          if (cleanup) cleanups.push(cleanup);
+        },
+      } } },
+    ).exports;
+    const status = featurePolicyRuntimeFixture();
+    if (outcome === "legacy") delete status.featurePolicy;
+    if (outcome === "stopped") status.running = false;
+    try {
+      useStatusPollingController({
+        active: outcome !== "hidden", revision: 0, status, restartStatusError: null,
+        setRestartStatusError: error => errors.push(error),
+        requestRuntimeStatus: async refresh => {
+          requests.push({ refresh, at: fake.clock.now() });
+          if (outcome === "errors") throw new Error("disconnected");
+          return { ...status, running: outcome !== "runtime-stopped" };
+        },
+      });
+      const expected = outcome === "healthy" ? 12 : outcome === "errors" ? STATUS_POLL_MAX_CONSECUTIVE_ERRORS : outcome === "runtime-stopped" ? 1 : 0;
+      for (let index = 0; index < expected; index++) assert.equal(await fake.runNext(), true, outcome);
+      assert.deepEqual(requests, Array.from({ length: expected }, (_, index) => ({ refresh: false, at: (index + 1) * 30_000 })), outcome);
+      assert.equal(errors.length, outcome === "errors" ? 1 : 0, outcome);
+      if (outcome !== "healthy") assert.equal(await fake.runNext(), false, outcome);
+    } finally {
+      for (const cleanup of cleanups.reverse()) cleanup();
+      assert.equal(await fake.runNext(), false, "unmount must cancel the next policy refresh");
+      if (previousWindow === undefined) delete globalThis.window;
+      else globalThis.window = previousWindow;
+      t.mock.restoreAll();
+    }
+  }
 });
 
 test("restart polling reports exhaustion and can resume after a manual status query", async () => {
