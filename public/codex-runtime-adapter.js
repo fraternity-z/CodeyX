@@ -1,7 +1,7 @@
 // Codex's private desktop interfaces live behind this adapter. Installing it
 // does not mount controls, observe the DOM, or start background polling.
 (() => {
-  const version = 4;
+  const version = 5;
   const previous = window.__codeyNativeRuntime;
   if (previous?.version === version && previous.isActive?.()) return;
   previous?.dispose?.();
@@ -472,6 +472,25 @@
     return controller.manager.requestClient;
   };
 
+  const ensureRequestSourceGate = () => waitForNativeSessionOperation(async () => {
+    if (window.__codeyModelRequestSourceGateInstalled === true) return true;
+    // Preloaded local modules can install the source gate before account/network hydration.
+    const urls = codexAppAssetUrls().filter(url => url.startsWith("app://")
+      && /\/(?:app-shared|app-initial)(?:-[^/?]+)?\.js(?:\?.*)?$/.test(url))
+      .sort((left, right) => Number(right.includes("app-shared-")) - Number(left.includes("app-shared-")));
+    for (const url of urls) {
+      try {
+        if (typeof window.__codeyImportCodexAsset === "function") await window.__codeyImportCodexAsset(url);
+        else await import(url);
+      } catch {
+        // A concrete native client remains the fallback when a module cannot load.
+      }
+      if (disposed) throw unavailableCapability("modelRouting");
+      if (window.__codeyModelRequestSourceGateInstalled === true) return true;
+    }
+    return false;
+  });
+
   const loadCodexSignalDispatcher = async () => {
     const controller = await loadCodexSessionController();
     if (disposed) throw unavailableCapability("session");
@@ -818,6 +837,7 @@
     version,
     isActive: () => !disposed,
     loadSessionController: loadCodexSessionController,
+    ensureRequestSourceGate,
     discoverAppAssetUrls: discoverCodexAppAssetUrls,
     waitForOperation: waitForNativeSessionOperation,
     dispose() {
