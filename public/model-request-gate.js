@@ -5,7 +5,6 @@
   }) => {
     let disposed = false;
     let pending = null;
-    const sourceGateReady = () => !disposed && window.__codeyModelRequestSourceGateInstalled === true;
     const restorers = [];
     const restore = () => {
       for (const undo of restorers.splice(0).reverse()) undo();
@@ -60,28 +59,15 @@
     return Object.freeze({
       ensure() {
         if (disposed) return Promise.reject(new Error("模型请求校验已重新加载"));
-        if (nativeSelectionOnly || sourceGateReady() || restorers.length) {
+        if (nativeSelectionOnly || window.__codeyModelRequestSourceGateInstalled === true || restorers.length) {
           return Promise.resolve(true);
         }
         if (pending) return pending;
         pending = Promise.resolve().then(async () => {
           const client = window.__codeyAppServerRequestClients?.get?.("local");
           if (client) return install(client);
-          try {
-            await window.__codeyNativeRuntime?.ensureRequestSourceGate?.();
-          } catch {
-            // Native hosts and older bundles can still validate a concrete client.
-          }
-          if (disposed) throw new Error("模型请求校验已重新加载");
-          if (sourceGateReady()) return true;
           if (typeof window.__codeyLoadCodexRequestClient !== "function") throw new Error("模型请求校验尚未就绪");
-          try {
-            const discovered = await window.__codeyLoadCodexRequestClient();
-            return sourceGateReady() ? true : install(discovered);
-          } catch (error) {
-            if (sourceGateReady()) return true;
-            throw error;
-          }
+          return install(await window.__codeyLoadCodexRequestClient());
         }).finally(() => { pending = null; });
         return pending;
       },

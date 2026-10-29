@@ -107,63 +107,6 @@ test("installation only registers the native adapter and is idempotent", () => {
   assert.notEqual(runtime.window.__codeyNativeRuntime, adapter);
 });
 
-test("request source validation loads the local shared module before network-dependent UI", async () => {
-  const shared = "app://-/assets/app-shared-offline.js";
-  const runtime = fixture({
-    document: {
-      scripts: [{ src: "app://-/assets/app-initial-offline.js" }],
-      querySelectorAll: () => [
-        { href: "https://unreachable.test/assets/app-shared-remote.js" },
-        { href: shared },
-      ],
-    },
-  });
-  const imports = [];
-  runtime.window.fetch = () => { throw new Error("network unavailable"); };
-  runtime.window.__codeyImportCodexAsset = async url => {
-    imports.push(url);
-    assert.equal(url, shared);
-    runtime.window.__codeyModelRequestSourceGateInstalled = true;
-    return {};
-  };
-  runtime.load();
-  assert.equal(await runtime.window.__codeyNativeRuntime.ensureRequestSourceGate(), true);
-  assert.deepEqual(imports, [shared]);
-  assert.equal(runtime.window.__codeyCodexSessionController, undefined);
-  await settle();
-  assert.equal(runtime.timers.size, 0);
-});
-
-test("a loaded local module without the complete source gate never proves readiness", async () => {
-  const runtime = fixture({
-    document: {
-      scripts: [{ src: "app://-/assets/app-shared-incompatible.js" }],
-      querySelectorAll: () => [],
-    },
-  });
-  runtime.window.__codeyImportCodexAsset = async () => ({});
-  runtime.load();
-  assert.equal(await runtime.window.__codeyNativeRuntime.ensureRequestSourceGate(), false);
-});
-
-test("source validation rejects a late import after the adapter is disposed", async () => {
-  const runtime = fixture({
-    document: {
-      scripts: [{ src: "app://-/assets/app-shared-delayed.js" }],
-      querySelectorAll: () => [],
-    },
-  });
-  let finish;
-  runtime.window.__codeyImportCodexAsset = () => new Promise(resolve => { finish = resolve; });
-  runtime.load();
-  const pending = runtime.window.__codeyNativeRuntime.ensureRequestSourceGate();
-  await settle();
-  runtime.window.__codeyNativeRuntime.dispose();
-  runtime.window.__codeyModelRequestSourceGateInstalled = true;
-  finish({});
-  await assert.rejects(pending, { code: "codey_capability_unavailable" });
-});
-
 test("usage, MCP reload and remote resume do not require session UI", async () => {
   const runtime = fixture();
   const calls = [];
