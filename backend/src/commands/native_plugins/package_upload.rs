@@ -31,7 +31,7 @@ struct Upload {
     name: String,
     size: u64,
     ready: bool,
-    touched: Instant,
+    expires_at: Instant,
 }
 
 #[derive(Default)]
@@ -42,7 +42,7 @@ struct Uploads {
 impl Uploads {
     fn receive(&mut self, value: Value) -> Result<Value, String> {
         self.files
-            .retain(|_, upload| upload.touched.elapsed() < UPLOAD_LIFETIME);
+            .retain(|_, upload| upload.expires_at > Instant::now());
         let chunk: Chunk = serde_json::from_value(value)
             .map_err(|error| format!("插件包上传参数无效：{error}"))?;
         if chunk.name.len() > 255
@@ -79,7 +79,7 @@ impl Uploads {
                         name: chunk.name.clone(),
                         size: 0,
                         ready: false,
-                        touched: Instant::now(),
+                        expires_at: Instant::now() + UPLOAD_LIFETIME,
                     },
                 );
                 id
@@ -101,7 +101,7 @@ impl Uploads {
                 .write_all(&bytes)
                 .map_err(|error| error.to_string())?;
             upload.size += bytes.len() as u64;
-            upload.touched = Instant::now();
+            upload.expires_at = Instant::now() + UPLOAD_LIFETIME;
             if !chunk.complete {
                 return Ok(json!({"uploadId": id}));
             }
@@ -218,7 +218,7 @@ mod tests {
         }
         assert!(uploads.receive(chunk(None, 0, b"data", false)).is_err());
         for upload in uploads.files.values_mut() {
-            upload.touched = Instant::now() - UPLOAD_LIFETIME;
+            upload.expires_at = Instant::now();
         }
         uploads.receive(chunk(None, 0, b"data", false)).unwrap();
         assert_eq!(uploads.files.len(), 1);

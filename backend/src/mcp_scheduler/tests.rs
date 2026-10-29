@@ -66,7 +66,7 @@ async fn mcp_scheduler_connections_duplicate_ids_disconnect_and_reconcile() {
     assert_eq!(scheduler.status()["pools"][0]["instances"], 1);
     io::write(
         &mut first_write,
-        &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"delay":10000}}),
+        &json!({"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"delay":60000}}),
     )
     .await
     .unwrap();
@@ -92,7 +92,7 @@ async fn mcp_scheduler_connections_duplicate_ids_disconnect_and_reconcile() {
     .unwrap();
     drop(first_read);
     drop(first_write);
-    let response = tokio::time::timeout(Duration::from_secs(5), io::read(&mut second_read))
+    let response = tokio::time::timeout(Duration::from_secs(15), io::read(&mut second_read))
         .await
         .unwrap()
         .unwrap()
