@@ -79,8 +79,9 @@ const createEnvironment = (options = {}) => {
       latestObserver = this;
     }
 
-    observe() {
+    observe(_target, options) {
       this.observed = true;
+      this.options = options;
     }
 
     disconnect() {
@@ -190,7 +191,8 @@ const createEnvironment = (options = {}) => {
       anchor.setAttribute("data-above-composer-conversation-id", id);
     },
     emitMutation: (mutations = [{ type: "childList", target: documentElement }]) => {
-      if (observer?.observed) observer.callback(mutations);
+      if (observer?.observed) observer.callback(mutations.filter(mutation => mutation.type !== "attributes"
+        || observer.options?.attributeFilter?.includes(mutation.attributeName)));
     },
     emitAnchorMutation: () => {
       observer?.callback?.([
@@ -243,6 +245,114 @@ const assertExpanded = (env, expanded) => {
   assert.equal(summary(env).getAttribute("aria-expanded"), String(expanded));
   assert.equal(panel(env).hidden, !expanded);
 };
+
+test("mounts promptly when a textarea itself is inserted beside the composer marker", async () => {
+  const env = createEnvironment({ inputVisible: false, statsBySession: { "conversation-1": STATS } });
+  try {
+    env.textarea.remove();
+    await flushTimers(30);
+    assert.equal(env.bar(), null);
+    env.textarea.visible = true;
+    env.scope.appendChild(env.textarea);
+    env.emitMutation([{ type: "childList", target: env.scope, addedNodes: [env.textarea] }]);
+    await flushTimers(160);
+    assert.equal(metric(env.bar(), "total"), "132k tok");
+    assert.equal(env.calls.length, 1);
+  } finally { env.dispose(); }
+});
+
+test("restores a composer promptly when its hidden attribute is removed", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    env.scope.setAttribute("hidden", "");
+    env.emitMutation([{ type: "attributes", target: env.scope, attributeName: "hidden" }]);
+    await flushTimers(160);
+    assert.equal(env.bar().hidden, true);
+    env.scope.removeAttribute("hidden");
+    env.emitMutation([{ type: "attributes", target: env.scope, attributeName: "hidden" }]);
+    await flushTimers(160);
+    assert.equal(env.bar().hidden, false);
+    assert.equal(metric(env.bar(), "total"), "132k tok");
+  } finally { env.dispose(); }
+});
+
+for (const attribute of ["data-session-id", "data-thread-id", "data-app-action-sidebar-thread-id", "data-app-action-sidebar-thread-active"]) {
+  test(`refreshes fallback session context on ${attribute} changes`, async () => {
+    const env = createEnvironment({ anchor: false, statsBySession: {
+      "conversation-1": STATS, "conversation-2": { ...STATS, totalTokens: 42 },
+    } });
+    try {
+      const marker = env.document.createElement("div");
+      if (attribute.startsWith("data-app-action-sidebar-thread-")) {
+        marker.setAttribute("data-app-action-sidebar-thread-id", "conversation-1");
+        marker.setAttribute("data-app-action-sidebar-thread-active", "true");
+      } else marker.setAttribute(attribute, "conversation-1");
+      env.scope.appendChild(marker);
+      await flushTimers(30);
+      assert.equal(env.snapshot().sessionId, "conversation-1");
+      if (attribute === "data-app-action-sidebar-thread-active") {
+        marker.setAttribute(attribute, "false");
+        const active = env.document.createElement("div");
+        active.setAttribute("data-app-action-sidebar-thread-id", "conversation-2");
+        active.setAttribute(attribute, "true");
+        env.scope.appendChild(active);
+      } else marker.setAttribute(attribute, "conversation-2");
+      env.emitMutation([{ type: "attributes", target: marker, attributeName: attribute }]);
+      await flushTimers(160);
+      assert.equal(env.snapshot().sessionId, "conversation-2");
+      assert.equal(env.snapshot().stats.totalTokens, 42);
+    } finally { env.dispose(); }
+  });
+}
+
+test("refreshes fallback context when an active sidebar item itself is inserted", async () => {
+  const env = createEnvironment({ anchor: false, statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    assert.equal(env.snapshot().sessionId, "");
+    const active = env.document.createElement("div");
+    active.setAttribute("data-app-action-sidebar-thread-id", "conversation-1");
+    active.setAttribute("data-app-action-sidebar-thread-active", "true");
+    env.scope.appendChild(active);
+    env.emitMutation([{ type: "childList", target: env.scope, addedNodes: [active] }]);
+    await flushTimers(160);
+    assert.equal(env.snapshot().sessionId, "conversation-1");
+    assert.equal(env.snapshot().stats.totalTokens, STATS.totalTokens);
+  } finally { env.dispose(); }
+});
+
+test("ignores child mutations inside the stats panel", async () => {
+  const env = createEnvironment({ statsBySession: { "conversation-1": STATS } });
+  try {
+    await flushTimers(30);
+    const counts = observeRenderWork(env);
+    const nested = env.document.createElement("div");
+    nested.setAttribute("data-thread-id", "unrelated");
+    panel(env).appendChild(nested);
+    env.emitMutation([{ type: "childList", target: panel(env), addedNodes: [nested] }]);
+    await flushTimers(160);
+    assert.equal(counts.composerScans, 0);
+    assert.equal(env.calls.length, 1);
+  } finally { env.dispose(); }
+});
+
+test("rejects fractional or imprecise token and step counts", async () => {
+  const env = createEnvironment();
+  try {
+    for (const value of [1.5, "42", Number.MAX_SAFE_INTEGER + 1, -1]) {
+      env.setStats("conversation-1", { ...STATS, turnCount: value, totalTokens: value,
+        inputTokens: value, cachedInputTokens: value, outputTokens: value,
+        lastTurn: { ...LAST_TURN, stepCount: value } });
+      env.refresh();
+      await flushTimers(30);
+      assert.equal(metric(env.bar(), "total"), "—");
+      assert.equal(metric(env.bar(), "activity"), "— 轮 · — 步");
+      assert.equal(field(env.bar(), "outputTokens"), "—");
+      assert.equal(metric(env.bar(), "cache-rate"), "—");
+    }
+  } finally { env.dispose(); }
+});
 
 const observeRenderWork = (env) => {
   const counts = { composerScans: 0, textWrites: 0 };

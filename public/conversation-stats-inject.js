@@ -2,7 +2,7 @@
 // /session/stats 返回统计范围；会话 id 取自可见 composer，隐藏会话不参与。
 (() => {
   const PROBE_KEY = "__codeyConversationStats";
-  const VERSION = 9;
+  const VERSION = 10;
   const previous = window[PROBE_KEY];
   if (previous?.installed && (previous.version === VERSION || !previous.dispose)) return;
   previous?.dispose?.();
@@ -26,6 +26,13 @@
     .map((attribute) => `[${attribute}]`)
     .join(",");
   const activeThreadSelector = '[data-app-action-sidebar-thread-active="true"]';
+  const contextAttributes = [
+    ...sessionIdAttributes,
+    "data-app-action-sidebar-thread-active",
+    "data-app-action-sidebar-thread-id",
+    "hidden",
+    "aria-hidden",
+  ];
   const POLL_IDLE_MS = 3_000;
   const POLL_ACTIVE_MS = 1_100;
   const RESCAN_DEBOUNCE_MS = 120;
@@ -396,9 +403,9 @@
     }
     // 最近一轮由后端按用户 turn 归属聚合；不回退到会话累计或单次请求字段。
     for (const key of ["totalTokens", "inputTokens", "outputTokens", "cachedInputTokens", "cacheWriteInputTokens", "requests", "inFlight"]) {
-      if (!Number.isFinite(data[key]) || data[key] < 0) data[key] = null;
+      if (!Number.isSafeInteger(data[key]) || data[key] < 0) data[key] = null;
     }
-    if (!Number.isInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
+    if (!Number.isSafeInteger(data.turnCount) || data.turnCount < 0) data.turnCount = null;
     const formattedSpeed = formatSpeed(running && stale ? null : turn?.averageOutputTokensPerSecond);
     const speedKnown = formattedSpeed != null;
     const estimatedSpeed = turn?.speedIsEstimate === true;
@@ -429,7 +436,7 @@
     setText(refs["cache-rate"], rate);
     setText(refs.total, data.totalTokens == null ? "—" : `${formatTokenCount(data.totalTokens)} tok`);
     const finite = value => Number.isFinite(value) && value >= 0;
-    const count = value => finite(value) ? value.toLocaleString("zh-CN") : "—";
+    const count = value => Number.isSafeInteger(value) && value >= 0 ? value.toLocaleString("zh-CN") : "—";
     const duration = (value, average = false) => {
       if (!finite(value)) return "—";
       const seconds = value / 1000;
@@ -553,16 +560,13 @@
         const target = mutation.target;
         if (!(target instanceof HTMLElement)) continue;
         if (containsStats(target)) continue;
-        if (
-          target.hasAttribute?.(conversationAttribute)
-          || target.hasAttribute?.("hidden")
-          || target.hasAttribute?.("aria-hidden")
-        ) {
+        if (contextAttributes.includes(mutation.attributeName)) {
           scheduleRescan();
           return;
         }
         continue;
       }
+      if (containsStats(mutation.target)) continue;
       const nodes = [...(mutation.addedNodes || []), ...(mutation.removedNodes || [])];
       for (const node of nodes) {
         if (!(node instanceof HTMLElement)) continue;
@@ -576,13 +580,14 @@
         if (
           node.matches?.(sessionAttributeSelector)
           || node.querySelector?.(sessionAttributeSelector)
+          || node.matches?.(activeThreadSelector)
           || node.querySelector?.(activeThreadSelector)
         ) {
           scheduleRescan();
           return;
         }
         // 会话容器子树变化一律重扫，代价只是一次 debounce 查询。
-        if (node.querySelector?.("[contenteditable='true'], textarea")) {
+        if (node.matches?.(composerInputSelector) || node.querySelector?.(composerInputSelector)) {
           scheduleRescan();
           return;
         }
@@ -595,12 +600,7 @@
     render();
     const options = {
       attributes: true,
-      attributeFilter: [
-        conversationAttribute,
-        "data-app-action-sidebar-thread-active",
-        "hidden",
-        "aria-hidden",
-      ],
+      attributeFilter: contextAttributes,
       childList: true,
       subtree: true,
     };
