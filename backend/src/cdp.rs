@@ -260,6 +260,10 @@ impl InjectedTarget {
         self.pump.is_finished()
     }
 
+    pub async fn pump_closed(&self) {
+        self.pump.finished().await;
+    }
+
     pub async fn close(self) {
         self.pump.close().await;
     }

@@ -10,7 +10,7 @@ use anyhow::Context;
 use futures_util::stream::FuturesUnordered;
 use futures_util::{Sink, SinkExt, StreamExt};
 use serde_json::{Value, json};
-use tokio::sync::Notify;
+use tokio::sync::{Notify, watch};
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::devtools::{
@@ -36,6 +36,7 @@ pub struct BridgePumpHandle {
     task: Option<tokio::task::JoinHandle<()>>,
     closing: Arc<AtomicBool>,
     shutdown: Arc<Notify>,
+    finished: watch::Receiver<()>,
 }
 
 impl BridgePumpHandle {
@@ -43,6 +44,12 @@ impl BridgePumpHandle {
         self.task
             .as_ref()
             .is_none_or(tokio::task::JoinHandle::is_finished)
+    }
+
+    /// 发送端随消息泵释放，包含任务被中止的情况。
+    pub async fn finished(&self) {
+        let mut finished = self.finished.clone();
+        while finished.changed().await.is_ok() {}
     }
 
     pub async fn close(mut self) {
@@ -332,7 +339,9 @@ pub async fn install_bridge(
     let shutdown = Arc::new(Notify::new());
     let task_closing = Arc::clone(&closing);
     let task_shutdown = Arc::clone(&shutdown);
+    let (finished_tx, finished) = watch::channel(());
     let task = tokio::spawn(async move {
+        let _finished = finished_tx;
         if let Err(error) = run_bridge_pump(session, task_closing, task_shutdown).await {
             let _ = crate::diagnostic_log::append_diagnostic_log(
                 "bridge.pump_failed",
@@ -348,6 +357,7 @@ pub async fn install_bridge(
         task: Some(task),
         closing,
         shutdown,
+        finished,
     })
 }
 
@@ -961,6 +971,30 @@ fn next_message_id() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dropping_bridge_pump_closes_finished_notification() {
+        let (finished_tx, mut finished) = watch::channel(());
+        let task = tokio::spawn(async move {
+            let _finished = finished_tx;
+            std::future::pending::<()>().await;
+        });
+        let closing = Arc::new(AtomicBool::new(false));
+        let pump = BridgePumpHandle {
+            task: Some(task),
+            closing: closing.clone(),
+            shutdown: Arc::new(Notify::new()),
+            finished: finished.clone(),
+        };
+        drop(pump);
+        assert!(closing.load(Ordering::Acquire));
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), finished.changed())
+                .await
+                .expect("aborted pump released its notification")
+                .is_err()
+        );
+    }
 
     fn bridge_call(request_id: &str, path: &str) -> ParsedBridgeDispatch {
         ParsedBridgeDispatch::Call(BridgeCall {

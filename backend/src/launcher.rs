@@ -66,6 +66,8 @@ use process::{codex_runtime_arguments, gpu_launch_arguments};
 
 const CDP_WATCHDOG_INTERVAL: Duration = Duration::from_secs(30);
 const CDP_WATCHDOG_FAILURE_THRESHOLD: u8 = 2;
+// 页面明确答复桥接失效后，不必再等一整轮巡检才确认。
+const CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL: Duration = Duration::from_secs(5);
 // 页面端点对 CDP 命令完全没有回应：页面忙碌不成立，target 很可能已被替换。
 // 连续多轮无响应后重新发现 target，而不是一直当作"页面忙"等下去。
 const CDP_WATCHDOG_UNRESPONSIVE_THRESHOLD: u8 = 3;
@@ -1293,17 +1295,18 @@ fn spawn_injection_watchdog(
         let mut failure_counters = InjectionFailureCounters::default();
         let mut reported_health: Option<InjectionHealth> = None;
         'watchdog: loop {
+            // 已结束的泵若重建失败，仍须等待重试间隔，避免立即完成的通知空转。
+            let pump_running = !target.pump_finished();
             tokio::select! {
                 biased;
                 _ = &mut shutdown_rx => break,
-                _ = cdp::refresh_auxiliary_renderers(
-                    debug_port, target.websocket_url(), &watchdog_scripts,
-                ) => {}
-            }
-            tokio::select! {
-                biased;
-                _ = &mut shutdown_rx => break,
-                _ = interval.tick() => {}
+                _ = target.pump_closed(), if pump_running => {}
+                _ = async {
+                    cdp::refresh_auxiliary_renderers(
+                        debug_port, target.websocket_url(), &watchdog_scripts,
+                    ).await;
+                    interval.tick().await;
+                } => {}
             }
             // A finished message pump means the in-page bridge can no longer
             // reach the backend at all. Probing again cannot change that, so
@@ -1314,6 +1317,7 @@ fn spawn_injection_watchdog(
                 tokio::select! {
                     biased;
                     _ = &mut shutdown_rx => break 'watchdog,
+                    _ = target.pump_closed() => InjectionHealth::BridgeClosed,
                     result = cdp::is_target_healthy(target.websocket_url()) => {
                         match result {
                             Ok(cdp::TargetHealth::Healthy) => InjectionHealth::Healthy,
@@ -1372,7 +1376,13 @@ fn spawn_injection_watchdog(
                 );
                 reported_health = Some(health);
             }
-            if !watchdog_should_reinject(&mut failure_counters, health) {
+            let reinject = watchdog_should_reinject(&mut failure_counters, health);
+            if !reinject {
+                interval.reset_after(if health == InjectionHealth::Unhealthy {
+                    CDP_WATCHDOG_UNHEALTHY_CONFIRM_INTERVAL
+                } else {
+                    CDP_WATCHDOG_INTERVAL
+                });
                 continue;
             }
             let reinjection = tokio::select! {
@@ -1428,6 +1438,7 @@ fn spawn_injection_watchdog(
                     failure_counters = InjectionFailureCounters::after_failed_reinjection();
                 }
             }
+            interval.reset_after(CDP_WATCHDOG_INTERVAL);
         }
         target.close().await;
     });
@@ -2644,3 +2655,6 @@ mod tests;
 
 #[cfg(test)]
 mod watchdog_tests;
+
+#[cfg(test)]
+mod watchdog_recovery_tests;
