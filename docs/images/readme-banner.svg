@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" fill="none" role="img" aria-labelledby="title description">
+  <title id="title">CodeyX 桌面增强工作台</title>
+  <desc id="description">深绿色背景上的 CodeyX 标识与功能示意：模型与账号、会话与协作、扩展与工具。</desc>
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="1200" y2="380" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102C24" />
+      <stop offset="1" stop-color="#081B17" />
+    </linearGradient>
+    <radialGradient id="glow" cx="0" cy="0" r="1" gradientTransform="translate(921 173) rotate(90) scale(290 420)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#3EDDAB" stop-opacity=".12" />
+      <stop offset="1" stop-color="#3EDDAB" stop-opacity="0" />
+    </radialGradient>
+    <linearGradient id="accent" x1="66" y1="76" x2="330" y2="76" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#68E3B7" />
+      <stop offset="1" stop-color="#68E3B7" stop-opacity="0" />
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="380" rx="24" fill="url(#background)" />
+  <rect width="1200" height="380" rx="24" fill="url(#glow)" />
+  <rect x=".5" y=".5" width="1199" height="379" rx="23.5" stroke="#3A6555" stroke-opacity=".6" />
+  <g stroke="#68E3B7" stroke-opacity=".06">
+    <path d="M660 0V380M740 0V380M820 0V380M900 0V380M980 0V380M1060 0V380M1140 0V380" />
+    <path d="M620 60H1200M620 140H1200M620 220H1200M620 300H1200" />
+  </g>
+  <g font-family="Segoe UI, Microsoft YaHei, Noto Sans CJK SC, sans-serif">
+    <rect x="66" y="68" width="264" height="3" rx="1.5" fill="url(#accent)" />
+    <text x="66" y="116" fill="#A0C4B4" font-size="16" letter-spacing="4">CODEX DESKTOP COMPANION</text>
+    <text x="62" y="215" fill="#F0FAF4" font-size="92" font-weight="700" letter-spacing="-4">Codey<tspan fill="#68E3B7">X</tspan></text>
+    <text x="68" y="267" fill="#D1E9DC" font-size="30" font-weight="500">让模型、账号与任务协作</text>
+    <text x="68" y="316" fill="#95BAA9" font-size="18">一个工作台，连接你的 Codex 工作流。</text>
+    <g stroke="#66D6AB" stroke-opacity=".42" stroke-width="2">
+      <path d="M768 190H810Q826 190 826 174V104Q826 88 842 88H866" />
+      <path d="M768 190H866" />
+      <path d="M768 190H810Q826 190 826 206V276Q826 292 842 292H866" />
+    </g>
+    <rect x="658" y="140" width="110" height="100" rx="26" fill="#1C4637" stroke="#59C79A" />
+    <g stroke="#D8F6E6" stroke-width="6" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M687 174L703 190L687 206" />
+      <path d="M713 206H739" />
+    </g>
+    <g fill="#15382D" stroke="#3D705A">
+      <rect x="866" y="52" width="266" height="72" rx="16" />
+      <rect x="866" y="154" width="266" height="72" rx="16" />
+      <rect x="866" y="256" width="266" height="72" rx="16" />
+    </g>
+    <g stroke="#78DDB3" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="891" y="74" width="27" height="27" rx="6" />
+      <path d="M897 84H912M897 91H907" />
+      <path d="M894 176H914V190H905L898 196V190H894Z" />
+      <path d="M889 183H884V202H905V197" />
+      <path d="M892 278H914V300H892ZM903 272V278M903 300V306M886 289H892M914 289H920" />
+    </g>
+    <g fill="#E0F3E8" font-size="26" font-weight="500">
+      <text x="938" y="97">模型与账号</text>
+      <text x="938" y="199">会话与协作</text>
+      <text x="938" y="301">扩展与工具</text>
+    </g>
+    <g fill="#78DDB3">
+      <circle cx="866" cy="88" r="4" />
+      <circle cx="866" cy="190" r="4" />
+      <circle cx="866" cy="292" r="4" />
+    </g>
+  </g>
+</svg>
