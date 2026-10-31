@@ -1,6 +1,7 @@
 import { memo, useState, useEffect, useRef } from "react";
 import { toast } from "@heroui/react";
 import {
+  Badge,
   Button,
   Dialog,
   DialogContent,
@@ -77,9 +78,9 @@ function CodexExtensionsPageComponent({
           kind === "mcp" ? <IconServer size={15} /> : <IconBook2 size={15} />
         }
         badge={
-          <span className="codey-badge codey-badge-info">
+          <Badge variant="info">
             {kind === "mcp" ? "Model Context Protocol" : "Codex 增强技能"}
-          </span>
+          </Badge>
         }
         description={
           kind === "mcp"
@@ -99,7 +100,7 @@ function CodexExtensionsPageComponent({
               disabled={busy || loading}
               onClick={() => void controller.refresh()}
             >
-              <IconRefresh size={14} className="mr-1 inline-block" />
+              <IconRefresh size={14} aria-hidden="true" />
               刷新
             </Button>
             <Button
@@ -107,7 +108,7 @@ function CodexExtensionsPageComponent({
               disabled={unavailable}
               onClick={() => controller.startDraft(kind)}
             >
-              <IconPlus size={14} className="mr-1 inline-block" />
+              <IconPlus size={14} aria-hidden="true" />
               {kind === "mcp" ? "新增 MCP" : "新增 Skill"}
             </Button>
             {kind === "skill" && (

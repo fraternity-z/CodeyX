@@ -442,7 +442,7 @@ export function App({
               className="h-8! whitespace-nowrap px-3 text-xs max-[520px]:w-8! max-[520px]:px-0!"
               disabled={isBusy || (!restartStatusError && (status.restartInProgress || !status.running))}
               onClick={handleRestartCodex}
-              variant="warning"
+              variant={status.restartRequired || restartStatusError ? "warning" : "outline"}
             >
               {busy === "restart" || (status.restartInProgress && !restartStatusError) ? (
                 <LoaderCircle className="animate-spin" size={14} aria-hidden="true" />

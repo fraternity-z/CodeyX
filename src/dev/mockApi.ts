@@ -600,6 +600,7 @@ if (import.meta.env.DEV) {
       // Wait a tiny bit to simulate network delay
       await new Promise((resolve) => setTimeout(resolve, 300));
 
+      if (command === "update_install_report") return null;
       if (command === "codex_extensions") return extensionsPreview(args?.request as Record<string, unknown>);
       if (command === "builtin_tools") return builtinToolsPreview(args);
       if (command === "config_backup") return backupPreview(args);

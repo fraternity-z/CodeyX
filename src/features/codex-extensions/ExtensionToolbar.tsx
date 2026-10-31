@@ -4,7 +4,7 @@ import {
   IconSearch,
   IconUser,
 } from "@tabler/icons-react";
-import { Button, Input, Select } from "../../components/ui";
+import { Badge, Button, Input, Select } from "../../components/ui";
 import type { Inventory, Scope } from "./types";
 
 export function ExtensionScope({
@@ -50,7 +50,7 @@ export function ExtensionScope({
               disabled={busy}
               onClick={() => onMode(false)}
             >
-              <IconUser size={13} className="inline-block mr-1" />
+              <IconUser size={13} aria-hidden="true" />
               当前用户
             </button>
             <button
@@ -60,27 +60,21 @@ export function ExtensionScope({
               disabled={busy}
               onClick={() => onMode(true)}
             >
-              <IconFolderCode size={13} className="inline-block mr-1" />
+              <IconFolderCode size={13} aria-hidden="true" />
               指定项目
             </button>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <span
-            className={`codey-badge ${scope.kind === "project" ? "codey-badge-info" : "codey-badge-neutral"}`}
-          >
+          <Badge variant={scope.kind === "project" ? "info" : "secondary"}>
             {scope.kind === "project" ? "项目专属" : "全局用户"}
-          </span>
-          {inventory && (
-            <span className="codey-badge codey-badge-neutral">
-              共 {count} 项
-            </span>
-          )}
+          </Badge>
+          {inventory && <Badge variant="secondary">共 {count} 项</Badge>}
         </div>
       </div>
       {projectMode && (
         <>
-          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-[var(--color-border-subtle)]">
+          <div className="flex flex-wrap items-center gap-2 pt-1 border-t border-[var(--codey-border-subtle)]">
             <div className="min-w-0 basis-full sm:flex-1 sm:basis-auto">
               <Input
                 aria-label="项目绝对路径"
@@ -97,7 +91,7 @@ export function ExtensionScope({
               disabled={busy}
               onClick={onPick}
             >
-              <IconFolder size={14} className="mr-1 inline-block" />
+              <IconFolder size={14} aria-hidden="true" />
               选择项目
             </Button>
             <Button
@@ -117,8 +111,8 @@ export function ExtensionScope({
         </>
       )}
       {inventory && (
-        <div className="rounded-lg bg-[var(--color-bg-tertiary)] p-3 text-xs text-muted border border-[var(--color-border-subtle)] space-y-1">
-          <p className="m-0 break-all font-medium text-[var(--color-text-primary)]">
+        <div className="rounded-lg border border-[var(--codey-border-subtle)] bg-[var(--codey-surface-muted)] p-3 text-xs leading-relaxed text-muted">
+          <p className="m-0 break-all font-medium text-[var(--codey-text)]">
             当前范围：{scope.kind === "user" ? "当前用户" : scope.projectPath} ·
             共 {count} 项
           </p>
@@ -170,7 +164,7 @@ export function ExtensionFilters({
         placeholder="搜索名称、描述或路径"
         value={query}
         onChange={(event) => onQuery(event.target.value)}
-        leftSection={<IconSearch size={14} className="text-muted" />}
+        leftSection={<IconSearch size={14} className="text-muted" aria-hidden="true" />}
       />
       <Select
         aria-label="状态筛选"
